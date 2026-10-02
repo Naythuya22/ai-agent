@@ -10,19 +10,20 @@ if str(_root) not in sys.path:
 
 from tools.file import ALL_TOOLS as FILE_TOOLS
 from tools.shell import run_command
+from tools.python_runner import run_python
 from tools.android_intent import ALL_TOOLS as ANDROID_TOOLS
 from tools.web_search import ALL_TOOLS as WEB_TOOLS
 from tools.smart_search import smart_search
 
 ALL_TOOLS = (
     list(FILE_TOOLS)
-    + [run_command]
+    + [run_command, run_python]
     + list(ANDROID_TOOLS)
     + list(WEB_TOOLS)
     + [smart_search]
 )
 
 __all__ = [
-    "ALL_TOOLS", "run_command", "ANDROID_TOOLS", "WEB_TOOLS",
+    "ALL_TOOLS", "run_command", "run_python", "ANDROID_TOOLS", "WEB_TOOLS",
     "smart_search",
 ]

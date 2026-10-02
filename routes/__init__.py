@@ -19,6 +19,7 @@ from routes import (
     code,
     skills_api,
 )
+from core import auth
 
 # Registration order is irrelevant to routing (rules are matched by URL), but
 # kept in the same order the routes were originally declared in server.py.
@@ -37,10 +38,11 @@ __all__ = ["BLUEPRINTS", "register"]
 
 
 def register(app) -> None:
-    """Attach every blueprint plus the app-level safety hook to `app`."""
-    # before_request is registered on the app (not a blueprint) on purpose:
-    # a blueprint hook only fires for that blueprint's own requests, and the
-    # thermal guard must cover every endpoint.
+    """Attach every blueprint plus the app-level hooks to `app`."""
+    # Both hooks live on the app (not a blueprint) on purpose: a blueprint
+    # hook only fires for that blueprint's own requests. Auth runs first so
+    # an unauthenticated caller never reaches the thermal guard.
+    app.before_request(auth.auth_guard)
     app.before_request(safety.safety_guard)
     for bp in BLUEPRINTS:
         app.register_blueprint(bp)

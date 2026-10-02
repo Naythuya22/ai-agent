@@ -217,6 +217,39 @@ footer{position:relative;padding:12px 12px 16px;background:var(--bg);border-top:
 </div>
 <script>
 'use strict';
+// ── Shared-secret auth (Session 23) ─────────────────────────────────────
+// The token arrives as ?token= on first open, is kept in localStorage, and
+// rides on every same-origin request as X-Agent-Token. A 401 prompts once
+// and retries the same call, so the rest of the code never sees auth.
+var AUTH_KEY='ai-agent-token';
+function readToken(){try{return localStorage.getItem(AUTH_KEY)||''}catch(e){return ''}}
+(function seedToken(){
+  try{
+    var t=new URLSearchParams(location.search).get('token');
+    if(t){localStorage.setItem(AUTH_KEY,t);
+      history.replaceState(null,'',location.pathname+location.search.replace(/[?&]token=[^&]*/,'').replace(/^&/,'?')+location.hash);}
+  }catch(e){}
+})();
+var _realFetch=window.fetch.bind(window);
+window.fetch=function(input,init){
+  var url=(typeof input==='string')?input:(input&&input.url)||'';
+  var sameOrigin=url.charAt(0)==='/'||(url.indexOf(location.origin)===0&&url.length>0);
+  if(!sameOrigin)return _realFetch(input,init);
+  init=init?Object.assign({},init):{};
+  var headers=new Headers(init.headers||undefined);
+  var tok=readToken();
+  if(tok)headers.set('X-Agent-Token',tok);
+  init.headers=headers;
+  return _realFetch(input,init).then(function(res){
+    if(res.status!==401||init.__retried)return res;
+    var entered=prompt('Server token (see the server console, or the ?token= URL):',tok);
+    if(!entered)return res;
+    try{localStorage.setItem(AUTH_KEY,entered)}catch(e){}
+    init.__retried=true;
+    headers.set('X-Agent-Token',entered);
+    return _realFetch(input,init);
+  });
+};
 var state={mode:'chat',busy:false,abort:null};
 var chatEl=document.getElementById('chat');
 var inputEl=document.getElementById('input');

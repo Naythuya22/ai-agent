@@ -12,6 +12,7 @@ import json
 import urllib.error
 import urllib.request
 
+from core.auth import configured_token
 from core.log import get_logger
 
 log = get_logger("http_llm")
@@ -25,13 +26,19 @@ class HTTPLLMError(Exception):
     """HTTP-LLM specific errors."""
 
 
+def _auth_headers() -> dict:
+    """Auth enabled ဖြစ်နေရင် Bearer token ထည့် (Q3: /v1 အပါအဝင် အားလုံး)။"""
+    tok = configured_token()
+    return {"Authorization": f"Bearer {tok}"} if tok else {}
+
+
 def _post(url: str, payload: dict, timeout: float) -> dict:
     """POST JSON; return parsed dict. Raises HTTPLLMError on failure."""
     data = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(
         url,
         data=data,
-        headers={"Content-Type": "application/json"},
+        headers={"Content-Type": "application/json", **_auth_headers()},
         method="POST",
     )
     try:

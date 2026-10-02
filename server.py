@@ -5,6 +5,7 @@ runtime state is in `routes/_state.py`. Run with `python server.py`.
 """
 from __future__ import annotations
 
+import os
 import sys
 import time
 from pathlib import Path
@@ -17,6 +18,7 @@ from flask import Flask, jsonify, request
 from werkzeug.exceptions import HTTPException
 
 from config import Config, model_missing_message
+from core import auth
 from core.log import get_logger
 from routes import register
 from routes._state import get_llm
@@ -83,7 +85,23 @@ def main() -> None:
     get_llm()
     print(f"  ✅ Loaded in {time.time() - t0:.2f}s", flush=True)
 
+    # Q2: enforcement is opt-in — without a token the API is open exactly as
+    # before (that is what keeps the test suite honest). main() guarantees a
+    # token exists, so a server started this way is never accidentally open.
+    tok = auth.configured_token()
+    if not tok:
+        tok = auth.generate_token()
+        print(f"\n  Token: {tok}  (created, saved to {auth._token_file()})",
+              flush=True)
+    elif os.environ.get(auth.ENV_TOKEN):
+        print(f"\n  Token: {tok}  (from ${auth.ENV_TOKEN})", flush=True)
+    else:
+        print(f"\n  Token: {tok}  (from {auth._token_file()})", flush=True)
+
     print(f"\nServer: http://{args.host}:{args.port}", flush=True)
+    print(f"  Open:  http://{args.host}:{args.port}/?token={tok}", flush=True)
+    print("  API:   X-Agent-Token header, or Authorization: Bearer for /v1",
+          flush=True)
     print("  GET  /v1/models", flush=True)
     print("  POST /v1/chat/completions", flush=True)
     print("\nPress Ctrl+C to stop.\n", flush=True)

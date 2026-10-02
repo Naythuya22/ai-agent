@@ -10,6 +10,7 @@ import threading
 import shlex
 from pathlib import Path
 
+from core.auth import configured_token
 from core.log import get_logger
 
 log = get_logger("opencode")
@@ -83,9 +84,30 @@ def missing_install_message() -> str:
 # ── managed config ────────────────────────────────────────────────────────
 
 def bridge_config(model_id: str | None = None, base: str | None = None) -> dict:
-    # We are using OpenCode's native provider, so we return empty dict.
-    # This prevents the app from looking for a local bridge.
-    return {}
+    """Managed opencode.json content.
+
+    Native provider is the default → nothing to manage (empty dict), so the
+    app never looks for a local bridge. A caller that explicitly asks for the
+    local bridge (`base=`) gets a provider block that carries the API token —
+    Q3: /v1 is Bearer-protected, so a bridge client must authenticate.
+    """
+    if not base:
+        return {}
+    model_id = model_id or MODEL_ID
+    options = {"baseURL": base}
+    tok = configured_token()
+    if tok:
+        options["apiKey"] = tok
+    return {
+        "provider": {
+            "bridge": {
+                "npm": "@ai-sdk/openai-compatible",
+                "options": options,
+                "models": {model_id: {}},
+            }
+        },
+        "model": f"bridge/{model_id}",
+    }
 
 
 def write_bridge_config(
@@ -120,6 +142,10 @@ def env(config_file: Path | None = None, **extra) -> dict:
     out["TERM"] = "dumb"
     out["CI"] = "1"
     out["PYTHONUNBUFFERED"] = "1"
+    # Q3: the child may talk to our /v1 — hand it the same shared secret.
+    tok = configured_token()
+    if tok:
+        out["AI_AGENT_TOKEN"] = tok
     out.update(extra)
     return out
 

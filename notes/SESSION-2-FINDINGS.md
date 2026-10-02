@@ -1046,3 +1046,97 @@ tools/smart_search.py (hybrid routing)  ~155 lines
 - **full suite: 194 tests, `OK` — 0 failures** (was 193 / 26 failing)
 - `node tests/ui_autocomplete_test.js` + `ui_activity_test.js`: ALL PASS
 - product code untouched: only `tests/test_code.py` changed this session
+
+## Session 23 (2026-10-02) — Q1–Q4: shell sandbox, auth, dead files
+
+Decisions taken by the user (Q1–Q4) and executed in order
+Phase 1 (shell) → Phase 2 (auth) → Phase 3 (dead files). Every patch was
+backed up first (R4); all backups were then deleted per Q4 (git history
+now holds the pre-session state — HEAD `adbca9c`).
+
+### Phase 1 — Q1: `tools/shell.py` (Critical)
+**Audit (validated before the fix, nothing executed):**
+| input | `_validate` before |
+|---|---|
+| `python3 -c import+os`, `python3 -m http.server`, `node script.js` | pass → RCE |
+| `awk 'BEGIN{system("id")}'` | pass → RCE |
+| `ls\nmv a b`, `ls\nmkdir /tmp/x` | pass (newline not a separator, blocklist-only) |
+| `git config core.pager "sh -c id"`, `core.sshCommand` | pass → RCE on next `git log` |
+| `echo x \| sed -n w/tmp/out` | pass → file write |
+| `env` | pass → full env (secret leak) |
+
+**Fix:**
+- dropped `python`, `python3`, `node`, `awk`, `sed` from `ALLOWED_BASE`
+- segments split on `|` only; `;`, `&&`, `||`, newline, `<`/`>`,
+  `$( )`, backtick rejected outright
+- execution is **argv + `shell=False`** (`_execute`): staged Popen chain,
+  stderr drained by threads, `threading.Timer` killpg on timeout (10s),
+  output cap 4096 kept
+- `git config` allowed only with a read flag (`--get/--list/...`)
+- child env scrubbed to `PATH/HOME/LANG/TERM` → `env` can no longer leak
+- `cwd` falls back to the repo root when `~/ai-agent` does not exist
+- added `sleep` to the allowlist (harmless, gives the timeout test a
+  deterministic subject)
+- `tools/shell.py.bak.23-shell` (deleted at Phase 3)
+
+### Phase 1 — `tools/python_runner.py` (new tool)
+So agent mode keeps its "run/test" ability without interpreters in the shell
+tool: `run_python(path, timeout=10)`.
+- only files resolving **inside the project root**, `.py` suffix only
+- timeout clamped 1..60s, output cap 4096, scrubbed env, cwd = project root
+- runs `python -c <bootstrap>` which: patches `socket`/`_socket` entry points,
+  blocks `ctypes`/`cffi`/`ssl` imports (`sys.modules[...]=None`), wraps
+  `subprocess.*` (no `shell=True`, no `curl/wget/nc/ssh/...` argv), disables
+  `os.system`/`os.popen`, then `runpy.run_path(path, run_name="__main__")`
+- **documented limitation**: in-process guard, not an OS sandbox
+- registered in `tools/__init__.py` (`ALL_TOOLS`), prompt updated in
+  `modes/agent.py` (run_python replaces `run_command python`)
+
+### Phase 2 — Q2/Q3: shared-secret auth (`core/auth.py`, new)
+- opt-in enforcement: `AI_AGENT_TOKEN` env **or** token file
+  (`$CONFIG_DIR/auth_token`, mode 0600) → guard active; neither → no-op
+  (that is what keeps the whole suite green)
+- `routes/__init__.py`: `app.before_request(auth.auth_guard)` registered
+  **before** `safety_guard`
+- accepted: `X-Agent-Token` header, `Authorization: Bearer`, `?token=`
+- exempt: `/`, `/index.html`, `/manifest.json`, `/sw.js`, `/static/*`,
+  `/icons/*`, `/api/health`, `/api/thermal`, `/api/sw-version`,
+  `/api/net`, `/api/mode`
+- `server.py main()` guarantees a token exists (generates + persists it) and
+  prints `Open: http://host:port/?token=…` plus the header rule
+- Q3 client wiring: `core/http_llm._post` sends Bearer when auth is on;
+  `core/opencode.env()` passes `AI_AGENT_TOKEN` to the opencode child;
+  `bridge_config(base=…)` embeds `apiKey` in the provider block when the
+  local bridge is explicitly requested (native default stays `{}`)
+- UI (`web/index.html`): `fetch` wrapper seeds the token from `?token=`
+  (then strips it from the URL), attaches `X-Agent-Token` to every
+  same-origin call, and on a 401 prompts once + retries the same request
+
+### Phase 2 verification
+- unit: `tests/test_auth.py` — 19 tests (off-by-default, 401/200 paths,
+  bearer/query, exemptions, 0600 file, env-over-file, both client libraries)
+- e2e (Playwright, real server on 8099 with `AI_AGENT_TOKEN`):
+  `GET /api/sessions` 401 → prompt → localStorage → retry 200; with
+  `?token=` no prompt, 0×401 during load, token stripped from URL —
+  **10/10 PASS** (`/tmp/opencode/pw/auth_e2e.mjs`)
+
+### Phase 3 — Q4: dead files
+- deleted: `web/app.js` (0 references), `test_honeypot.txt` (0 refs),
+  all 13 `*.bak*` files (old session backups + this session's),
+  every `__pycache__/`
+- moved (not deleted): `test_phase0/1/2.py`, `test_memory.py`,
+  `test_native_tools.py` → `tests/legacy/` (no `__init__.py`, so
+  `unittest discover` skips them — the suite count proves it)
+- kept: `app.py`, `settings.py` (both documented in README), `memory.py`,
+  `sessions.py`, `config.py`, `core/search/*`, all of `tools/*`
+
+### Result
+- **`sh tests/run.sh`: `Ran 244 tests … OK`** (194 pre-session → +31
+  shell/runner → +19 auth; 0 failures)
+- `node tests/ui_autocomplete_test.js` + `ui_activity_test.js`: ALL PASS
+- live server check: health 200 / API 401 / header 200 / v1 Bearer 200 /
+  v1 no-token 401 / `/` 200
+- residual risks (accepted, documented): ttyd terminal has no auth of its
+  own but binds 127.0.0.1 and can only be started through the guarded API;
+  token is printed to the server console; `/api/net|/api/mode` probes stay
+  open by design; the python_runner network guard is in-process only

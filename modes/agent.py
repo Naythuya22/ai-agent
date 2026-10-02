@@ -52,7 +52,8 @@ AGENT_SYSTEM = (
     "- 'ဖတ်ပြ', 'ပြပါ'              → read → read_file or cat\n"
     "- 'စာရင်း', 'list', 'folder ထဲ' → list → list_files or ls\n"
     "- 'git', 'commit', 'history'    → git log/status via run_command\n"
-    "- 'run ပြ', 'run ကြည့်', 'test' → execute → run_command python\n\n"
+    "- 'run ပြ', 'run ကြည့်', 'test' → execute → run_python(\"<file>.py\")\n"
+    "  (run_command က shell commands ပဲ — python/node/awk/sed မပါဘူး)\n\n"
 
     "Examples:\n"
     "- User: 'Python files ဘယ်နှစ်ခုလဲ' → "
