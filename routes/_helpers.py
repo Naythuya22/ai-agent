@@ -1,0 +1,207 @@
+"""Shared helpers used across route blueprints.
+
+Bodies here are carried over verbatim from server.py; only the direct reads
+of the old module globals were replaced with `routes._state` accessors.
+"""
+from __future__ import annotations
+
+import unicodedata
+
+from flask import request
+
+from core.burmese import sanitize as sanitize_burmese
+from core.llm import estimate_messages_tokens
+from core.log import get_logger
+from memory_extract import extract as extract_profile
+from routes._state import (
+    get_agent_mode,
+    get_chat_mode,
+    get_memory,
+    inference_guard,
+)
+
+log = get_logger("routes.helpers")
+
+# Invisible / bidi / zero-width characters that must never reach the UI.
+_DROP_CPS = {
+    0x00AD,                                   # Soft Hyphen
+    0x200B, 0x200C, 0x200D,                   # ZWSP/ZWNJ/ZWJ
+    0x200E, 0x200F,                           # LRM/RLM
+    0x2028, 0x2029,                           # LS/PS
+    0x202A, 0x202B, 0x202C, 0x202D, 0x202E,   # Bidi embed
+    0x2060, 0x2061, 0x2062, 0x2063, 0x2064,   # Word joiner
+    0xFEFF,                                   # BOM
+}
+
+
+def json_body() -> dict:
+    """Parse the request body as JSON, tolerating a malformed payload."""
+    try:
+        return request.get_json(force=True, silent=False) or {}
+    except Exception as e:
+        # Kept lenient (callers treat {} as "missing fields"), but the parse
+        # failure itself is a client bug worth seeing server-side.
+        log.debug("malformed JSON body on %s %s: %s: %s",
+                  request.method, request.path, type(e).__name__, e)
+        return {}
+
+
+def extract_messages(messages):
+    """Split OpenAI messages into (system, user_prompt)."""
+    system = ""
+    parts = []
+    for m in messages:
+        role = m.get("role", "user")
+        content = m.get("content", "")
+        if isinstance(content, list):
+            content = " ".join(
+                c.get("text", "") for c in content if isinstance(c, dict)
+            )
+        if role == "system":
+            system = content
+        elif role == "user":
+            parts.append(content)
+        elif role == "assistant":
+            parts.append(f"Assistant: {content}")
+    return system, "\n\n".join(parts)
+
+
+def is_repetition_loop(text, min_repeat=15, max_pattern=15):
+    """Detect repeated pattern at tail (handles multi-char patterns).
+    Returns (is_loop, cut_index). If is_loop, truncate text[:cut_index].
+    """
+    if not text or len(text) < min_repeat:
+        return False, len(text)
+    for plen in range(1, max_pattern + 1):
+        if len(text) < plen * min_repeat:
+            break
+        pattern = text[-plen:]
+        count = 1
+        i = len(text) - plen * 2
+        while i >= 0 and text[i:i + plen] == pattern:
+            count += 1
+            i -= plen
+        if count >= min_repeat:
+            return True, i + plen
+    return False, len(text)
+
+
+def filter_scripts(text):
+    """Keep ONLY Burmese + Latin + digits + visible punctuation.
+    Drops invisible/format chars (U+00AD, U+200B-F, U+2028-2E, U+2060-64, U+FEFF).
+    """
+    if not text:
+        return text
+    out = []
+    for ch in text:
+        cp = ord(ch)
+        # 1) Explicit blacklist (invisible/format)
+        if cp in _DROP_CPS:
+            continue
+        # 2) Any remaining format char (Cf category)
+        if unicodedata.category(ch) == "Cf":
+            continue
+        # 3) Allowlist
+        if 0x1000 <= cp <= 0x109F:      # Burmese
+            out.append(ch)
+        elif 0xAA60 <= cp <= 0xAA7F:    # Burmese Ext-A
+            out.append(ch)
+        elif 0x0020 <= cp <= 0x007E:    # ASCII printable
+            out.append(ch)
+        elif 0x00A0 <= cp <= 0x024F:    # Latin Extended
+            out.append(ch)
+        elif 0x2010 <= cp <= 0x2027:    # Visible dashes/quotes
+            out.append(ch)
+        elif 0x2030 <= cp <= 0x205E:    # Visible punctuation
+            out.append(ch)
+        elif ch in "\n\r\t":
+            out.append(ch)
+        # else: drop
+    return "".join(out)
+
+
+def sanitize_text(text):
+    """filter_scripts + Burmese sequence validation.
+
+    Range filtering alone cannot catch a structurally broken Myanmar sequence
+    (repeated virama, orphaned medial) — every character in it is legal on its
+    own. ``core.burmese`` checks the sequence and truncates at the first
+    invalid marker; order matters because ``filter_scripts`` may remove the
+    character that sat between a base and its mark.
+    """
+    return sanitize_burmese(filter_scripts(text))
+
+
+def run_agent(user_msg: str) -> dict:
+    # The tool loop drives the shared conversation, so the whole call — not
+    # just mode.handle() — has to be exclusive: the trace is read back out of
+    # the same mode object afterwards.
+    with inference_guard():
+        mode = get_agent_mode()
+        before_len = len(mode._messages)
+        reply = mode.handle(user_msg)
+        new_msgs = mode._messages[before_len:]
+        tool_trace = []
+        for m in new_msgs:
+            if not isinstance(m, dict):
+                continue
+            role = m.get("role", "")
+            if role == "tool_call":
+                tool_trace.append({
+                    "type": "call",
+                    "tool": m.get("tool", ""),
+                    "args": m.get("args", {}),
+                })
+            elif role == "tool_result":
+                text = m.get("text", "")
+                tool_trace.append({
+                    "type": "result",
+                    "tool": m.get("tool", ""),
+                    "result": text[:500],
+                    "result_len": len(text),
+                })
+        return {
+            "reply": reply,
+            "turns": mode.turns,
+            "tool_trace": tool_trace,
+        }
+
+
+def run_chat(user_msg: str) -> dict:
+    with inference_guard():
+        mode = get_chat_mode()
+        return {"reply": mode.handle(user_msg), "turns": mode.turns}
+
+
+def extract_and_apply(user_msg: str) -> list:
+    # memory_extract runs its own LLM pass over the message.
+    with inference_guard():
+        memory = get_memory()
+        out = []
+        try:
+            ex = extract_profile(user_msg)
+            prof = ex.get("profile", {})
+            for k, v in prof.items():
+                if memory.set_profile(k, v):
+                    out.append(f"{k}={v}")
+        except Exception as e:
+            # Profile extraction is best-effort, but a crash here means the
+            # user's facts are never captured — log it rather than hide it.
+            log.warning("profile extraction failed: %s: %s", type(e).__name__, e)
+        return out
+
+
+def ctx_of(mode: str) -> dict:
+    chat_mode = get_chat_mode()
+    try:
+        if mode == "agent":
+            msgs = get_agent_mode().get_messages()
+        else:
+            msgs = chat_mode.get_messages()
+        used = estimate_messages_tokens(msgs)
+        total = chat_mode.llm.config.context_size
+        pct = round(used / total * 100, 1) if total else 0
+        return {"used": used, "total": total, "pct": pct}
+    except Exception as e:
+        log.warning("context estimate unavailable: %s: %s", type(e).__name__, e)
+        return {"used": 0, "total": 8192, "pct": 0}

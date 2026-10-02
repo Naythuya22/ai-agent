@@ -1,0 +1,733 @@
+"""Code mode — opencode runs, project registry, folder browsing.
+
+opencode replaced aider here. It runs as a subprocess against the local
+OpenAI-compatible bridge (`BRIDGE_BASE` below) via a managed opencode.json, so
+edits land in real phone storage. Two things differ from the old aider setup:
+
+  - opencode emits a JSON event stream (`--format json`), so files, tool calls
+    and token usage are read off events instead of scraped from prose.
+  - conversation history is opencode's own session, resumed per project folder
+    via --session, rather than a history list pasted into each prompt.
+
+Runs are serialised through `routes._state.code_lock`.
+"""
+from __future__ import annotations
+
+import json
+import subprocess
+import time
+from pathlib import Path
+
+from flask import Blueprint, Response, jsonify, request, stream_with_context
+
+from core import opencode as oc
+from core import projects as projects_store
+from core.code_stream import (
+    OpencodeError,
+    parse_event as cs_parse,
+    run_opencode,
+    sse_event,
+    stream_opencode,
+    summarize,
+)
+from core.log import get_logger
+from routes._helpers import json_body
+from routes._state import code_lock
+
+log = get_logger("routes.code")
+
+bp = Blueprint("code", __name__)
+
+_ttyd_proc = None
+
+CODE_HISTORY_CAP = 20
+BRIDGE_BASE = oc.BRIDGE_BASE
+RUN_TIMEOUT = oc.DEFAULT_TIMEOUT
+
+LANG_DIRECTIVE = (
+    "LANGUAGE RULE (critical): Match the user's language in your REPLY text. "
+    "If the user writes in Burmese (မြန်မာ), reply ONLY in Burmese. "
+    "Keep code, file names, identifiers, and diffs in English. "
+    "Only the natural-language explanation should match the user's language."
+)
+
+
+# ---------- shared helpers ----------
+
+def ensure_git_identity():
+    try:
+        r = subprocess.run(
+            ["git", "config", "--global", "user.email"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if r.returncode != 0 or not r.stdout.strip():
+            subprocess.run(
+                ["git", "config", "--global", "user.email", "ai-agent@localhost"],
+                capture_output=True, timeout=5,
+            )
+            subprocess.run(
+                ["git", "config", "--global", "user.name", "ai-agent"],
+                capture_output=True, timeout=5,
+            )
+    except Exception as e:
+        # Without an identity every later `git commit` fails — the streamed
+        # run would report success while storing nothing.
+        log.warning("could not set git identity: %s: %s", type(e).__name__, e)
+
+
+def build_code_prompt(task, code_history=None):
+    """Prompt for opencode.
+
+    No history block any more: opencode's session already holds the
+    conversation, so replaying it here would duplicate context (and was the
+    reason the old aider path truncated messages to 280 chars).
+    """
+    return f"{LANG_DIRECTIVE}\n\nCurrent request:\nUser: {task}"
+
+
+def commit_changes(workdir, files, message):
+    """Commit the files opencode touched, so the UI's commit list still means
+    something.
+
+    aider auto-committed every run (AIDER_NO_AUTO_COMMITS=0); opencode leaves
+    git alone. Same commit-after-each-change behaviour is kept here, scoped to
+    only the paths the run reported, and skipped if the folder is not a repo.
+    """
+    paths = [f.get("path") for f in (files or []) if f.get("path")]
+    if not paths:
+        return None
+    try:
+        inside = subprocess.run(
+            ["git", "rev-parse", "--is-inside-work-tree"],
+            cwd=str(workdir), capture_output=True, text=True, timeout=5,
+        )
+        if inside.returncode != 0 or inside.stdout.strip() != "true":
+            return None
+        subprocess.run(
+            ["git", "add", "--"] + paths,
+            cwd=str(workdir), capture_output=True, timeout=15,
+        )
+        staged = subprocess.run(
+            ["git", "diff", "--cached", "--name-only"],
+            cwd=str(workdir), capture_output=True, text=True, timeout=15,
+        )
+        if not staged.stdout.strip():
+            return None  # nothing actually changed
+        first = message.strip().splitlines()[0] if message.strip() else "opencode"
+        done = subprocess.run(
+            ["git", "commit", "-m", first[:72]],
+            cwd=str(workdir), capture_output=True, text=True, timeout=20,
+        )
+        if done.returncode != 0:
+            return None
+        head = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=str(workdir), capture_output=True, text=True, timeout=5,
+        )
+        return {"hash": head.stdout.strip(), "message": first[:72]}
+    except Exception:
+        return None
+
+
+_code_history = []  # [{role, text}, ...] — a UI/debug mirror, not the model's context
+
+
+def _record_code_turn(task, reply):
+    """Kept for the /history endpoint only; no longer feeds the prompt."""
+    _code_history.append({"role": "user", "text": task})
+    _code_history.append({"role": "assistant", "text": reply})
+    if len(_code_history) > CODE_HISTORY_CAP:
+        _code_history[:] = _code_history[-CODE_HISTORY_CAP:]
+
+
+def _require_opencode():
+    """None when opencode is usable, else a (message, status) failure."""
+    if oc.is_installed():
+        return None
+    return oc.missing_install_message(), 500
+
+
+def _session_for(workdir):
+    """Session id to resume for this folder, if a previous run left one."""
+    return oc.get_session(workdir)
+
+
+def _remember_session(workdir, session_id):
+    if session_id:
+        oc.remember_session(workdir, session_id)
+
+
+def _run(workdir, prompt, env=None, timeout=RUN_TIMEOUT):
+    """`opencode run` to completion, retrying once on a stale --session id.
+
+    opencode validates the id before it does anything else: an id it does not
+    recognise exits 1 with a bare `Error: Session not found` on stderr and not
+    one JSON event. remember_session() refuses to store an empty id, so the bad
+    entry would survive and every later message would fail the same way — a
+    wedged code mode with nothing on screen to explain it. So the run is
+    retried as a fresh session, which also repairs the map.
+
+    Returns (returncode, output_lines).
+    """
+    env = oc.env() if env is None else env
+    session_id = _session_for(workdir)
+    rc, lines = 0, []
+    for attempt in (1, 2):
+        cmd = oc.build_command(prompt, workdir, session_id=session_id)
+        rc, lines = run_opencode(cmd, workdir, env, timeout=timeout)
+        if (rc != 0 and session_id and attempt == 1
+                and oc.session_is_stale("\n".join(lines))):
+            oc.forget_session(workdir)
+            session_id = None
+            continue
+        return rc, lines
+    return rc, lines
+
+
+def _parse_line(line):
+    """The dict inside an SSE frame, or None if it is not one."""
+    if not line.startswith("data: "):
+        return None
+    try:
+        event = json.loads(line[6:])
+    except ValueError:
+        return None
+    return event if isinstance(event, dict) else None
+
+
+def _stream(workdir, prompt, env):
+    """Yield SSE frames for one streamed run, recovering from a stale session.
+
+    The same recovery _run() does, but it has to happen inside the stream. A
+    stale id comes back as a single log line with nothing in front of it — no
+    chunk, no tool call, not even an end frame — which is the one place it can
+    be told apart from a run that is merely quiet, and those frames are
+    swallowed instead of shown as a dead end.
+    """
+    session_id = _session_for(workdir)
+    for attempt in (1, 2):
+        cmd = oc.build_command(prompt, workdir, session_id=session_id,
+                               logs=True)
+        frames = stream_opencode(
+            cmd,
+            workdir=workdir,
+            env=env,
+            lock=code_lock,
+            on_session=lambda sid: _remember_session(workdir, sid),
+        )
+        produced = False
+        try:
+            for line in frames:
+                event = _parse_line(line)
+                if event is None:
+                    yield line
+                    continue
+                kind = event.get("type")
+                if kind in ("chunk", "file", "tool", "step", "end"):
+                    produced = True
+                elif (kind == "log" and not produced and session_id
+                      and attempt == 1
+                      and oc.session_is_stale(event.get("text", ""))):
+                    oc.forget_session(workdir)
+                    session_id = None
+                    break
+                yield line
+            else:
+                return
+        finally:
+            # close(), not just dropping the reference: it is what reaps a
+            # child left running by the attempt we abandoned.
+            frames.close()
+
+
+def _resolve_workdir():
+    """Active project path if set, else the default shared-storage folder."""
+    active = projects_store.get_active()
+    if active and active.get("path"):
+        workdir = Path(active["path"])
+        if not workdir.exists() or not workdir.is_dir():
+            return None, f"project path missing: {workdir}"
+    else:
+        workdir = Path.home() / "storage" / "shared" / "opencode-work"
+    return workdir, None
+
+
+def _ensure_safe_directory(workdir):
+    """Android fuse mounts trip git's ownership check — allow this dir."""
+    try:
+        subprocess.run(
+            ["git", "config", "--global", "--add", "safe.directory", str(workdir)],
+            capture_output=True, timeout=5,
+        )
+    except Exception as e:
+        # git then refuses the Android fuse mount and commits silently fail.
+        log.warning("could not allow safe.directory for %s: %s: %s",
+                    workdir, type(e).__name__, e)
+
+
+def _project_command_reply(task):
+    """Handle the /project sub-commands. Returns a reply payload dict."""
+    parts = task.split()
+    sub = parts[1] if len(parts) > 1 else "help"
+    arg = " ".join(parts[2:]).strip()
+
+    if sub == "list":
+        projects = projects_store.list_all()
+        active = projects_store.get_active()
+        if not projects:
+            msg = "📁 No projects yet.\n\nAdd: /project add <path>\nExample: /project add ~/storage/shared/Download"
+        else:
+            lines = ["📁 Projects:"]
+            for proj in projects:
+                mark = " ✅" if active and active["id"] == proj["id"] else ""
+                lines.append(f"  • {proj['name']} [{proj['id']}]{mark}")
+                lines.append(f"      {proj['path']}")
+            lines.append("")
+            lines.append("Switch: /project use <id-or-name>")
+            msg = "\n".join(lines)
+        return {"reply": msg, "files": [], "commits": [],
+                "raw": msg, "elapsed": 0.0, "rc": 0}
+
+    if sub == "add":
+        if not arg:
+            return {"reply": "Usage: /project add <path>", "files": [], "commits": [], "raw": "", "elapsed": 0.0, "rc": 1}
+        try:
+            proj = projects_store.add("", arg)
+        except ValueError as e:
+            return {"reply": f"❌ {e}", "files": [], "commits": [], "raw": "", "elapsed": 0.0, "rc": 1}
+        except Exception as e:
+            return {"reply": f"❌ {type(e).__name__}: {e}", "files": [], "commits": [], "raw": "", "elapsed": 0.0, "rc": 1}
+        msg = f"✅ Added project: **{proj['name']}** (id: {proj['id']})\n📁 {proj['path']}\n\nNow: /project use {proj['id']}"
+        return {"reply": msg, "files": [], "commits": [], "raw": msg, "elapsed": 0.0, "rc": 0}
+
+    if sub == "use":
+        if not arg:
+            return {"reply": "Usage: /project use <id-or-name>", "files": [], "commits": [], "raw": "", "elapsed": 0.0, "rc": 1}
+        target = None
+        for proj in projects_store.list_all():
+            if arg == proj["id"] or arg.lower() == proj["name"].lower():
+                target = proj
+                break
+        if not target:
+            return {"reply": f"❌ Not found: {arg}\nRun: /project list", "files": [], "commits": [], "raw": "", "elapsed": 0.0, "rc": 1}
+        projects_store.set_active(target["id"])
+        msg = f"✅ Active project: **{target['name']}**\n📁 {target['path']}\n\nAll code tasks now run in this folder."
+        return {"reply": msg, "files": [], "commits": [], "raw": msg, "elapsed": 0.0, "rc": 0}
+
+    if sub == "remove":
+        if not arg:
+            return {"reply": "Usage: /project remove <id>", "files": [], "commits": [], "raw": "", "elapsed": 0.0, "rc": 1}
+        ok = projects_store.remove(arg)
+        msg = f"✅ Removed: {arg}" if ok else f"❌ Not found: {arg}"
+        return {"reply": msg, "files": [], "commits": [], "raw": "", "elapsed": 0.0, "rc": 0}
+
+    help_msg = (
+        "📁 **Project commands**\n\n"
+        "• /project list — show all\n"
+        "• /project add <path> — register a folder\n"
+        "• /project use <id|name> — switch active\n"
+        "• /project remove <id> — delete\n\n"
+        "Example:\n"
+        "  /project add ~/storage/shared/Download\n"
+        "  /project use Download"
+    )
+    return {"reply": help_msg, "files": [], "commits": [], "raw": help_msg, "elapsed": 0.0, "rc": 0}
+
+
+# ---------- /api/code (single-shot, fixed workdir) ----------
+
+@bp.route("/api/code", methods=["POST"])
+def api_code():
+    """One-shot opencode run against an explicit workdir."""
+    body = json_body()
+    task = (body.get("task") or "").strip()
+    workdir = (body.get("workdir") or str(Path.home() / "opencode-work")).strip()
+    if not task:
+        return jsonify({"error": "task required"}), 400
+
+    missing = _require_opencode()
+    if missing:
+        return jsonify({"error": missing[0]}), missing[1]
+
+    wd = Path(workdir).expanduser()
+    if not wd.exists() or not wd.is_dir():
+        return jsonify({"error": f"workdir not found: {wd}"}), 400
+
+    ensure_git_identity()
+    _ensure_safe_directory(wd)
+
+    prompt = build_code_prompt(task)
+
+    t0 = time.time()
+    try:
+        rc, lines = _run(wd, prompt)
+    except OpencodeError as e:
+        return jsonify({"error": str(e)}), 500
+
+    events = [e for e in (cs_parse(l) for l in lines) if e is not None]
+    summary = summarize(events)
+    _remember_session(wd, summary["session_id"])
+    # Only a clean run gets committed, same as the streaming path: a failed run
+    # can leave a half-applied edit behind.
+    commits = commit_changes(wd, summary["files"], task) if rc == 0 else None
+
+    return jsonify({
+        "ok": rc == 0,
+        "workdir": str(wd),
+        "returncode": rc,
+        "reply": summary["reply"],
+        "files": summary["files"],
+        "commits": [commits] if commits else [],
+        "tokens": summary["tokens"],
+        "cost": summary["cost"],
+        "session_id": summary["session_id"],
+        "output": "\n".join(l.rstrip() for l in lines)[:4000],
+        "elapsed": round(time.time() - t0, 2),
+    })
+
+
+# ---------- browser-terminal (ttyd) ----------
+
+@bp.route("/api/code/web/start", methods=["POST"])
+def api_code_web_start():
+    """Launch ttyd running the opencode TUI (browser terminal).
+
+    opencode is invoked directly rather than through a ~/bin/opencode-web
+    wrapper script: this way it inherits the managed bridge config and the
+    active project's model, with no separate file to keep in sync.
+    """
+    global _ttyd_proc
+
+    if _ttyd_proc is not None and _ttyd_proc.poll() is None:
+        return jsonify({
+            "ok": True,
+            "url": "http://127.0.0.1:8081",
+            "pid": _ttyd_proc.pid,
+            "status": "already_running",
+        })
+
+    missing = _require_opencode()
+    if missing:
+        return jsonify({"error": missing[0]}), missing[1]
+
+    workdir, err = _resolve_workdir()
+    if err:
+        return jsonify({"error": err}), 500
+
+    cmd = ["ttyd", "-W", "-i", "127.0.0.1", "-p", "8081",
+           str(oc.BINARY), "--model", oc.MODEL_REF, str(workdir)]
+    try:
+        _ttyd_proc = subprocess.Popen(
+            cmd,
+            cwd=str(workdir),
+            env=oc.env(),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except FileNotFoundError:
+        return jsonify({
+            "error": "ttyd not installed",
+            "hint": "pkg install ttyd",
+        }), 500
+    except Exception as e:
+        return jsonify({"error": f"{type(e).__name__}: {e}"}), 500
+
+    return jsonify({
+        "ok": True,
+        "url": "http://127.0.0.1:8081",
+        "pid": _ttyd_proc.pid,
+        "workdir": str(workdir),
+        "command": cmd[6:],
+        "status": "started",
+    })
+
+
+@bp.route("/api/code/web/status", methods=["GET"])
+def api_code_web_status():
+    """Check if ttyd is running."""
+    if _ttyd_proc is None:
+        return jsonify({"running": False})
+    if _ttyd_proc.poll() is None:
+        return jsonify({"running": True, "pid": _ttyd_proc.pid})
+    return jsonify({"running": False, "exited": _ttyd_proc.returncode})
+
+
+# ---------- chat-style one-shot opencode ----------
+
+@bp.route("/api/code/web/run", methods=["POST"])
+def api_code_web_run():
+    """Chat-style opencode — one message per call, real files in phone storage.
+
+    Conversation continuity comes from opencode's own session: the id from the
+    previous run in this folder is resumed, so follow-ups work without the
+    caller passing any history.
+    """
+    task = (json_body().get("message") or "").strip()
+    if not task:
+        return jsonify({"error": "message required"}), 400
+
+    # /project command interception (before opencode)
+    if task.startswith("/project"):
+        return jsonify(_project_command_reply(task))
+
+    missing = _require_opencode()
+    if missing:
+        return jsonify({"error": missing[0]}), missing[1]
+
+    workdir, err = _resolve_workdir()
+    if err:
+        return jsonify({"error": err}), 500
+    try:
+        workdir.mkdir(parents=True, exist_ok=True)
+    except Exception as e:
+        return jsonify({"error": f"mkdir failed: {e}"}), 500
+
+    _ensure_safe_directory(workdir)
+    ensure_git_identity()
+
+    prompt = build_code_prompt(task)
+
+    t0 = time.time()
+    try:
+        rc, lines = _run(workdir, prompt)
+    except OpencodeError as e:
+        return jsonify({"error": str(e)}), 500
+
+    events = [e for e in (cs_parse(l) for l in lines) if e is not None]
+    summary = summarize(events)
+    _remember_session(workdir, summary["session_id"])
+
+    commits = []
+    if rc == 0:
+        made = commit_changes(workdir, summary["files"], task)
+        if made:
+            commits.append(made)
+
+    shown = summary["reply"] or summary.get("error") or "(no output)"
+    _record_code_turn(task, shown[:500])
+
+    return jsonify({
+        "reply": shown,
+        "files": summary["files"],
+        "commits": commits,
+        "tools": summary["tools"],
+        "tokens": summary["tokens"],
+        "cost": summary["cost"],
+        "session_id": summary["session_id"],
+        "workdir": str(workdir),
+        "elapsed": round(time.time() - t0, 1),
+        "rc": rc,
+        "history_len": len(_code_history),
+    })
+
+
+@bp.route("/api/code/web/clear", methods=["POST"])
+def api_code_web_clear():
+    """Forget the code-mode conversation.
+
+    opencode owns the real history, so clearing means deleting its session for
+    this folder, not just emptying a local list.
+    """
+    global _code_history
+    n = len(_code_history)
+    _code_history = []
+
+    deleted = None
+    workdir, err = _resolve_workdir()
+    if not err and workdir:
+        session_id = oc.forget_session(workdir)
+        if session_id and oc.is_installed():
+            try:
+                subprocess.run(
+                    oc.session_delete_command(session_id),
+                    cwd=str(workdir),
+                    capture_output=True,
+                    timeout=20,
+                )
+                deleted = session_id
+            except Exception as e:
+                log.warning("could not delete opencode session %s: %s: %s",
+                            session_id, type(e).__name__, e)
+    return jsonify({"ok": True, "cleared": n, "session_deleted": deleted})
+
+
+@bp.route("/api/code/web/history", methods=["GET"])
+def api_code_web_history():
+    """Current code-mode mirror plus the opencode session that backs it."""
+    workdir, err = _resolve_workdir()
+    return jsonify({
+        "count": len(_code_history),
+        "messages": _code_history,
+        "session_id": _session_for(workdir) if not err else None,
+        "workdir": str(workdir) if not err else None,
+    })
+
+
+@bp.route("/api/code/doctor", methods=["GET"])
+def api_code_doctor():
+    """Is code mode actually runnable? Everything the UI needs to say so."""
+    info = oc.doctor()
+    if not info["installed"]:
+        info["ok"] = False
+        info["error"] = oc.missing_install_message()
+    else:
+        try:
+            oc.write_bridge_config()
+            info["config_exists"] = oc.config_file().exists()
+            info["ok"] = True
+        except Exception as e:
+            info["ok"] = False
+            info["error"] = f"could not write {oc.config_file()}: {e}"
+    return jsonify(info)
+
+
+# ---------- project registry ----------
+
+@bp.route("/api/code/projects", methods=["GET"])
+def api_projects_list():
+    return jsonify({
+        "projects": projects_store.list_all(),
+        "active": projects_store.get_active(),
+    })
+
+
+@bp.route("/api/code/projects", methods=["POST"])
+def api_projects_add():
+    body = json_body()
+    name = (body.get("name") or "").strip()
+    path = (body.get("path") or "").strip()
+    if not path:
+        return jsonify({"error": "path required"}), 400
+    try:
+        proj = projects_store.add(name, path)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        return jsonify({"error": f"{type(e).__name__}: {e}"}), 500
+    return jsonify({"ok": True, "project": proj})
+
+
+@bp.route("/api/code/projects/<pid>", methods=["DELETE"])
+def api_projects_remove(pid):
+    if not projects_store.remove(pid):
+        return jsonify({"error": "not found"}), 404
+    return jsonify({"ok": True})
+
+
+@bp.route("/api/code/projects/<pid>/activate", methods=["POST"])
+def api_projects_activate(pid):
+    if not projects_store.set_active(pid):
+        return jsonify({"error": "not found"}), 404
+    return jsonify({"ok": True, "active": projects_store.get_active()})
+
+
+# ---------- folder picker ----------
+
+@bp.route("/api/code/browse", methods=["GET"])
+def api_code_browse():
+    """List folders under a path (for folder picker)."""
+    raw = request.args.get("path", "").strip()
+    if not raw:
+        raw = str(Path.home() / "storage" / "shared")
+    base = Path(raw).expanduser()
+    try:
+        base = base.resolve()
+    except Exception:
+        return jsonify({"error": "invalid path"}), 400
+    if not base.exists() or not base.is_dir():
+        return jsonify({"error": f"not a directory: {base}"}), 400
+
+    folders = []
+    files_count = 0
+    try:
+        for entry in sorted(base.iterdir(), key=lambda e: e.name.lower()):
+            if entry.name.startswith("."):
+                continue
+            try:
+                if entry.is_dir():
+                    folders.append({"name": entry.name, "path": str(entry)})
+                else:
+                    files_count += 1
+            except Exception:
+                continue
+    except PermissionError:
+        return jsonify({"error": "permission denied"}), 403
+
+    parent = str(base.parent) if base.parent != base else None
+    return jsonify({
+        "path": str(base),
+        "parent": parent,
+        "folders": folders[:200],
+        "files_count": files_count,
+    })
+
+
+# ---------- streaming opencode ----------
+
+@bp.route("/api/code/web/run/stream", methods=["POST"])
+def api_code_web_run_stream():
+    """Streaming version of /api/code/web/run — opencode events over SSE."""
+    task = (json_body().get("message") or "").strip()
+    if not task:
+        return jsonify({"error": "message required"}), 400
+
+    # Project intercept (sync, JSON response — no SSE)
+    if task.startswith("/project"):
+        return api_code_web_run()
+
+    missing = _require_opencode()
+    if missing:
+        return jsonify({"error": missing[0]}), missing[1]
+
+    workdir, err = _resolve_workdir()
+    if err:
+        return jsonify({"error": err}), 500
+    try:
+        workdir.mkdir(parents=True, exist_ok=True)
+    except Exception as e:
+        return jsonify({"error": f"mkdir failed: {e}"}), 500
+
+    _ensure_safe_directory(workdir)
+    ensure_git_identity()
+
+    env = oc.env(PYTHONUNBUFFERED="1")
+    prompt = build_code_prompt(task)
+
+    def generate():
+        reply = None
+        try:
+            for line in _stream(workdir, prompt, env):
+                event = _parse_line(line)
+                if isinstance(event, dict) and event.get("type") == "end":
+                    reply = event.get("reply")
+                    commit = None
+                    if event.get("rc") == 0 and event.get("files"):
+                        commit = commit_changes(workdir, event["files"], task)
+                    if commit:
+                        # Its own frame, ahead of `end`: the UI renders commits
+                        # from a top-level `commit` event, so nesting it in the
+                        # end payload left the streamed commit invisible. The
+                        # dict itself is left clean so `end.commits` matches
+                        # what the one-shot route returns.
+                        yield sse_event({"type": "commit", **commit})
+                        event["commits"] = [commit]
+                        line = sse_event(event)
+                yield line
+        finally:
+            # Reached on normal completion and on client disconnect alike, so
+            # the abort path inside the stream and this both matter. The real
+            # reply when there is one, so a streamed turn is not filed as a
+            # bare "(streamed)" placeholder in /api/code/web/history.
+            _record_code_turn(task, (reply or "(streamed)")[:500])
+
+    return Response(
+        stream_with_context(generate()),
+        mimetype="text/event-stream",
+        headers={
+            # Every proxy between opencode and the browser buffers a body it
+            # thinks is not finished; without these the frames arrive in one
+            # lump at the end instead of as they happen.
+            "Cache-Control": "no-cache, no-transform",
+            "X-Accel-Buffering": "no",
+        },
+    )
