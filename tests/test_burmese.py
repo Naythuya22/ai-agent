@@ -80,8 +80,19 @@ class TestSanitize(unittest.TestCase):
     def test_trailing_virama_cut(self):
         self.assertEqual(sanitize(TRAILING_VIRAMA), "မန္တလေး")
 
-    def test_duplicate_vowel_cut(self):
-        self.assertEqual(sanitize("ကိို"), "ကိ")
+    def test_duplicate_vowel_repaired(self):
+        # Repeated marks are dropped, not punished: the rest of the reply
+        # must survive (a cut here used to end the whole message).
+        self.assertEqual(sanitize("ကိို"), "ကို")
+
+    def test_duplicate_medial_repaired(self):
+        # Real probe output: model wrote ခင်ဗျ + ျ + ာ.
+        self.assertEqual(sanitize("မလဲခင်ဗျျာ။"), "မလဲခင်ဗျာ။")
+
+    def test_doubled_virama_still_ends_the_message(self):
+        # A collapsed consonant stack has no single correct reading, so a
+        # virama repeat keeps the old truncation policy.
+        self.assertEqual(sanitize("ထိင်္္န်"), "ထိင်")
 
     def test_orphan_mark_cut(self):
         self.assertEqual(sanitize("ိက"), "")
@@ -90,9 +101,9 @@ class TestSanitize(unittest.TestCase):
         s = "အင်္ဂလိပ်"
         self.assertEqual(sanitize(s), s)
 
-    def test_only_first_marker_and_after_is_cut(self):
-        # One duplicated asat: everything before the marker survives.
-        self.assertEqual(sanitize("ကျွန်တော််ပါ"), "ကျွန်တော်")
+    def test_duplicate_asat_repaired_keeps_rest(self):
+        # One duplicated asat: drop the repeat, keep the word after it.
+        self.assertEqual(sanitize("ကျွန်တော််ပါ"), "ကျွန်တော်ပါ")
 
     def test_empty_and_non_myanmar(self):
         self.assertEqual(sanitize(""), "")
@@ -130,7 +141,7 @@ class TestStreaming(unittest.TestCase):
 
     def test_cut_is_sticky(self):
         v = BurmeseValidator()
-        _, cut = v.feed("ကိိ")
+        _, cut = v.feed("ိက")          # orphan mark — no safe repair
         self.assertTrue(cut)
         self.assertEqual(v.feed("ကမာ"), ("", True))
         self.assertEqual(v.feed("ကမာ"), ("", True))
@@ -169,7 +180,8 @@ class TestStreaming(unittest.TestCase):
 
     def test_reset_clears_state(self):
         v = BurmeseValidator()
-        v.feed("ကိိ")
+        v.feed("ိက")                    # unrecoverable — leaves a cut
+        self.assertTrue(v.cut)
         v.reset()
         self.assertFalse(v.cut)
         out, cut = v.feed("ကျောင်း")

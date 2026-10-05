@@ -171,6 +171,9 @@ class TestAgentStream(unittest.TestCase):
         self.assertEqual(end["type"], "end")
         self.assertEqual(end["text"], CUT_TO)
         self.assertTrue(end["truncated"])
+        # the status-bar record rides along with the end event
+        self.assertEqual(end["last_backend"], "local")
+        self.assertTrue(end["model_label"].startswith("Model: "), end)
 
         # The session must replay the clean text, not the garbage.
         last = mode._messages[-1]

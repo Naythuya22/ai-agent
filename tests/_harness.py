@@ -28,9 +28,13 @@ if str(PROJECT_ROOT) not in sys.path:
 
 
 def use_temp_home() -> Path:
-    """Isolate ~/.ai-agent. Call before importing config/server."""
+    """Isolate ~/.ai-agent. Call before importing config."""
     home = Path(tempfile.mkdtemp(prefix="ai-agent-tests-"))
     os.environ["HOME"] = str(home)
+    # The key file no longer lives under $HOME — it has a fixed default path
+    # (config.DEFAULT_DATA_DIR). Point the override at the throwaway HOME too,
+    # so a config imported *after* this call still lands in the temp dir.
+    os.environ["AI_AGENT_DATA_DIR"] = str(home / ".ai-agent")
     return home
 
 
@@ -48,13 +52,17 @@ def _retarget_config_module(home: Path) -> None:
 
     Those are computed at import time from os.environ["HOME"], so if config has
     already been imported (e.g. bootstrap() called twice) they would keep
-    pointing at the first temp home.
+    pointing at the first temp home. The same is true of DATA_DIR /
+    AGENT_CONFIG_FILE, which are *not* HOME-derived — they need the explicit
+    re-point here.
     """
     cfg = sys.modules.get("config")
     if cfg is None:
         return
     cfg.CONFIG_DIR = home / ".ai-agent"
     cfg.CONFIG_FILE = cfg.CONFIG_DIR / "config.json"
+    cfg.DATA_DIR = home / ".ai-agent"
+    cfg.AGENT_CONFIG_FILE = cfg.DATA_DIR / "agent_config.json"
 
 
 def bootstrap(tmp_home: bool = True) -> Path:
