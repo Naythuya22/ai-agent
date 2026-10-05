@@ -679,30 +679,39 @@ def api_agent_stream_v2():
                 # turn so the prompt tier resolves once and stays put.
                 agent_mode.begin_turn()
                 agent_mode._clear_turn_cache()
-                # mirrors api_agent_stream at L496 — keep in sync: the same
-                # user-message shape v1's _turn() stores. Appended BEFORE the
-                # generator captures `before`, so a cloud rollback leaves the
-                # question in the transcript for the v1 fallback to answer.
+                # The same user-message shape v1's _turn() stores. We track
+                # its index so the fallback path can roll it back: otherwise
+                # v1's _try_cloud appends a second copy and the UI shows the
+                # question twice.
+                appended_idx = len(agent_mode._messages)
                 agent_mode._messages.append({"role": "user", "text": msg})
                 saw_end = False
-                for kind, payload in agent_mode._handle_cloud_stream():
-                    if kind == "delta":
-                        yield _frame("delta", {"t": payload})
-                    elif kind == "tool":
-                        yield _frame("tool", {
-                            "name": payload.get("name", ""),
-                            "args": payload.get("args", {}),
-                            "result": payload.get("result", ""),
-                        })
-                    elif kind == "error":
-                        yield _frame("error", payload)
-                    elif kind == "end":
-                        saw_end = True
-                        yield _frame("done", {"t": payload})
-                if not saw_end:
-                    # Empty (no end) = cloud declined → the frontend re-POSTs
-                    # to v1, which runs the local engine on the same message.
-                    yield _frame("fallback", {"reason": "cloud_unavailable"})
+                try:
+                    for kind, payload in agent_mode._handle_cloud_stream():
+                        if kind == "delta":
+                            yield _frame("delta", {"t": payload})
+                        elif kind == "tool":
+                            yield _frame("tool", {
+                                "name": payload.get("name", ""),
+                                "args": payload.get("args", {}),
+                                "result": payload.get("result", ""),
+                            })
+                        elif kind == "error":
+                            yield _frame("error", payload)
+                        elif kind == "end":
+                            saw_end = True
+                            yield _frame("done", {"t": payload})
+                    if not saw_end:
+                        # Cloud declined → undo our user append so v1 starts
+                        # from a clean transcript (no duplicate question).
+                        if len(agent_mode._messages) > appended_idx:
+                            del agent_mode._messages[appended_idx:]
+                        yield _frame("fallback",
+                                     {"reason": "cloud_unavailable"})
+                except Exception:
+                    if len(agent_mode._messages) > appended_idx:
+                        del agent_mode._messages[appended_idx:]
+                    raise
             except Exception as e:
                 # mirrors api_agent_stream at L418 — keep in sync. The
                 # generator already rolled back on its way out; GeneratorExit

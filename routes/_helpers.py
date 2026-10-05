@@ -380,6 +380,19 @@ def agent_context() -> dict:
         out["total"] = _local_total()
         out["local_total"] = out["total"]
         return out
+    # ── Local Only: total is the KV cache, never a cloud window ──
+    try:
+        if mode._mode() == "local":
+            out["total"] = _local_total()
+            out["local_total"] = out["total"]
+            out["model"] = _friendly_local()
+            out["source"] = "local"
+            out["endpoint"] = "local"
+            return out
+    except Exception as e:
+        log.debug("local-mode short-circuit failed: %s: %s",
+                  type(e).__name__, e)
+
     backend = None
     try:
         backend = mode._backend_obj()

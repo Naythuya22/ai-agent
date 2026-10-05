@@ -1270,7 +1270,11 @@ function fmtTok(n){
 // /clear hint — the point where the next turn is most likely to be refused.
 function updateCtx(ctx){
   if(!ctx)return;
-  var used=ctx.used||0,total=ctx.total||8192,pct=ctx.pct||0;
+  var used=ctx.used||0;
+  var total=(ctx.endpoint==='local')
+    ? (ctx.local_total||ctx.total||8192)
+    : (ctx.total||8192);
+  var pct=ctx.pct||0;
   var fill=document.getElementById('ctx-fill');
   var info=document.getElementById('ctx-info');
   var txt=document.getElementById('ctx-text');
