@@ -629,6 +629,96 @@ def api_agent_stream():
     )
 
 
+@bp.route("/api/agent/stream/v2", methods=["POST"])
+def api_agent_stream_v2():
+    """SSE cloud streaming. Falls back to v1 on 404."""
+    if not config.AGENT_CLOUD_STREAM:
+        # Feature off → 404, so the frontend re-POSTs to /api/agent/stream.
+        return jsonify({"error": "cloud streaming disabled"}), 404
+    # mirrors api_agent_stream at L332 — keep in sync
+    body = json_body()
+    msg = (body.get("message") or "").strip()
+    if not msg:
+        return jsonify({"error": "message required"}), 400
+    # mirrors api_agent_stream at L336 — keep in sync. A staged image has no
+    # cloud payload wired up yet, so that turn belongs to v1.
+    image_id = (body.get("image_id") or "").strip()
+    if image_id:
+        return jsonify({"error": "image turns are handled by v1"}), 404
+    # mirrors api_agent_stream at L352 — keep in sync
+    ensure_modes()
+    # mirrors api_agent_stream at L354 — keep in sync
+    agent_mode = get_agent_mode()
+    # Reject up front exactly what _try_cloud_stream declines at
+    # modes/agent.py L854-L873 — keep in sync — so a non-cloud turn gets a
+    # 404 before a single SSE byte is written.
+    if agent_mode._mode() == "local":
+        return jsonify({"error": "local mode"}), 404
+    backend = agent_mode._backend_obj()
+    if backend is None:
+        return jsonify({"error": "cloud backend unavailable"}), 404
+    try:
+        want_cloud = backend.should_use_cloud()
+    except Exception as e:
+        log.warning("cloud check failed (%s)", e)
+        want_cloud = False
+    if not want_cloud:
+        return jsonify({"error": "cloud unavailable"}), 404
+
+    def _frame(event, data):
+        """Named SSE event frames — v1's _sse at L356 emits data-only lines."""
+        return "event: %s\ndata: %s\n\n" % (event, json.dumps(data))
+
+    def generate():
+        # mirrors api_agent_stream at L412 — keep in sync: one Agent turn at
+        # a time (deliberately NOT inference_lock — a cloud call can block
+        # for 30s and Chat mode must keep running while it does).
+        with agent_turn_guard():
+            try:
+                # mirrors api_agent_stream at L427 — keep in sync: open the
+                # turn so the prompt tier resolves once and stays put.
+                agent_mode.begin_turn()
+                agent_mode._clear_turn_cache()
+                # mirrors api_agent_stream at L496 — keep in sync: the same
+                # user-message shape v1's _turn() stores. Appended BEFORE the
+                # generator captures `before`, so a cloud rollback leaves the
+                # question in the transcript for the v1 fallback to answer.
+                agent_mode._messages.append({"role": "user", "text": msg})
+                saw_end = False
+                for kind, payload in agent_mode._handle_cloud_stream():
+                    if kind == "delta":
+                        yield _frame("delta", {"t": payload})
+                    elif kind == "tool":
+                        yield _frame("tool", {
+                            "name": payload.get("name", ""),
+                            "args": payload.get("args", {}),
+                            "result": payload.get("result", ""),
+                        })
+                    elif kind == "error":
+                        yield _frame("error", payload)
+                    elif kind == "end":
+                        saw_end = True
+                        yield _frame("done", {"t": payload})
+                if not saw_end:
+                    # Empty (no end) = cloud declined → the frontend re-POSTs
+                    # to v1, which runs the local engine on the same message.
+                    yield _frame("fallback", {"reason": "cloud_unavailable"})
+            except Exception as e:
+                # mirrors api_agent_stream at L418 — keep in sync. The
+                # generator already rolled back on its way out; GeneratorExit
+                # is NOT caught, so a client disconnect lets it close and run
+                # its own commit/rollback.
+                yield _frame("error", {"error": "%s: %s" % (type(e).__name__, e)})
+
+    # mirrors api_agent_stream at L624 — keep in sync
+    return Response(
+        stream_with_context(generate()),
+        mimetype="text/event-stream",
+        headers={"Cache-Control": "no-cache, no-transform",
+                 "X-Accel-Buffering": "no"},
+    )
+
+
 def _record_local_turn(agent_mode) -> dict:
     """Record the on-device model the SSE stream just ran.
 
