@@ -5,6 +5,7 @@ __pycache__/
 *.so
 
 # Backups
+backups/
 *.bak
 *.bak.*
 *.orig
@@ -15,6 +16,12 @@ __pycache__/
 .venv
 env/
 venv/
+
+# Secrets — cloud API keys live here, never commit them
+# data/ is the fixed config dir (config.DATA_DIR): agent_config.json + logs.
+data/
+agent_config.json
+**/agent_config.json
 
 # Logs
 logs/

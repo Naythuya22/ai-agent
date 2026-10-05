@@ -70,6 +70,14 @@ Tip: Type / and Enter for interactive menu.
 ~/.ai-agent/code_projects.json
 ~/.ai-agent/skills/
 ~/.ai-agent/logs/agent.log    Rotating log (512 KB x 3)
+<project>/data/agent_config.json
+                              Agent Mode API keys — fixed absolute path, never
+                              derived from $HOME (the server runs with
+                              HOME=/data/data/com.termux/files/home and the
+                              shell with /root, so a HOME path split in two and
+                              the keys vanished on restart). Mode 0600,
+                              git-ignored, migrated in from ~/.ai-agent on
+                              first run.
 
 ## Logging
 
