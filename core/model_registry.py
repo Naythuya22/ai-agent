@@ -43,6 +43,7 @@ MODEL_CONTEXT_LIMITS: dict[str, int] = {
     # Google
     "gemini-2.5-flash": 1_048_576,
     "gemini-2.5-flash-lite": 1_048_576,
+    "gemini-2.0-flash": 1_048_576,
     "gemini-1.5-pro": 2_097_152,
     "gemini-3-flash-preview": 1_048_576,
     # DeepSeek
@@ -65,7 +66,8 @@ MODEL_CONTEXT_LIMITS: dict[str, int] = {
     "gpt-4o": 128_000,
     "gpt-4o-mini": 128_000,
     "gpt-4-turbo": 128_000,
-    # OpenRouter free tier (vendor-prefixed names, as OpenRouter sends them)
+    # OpenRouter — vendor-prefixed names, as OpenRouter sends them
+    "google/gemini-2.5-flash": 1_048_576,
     "minimax/minimax-m3:free": 1_048_576,
     "thinkingmachines/inkling:free": 1_048_576,
     "meituan/longcat-2.0:free": 1_048_576,

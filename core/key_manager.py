@@ -94,7 +94,7 @@ DEFAULT_CONFIG: dict = {
             "enabled": True,
         },
         "openrouter": {
-            "model": "google/gemini-2.5-flash:free",
+            "model": "google/gemini-2.5-flash",
             "base_url": "https://openrouter.ai/api/v1",
             "enabled": True,
         },

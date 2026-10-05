@@ -40,11 +40,20 @@ class NameTests(unittest.TestCase):
         self.assertEqual(MR.normalize_model("  DeepSeek-Chat "), "deepseek-chat")
 
     def test_openrouter_name_yields_bare_candidates(self):
-        """``google/gemini-2.5-flash:free`` must still hit the table."""
-        names = MR.lookup_names("google/gemini-2.5-flash:free")
-        self.assertIn("google/gemini-2.5-flash:free", names)
-        self.assertIn("gemini-2.5-flash:free", names)
+        """``google/gemini-2.5-flash`` must still hit the table.
+
+        The ``:free`` slug for this model was retired upstream, so it is no
+        longer the input under test; the routing-suffix peeling it used to
+        exercise is pinned below with a slug OpenRouter still serves.
+        """
+        names = MR.lookup_names("google/gemini-2.5-flash")
+        self.assertIn("google/gemini-2.5-flash", names)
         self.assertIn("gemini-2.5-flash", names)
+
+        free = MR.lookup_names("qwen/qwen3.6-plus:free")
+        self.assertIn("qwen/qwen3.6-plus:free", free)
+        self.assertIn("qwen/qwen3.6-plus", free)
+        self.assertIn("qwen3.6-plus", free)
 
     def test_no_model_yields_no_candidates(self):
         self.assertEqual(MR.lookup_names(""), [])

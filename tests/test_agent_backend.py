@@ -353,7 +353,9 @@ class AdapterTests(BackendCase):
         self.assertEqual(body["contents"][1]["role"], "model")
         fc = body["contents"][1]["parts"][0]["functionCall"]
         self.assertEqual(fc["name"], "web_search")
-        self.assertEqual(fc["arguments"], {"q": "x"})
+        self.assertEqual(fc["args"], {"q": "x"})
+        self.assertNotIn("arguments", fc,
+                         "Gemini's function_call field is `args`")
         self.assertIn("functionResponse", body["contents"][2]["parts"][0])
         # function_declarations must not carry the OpenAI "type" wrapper
         decls = body["tools"][0]["function_declarations"]
@@ -363,17 +365,73 @@ class AdapterTests(BackendCase):
         data = {"candidates": [{"content": {"parts": [
             {"text": "hello"},
             {"functionCall": {"name": "run_python",
-                              "arguments": {"code": "1"}}}]}}],
+                              "args": {"code": "1"}}}]}}],
             "usageMetadata": {"promptTokenCount": 11, "candidatesTokenCount": 5}}
         step = AB.GeminiAdapter().parse(data, model="gemini-2.0-flash", key_id="k")
         self.assertEqual(step.text, "hello")
         self.assertEqual(step.tool_calls[0]["function"]["name"], "run_python")
+        self.assertEqual(step.tool_calls[0]["function"]["arguments"], {"code": "1"})
         self.assertEqual(step.usage["prompt_tokens"], 11)
         self.assertEqual(step.usage["completion_tokens"], 5)
 
     def test_gemini_parse_rejects_empty_candidates(self):
         with self.assertRaises(CloudError):
             AB.GeminiAdapter().parse({"candidates": []}, model="m", key_id="k")
+
+    def test_gemini_request_uses_args_not_arguments(self):
+        _, body, _ = AB.GeminiAdapter().request(
+            key=GEM, model="gemini-2.5-flash", system="s",
+            messages=[{"role": "user", "content": "hi"},
+                      {"role": "assistant", "content": "",
+                       "tool_calls": [{"function": {"name": "web_search",
+                                                    "arguments": {"q": "x"}}}]},
+                      {"role": "tool", "name": "web_search",
+                       "tool_call_id": "call_1", "content": "r"}],
+            tools=[{"type": "function", "function": {"name": "web_search",
+                                                     "description": "d",
+                                                     "parameters": {"type": "object"}}}],
+            max_tokens=16)
+        fc = body["contents"][1]["parts"][0]["functionCall"]
+        self.assertIn("args", fc)
+        self.assertEqual(fc["args"], {"q": "x"})
+        self.assertNotIn("arguments", fc)
+        wire = json.dumps(body, ensure_ascii=False)
+        self.assertNotIn("arguments", wire,
+                         "Gemini rejects `arguments` at function_call with 400")
+        json.loads(wire)
+
+    def test_gemini_parser_reads_args(self):
+        data = {"candidates": [{"content": {"parts": [
+            {"functionCall": {"name": "run_python",
+                              "args": {"code": "1"}}}]}}]}
+        step = AB.GeminiAdapter().parse(data, model="gemini-2.5-flash",
+                                        key_id="k")
+        self.assertEqual(step.tool_calls[0]["function"]["name"], "run_python")
+        self.assertEqual(step.tool_calls[0]["function"]["arguments"],
+                         {"code": "1"})
+
+    def test_gemini_parser_args_edge_shapes(self):
+        def calls(part):
+            data = {"candidates": [{"content": {"parts": [part]}}]}
+            return AB.GeminiAdapter().parse(
+                data, model="m", key_id="k").tool_calls
+
+        self.assertEqual(
+            calls({"functionCall": {"name": "t", "args": {}}})
+            [0]["function"]["arguments"], {})
+        self.assertEqual(
+            calls({"functionCall": {"name": "t", "args": None}})
+            [0]["function"]["arguments"], {})
+        self.assertEqual(
+            calls({"functionCall": {"name": "t"}})
+            [0]["function"]["arguments"], {})
+        mixed = calls({"functionCall": {"name": "t", "args": {"a": 1},
+                                        "arguments": {"a": 2}}})
+        self.assertEqual(mixed[0]["function"]["arguments"], {"a": 1},
+                         "the spec field `args` must win over `arguments`")
+        legacy = calls({"functionCall": {"name": "t",
+                                         "arguments": {"a": 3}}})
+        self.assertEqual(legacy[0]["function"]["arguments"], {"a": 3})
 
     def test_anthropic_request_shape(self):
         url, body, headers = AB.AnthropicAdapter().request(
@@ -414,6 +472,46 @@ class AdapterTests(BackendCase):
     def test_anthropic_parse_rejects_empty_body(self):
         with self.assertRaises(CloudError):
             AB.AnthropicAdapter().parse({"content": []}, model="m", key_id="k")
+
+
+class ModelPresetTests(unittest.TestCase):
+    """Preset lists and the registry — the dead models from the live log."""
+
+    def test_models_gemini_has_no_1_5_flash(self):
+        self.assertNotIn("gemini-1.5-flash", AB.MODELS["gemini"])
+
+    def test_models_gemini_has_current_flash(self):
+        for m in ("gemini-2.5-flash", "gemini-2.0-flash",
+                  "gemini-2.5-flash-lite"):
+            self.assertIn(m, AB.MODELS["gemini"], m)
+        self.assertIn("gemini-2.5-pro", AB.MODELS["gemini"])
+
+    def test_openrouter_no_retired_free_slug(self):
+        models = AB.MODELS["openrouter"]
+        self.assertNotIn("google/gemini-2.5-flash:free", models)
+        self.assertIn("google/gemini-2.5-flash", models)
+        for m in ("deepseek/deepseek-chat", "meta-llama/llama-3.1-8b-instruct"):
+            self.assertIn(m, models, m)
+        self.assertTrue(models)
+
+    def test_registry_has_new_gemini_entries(self):
+        for m in ("gemini-2.5-flash", "gemini-2.0-flash",
+                  "gemini-2.5-flash-lite"):
+            info = MR.describe_limit(m, "", limits={})
+            self.assertEqual(info["limit"], 1_048_576, m)
+            self.assertEqual(info["source"], "exact", m)
+        self.assertNotIn("gemini-1.5-flash", MR.MODEL_CONTEXT_LIMITS)
+        openrouter = MR.describe_limit("google/gemini-2.5-flash", "", limits={})
+        self.assertEqual(openrouter["limit"], 1_048_576)
+        self.assertEqual(openrouter["source"], "exact")
+
+    def test_new_presets_classify_into_a_prompt_tier(self):
+        from core import prompts as P
+        for m in ("gemini-2.0-flash", "gemini-2.5-flash-lite",
+                  "google/gemini-2.5-flash"):
+            self.assertEqual(P.classify_tier("cloud", m), "cloud_fast", m)
+        self.assertEqual(P.classify_tier("cloud", "gemini-2.5-pro"),
+                         "cloud_strong")
 
 
 class NormaliseTests(unittest.TestCase):

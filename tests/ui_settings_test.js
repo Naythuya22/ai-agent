@@ -215,7 +215,7 @@ const LABELS = { openai: 'OpenAI', gemini: 'Google Gemini', openrouter: 'OpenRou
 const MODELS = {
   openai: ['gpt-4o', 'gpt-4o-mini'],
   gemini: ['gemini-2.5-flash', 'gemini-2.5-pro'],
-  openrouter: ['google/gemini-2.5-flash:free', 'openai/gpt-4o-mini'],
+  openrouter: ['google/gemini-2.5-flash', 'openai/gpt-4o-mini'],
   anthropic: ['claude-3-5-haiku-latest'],
   deepseek: ['deepseek-chat', 'deepseek-reasoner'],
 };
@@ -239,7 +239,7 @@ const REMOTE = {
     providers: {
       openai: { model: 'gpt-4o-mini', base_url: 'https://api.openai.com/v1', enabled: true },
       gemini: { model: 'gemini-2.5-flash', base_url: '', enabled: true },
-      openrouter: { model: 'google/gemini-2.5-flash:free', base_url: '', enabled: true },
+      openrouter: { model: 'google/gemini-2.5-flash', base_url: '', enabled: true },
       anthropic: { model: 'claude-3-5-haiku-latest', base_url: '', enabled: true },
       deepseek: { model: 'deepseek-chat', base_url: 'https://api.deepseek.com/v1', enabled: true },
     },

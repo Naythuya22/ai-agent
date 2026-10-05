@@ -81,7 +81,8 @@ class GetSettingsTests(SettingsApiCase):
             self.assertIn(m, models["openai"])
         for m in ("gemini-2.5-flash", "gemini-2.5-pro"):
             self.assertIn(m, models["gemini"])
-        self.assertIn("google/gemini-2.5-flash:free", models["openrouter"])
+        self.assertNotIn("google/gemini-2.5-flash:free", models["openrouter"])
+        self.assertIn("google/gemini-2.5-flash", models["openrouter"])
         self.assertIn("deepseek-chat", models["deepseek"])
         self.assertTrue(models["anthropic"])
 

@@ -79,8 +79,8 @@ COST_FALLBACK = {"openai": 0.50, "gemini": 0.10, "openrouter": 0.30,
 MODELS: dict = {
     "openai": ["gpt-4o", "gpt-4o-mini", "gpt-4.1", "gpt-4.1-mini", "o4-mini"],
     "gemini": ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.0-flash",
-               "gemini-1.5-flash"],
-    "openrouter": ["google/gemini-2.5-flash:free", "openai/gpt-4o-mini",
+               "gemini-2.5-flash-lite"],
+    "openrouter": ["google/gemini-2.5-flash", "openai/gpt-4o-mini",
                    "anthropic/claude-3.5-haiku", "deepseek/deepseek-chat",
                    "meta-llama/llama-3.1-8b-instruct"],
     "anthropic": ["claude-3-5-haiku-latest", "claude-3-5-sonnet-latest",
@@ -665,7 +665,7 @@ class GeminiAdapter(Adapter):
                     fn = tc.get("function") or {}
                     parts.append({"functionCall": {
                         "name": fn.get("name", ""),
-                        "arguments": _args(fn.get("arguments")),
+                        "args": _args(fn.get("arguments")),
                     }})
                 if m.get("content"):
                     parts.append({"text": m["content"]})
@@ -706,8 +706,11 @@ class GeminiAdapter(Adapter):
                 text += p["text"]
             if p.get("functionCall"):
                 fc = p["functionCall"]
-                calls.append({"function": {"name": fc.get("name", ""),
-                                           "arguments": _args(fc.get("arguments"))}})
+                if isinstance(fc, dict):
+                    raw = fc["args"] if "args" in fc else fc.get("arguments")
+                    calls.append({"function": {
+                        "name": fc.get("name", ""),
+                        "arguments": _args(raw)}})
         u = data.get("usageMetadata") or {}
         usage = {}
         if u.get("promptTokenCount") is not None:
