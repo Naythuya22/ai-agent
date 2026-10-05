@@ -238,6 +238,12 @@ AGENT_READ_CEILING  = _env_int("AI_AGENT_READ_CEILING",
 AGENT_READ_RESERVE  = 1_000
 
 
+# ── budget awareness (Agent Mode) ────────────────────────────────
+AGENT_BUDGET_HINT = _env_bool("AI_AGENT_BUDGET_HINT", True)
+AGENT_BUDGET_WARN_CTX = _env_int("AI_AGENT_BUDGET_WARN_CTX",
+                                 80, maximum=100)
+AGENT_BUDGET_WARN_ITER = 5      # remaining calls threshold
+
 
 # ── prompt tier ────────────────────────────────────────────────────────────
 #

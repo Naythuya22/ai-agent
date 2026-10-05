@@ -206,6 +206,9 @@ class AgentMode:
         # The prompt tier resolved for the turn in flight — None between turns.
         # See _system_prompt().
         self._turn_prompt: tuple | None = None
+        # Tool-loop iterations spent this turn — the "iter" half of the budget
+        # hint. Reset alongside the prompt tier in begin_turn().
+        self._turn_iter = 0
         # C5a: In HTTP mode, server owns session state — do not touch store.
         if self._store and not self._is_http():
             try:
@@ -239,6 +242,7 @@ class AgentMode:
         resolve and every later one reuse.
         """
         self._turn_prompt = None
+        self._turn_iter = 0
 
     def _system_prompt(self) -> tuple:
         """``(system_prompt, tier)`` for this turn — resolved once, then frozen.
@@ -246,6 +250,15 @@ class AgentMode:
         The backend is only asked what it *would* do (mode, cloud eligibility,
         which provider is first), never told to do anything: this must not be
         able to change which model answers.
+
+        Budget note: when ``config.AGENT_BUDGET_HINT`` is on, ``_budget_hint()``
+        is appended to the prompt string *before* the tuple is stored, so the
+        note is frozen together with the prompt. Turn-freeze already freezes
+        the resolved prompt — the hint inherits that behaviour automatically:
+        the model gets one consistent budget line for the whole turn, and
+        nothing that happens mid-turn (a Settings write, the iteration counter
+        moving) can rewrite a prompt the model has already been given. The
+        tier logic below is untouched by the hint.
         """
         if self._turn_prompt is None:
             backend, model = "", ""
@@ -263,11 +276,44 @@ class AgentMode:
                 log.warning("prompt tier %s is pinned but this turn looks like "
                             "%s (%s/%s) — using the pinned prompt", mode,
                             auto_tier, backend or "?", model or "?")
-            self._turn_prompt = (prompt_tiers.load_prompt(tier), tier)
+            prompt = prompt_tiers.load_prompt(tier)
+            hint = self._budget_hint()
+            if hint:
+                prompt = prompt + "\n\n" + hint
+            self._turn_prompt = (prompt, tier)
             record_tier(tier, source)
             log.info("prompt tier %s (source %s) for %s/%s", tier, source,
                      backend or "?", model or "?")
         return self._turn_prompt
+
+    def _budget_hint(self) -> str:
+        """One-line budget note. Empty when AGENT_BUDGET_HINT is off.
+
+        Numbers and fixed text only — no user input, no file contents, no
+        credentials, and no newline can reach the prompt through it.
+        """
+        if not config.AGENT_BUDGET_HINT:
+            return ""
+        pct = 0
+        try:
+            backend = self._backend_obj()
+            if backend is not None:
+                st = backend.context_state() or {}
+                pct = int(st.get("pct", 0) or 0)
+        except Exception:
+            pct = 0
+        used = getattr(self, "_turn_iter", 0) or 0
+        try:
+            maxi = config.agent_max_iter(self.name)
+        except Exception:
+            maxi = 0
+        note = "[BUDGET: ctx %d%% iter %d/%d]" % (pct, used, maxi)
+        if pct >= getattr(config, "AGENT_BUDGET_WARN_CTX", 80):
+            note += " — be concise"
+        left = maxi - used if maxi else 0
+        if maxi and left <= getattr(config, "AGENT_BUDGET_WARN_ITER", 5):
+            note += " — wrap up soon"
+        return note
 
     def _with_memory(self, system: str) -> str:
         """The user's profile hint appended to a prompt, when there is one."""
@@ -684,6 +730,7 @@ class AgentMode:
                                        "args": args,
                                        "reasoning": step.reasoning})
                 result = self._execute_tool(name, args)
+                self._turn_iter += 1   # budget: one more loop iteration spent
                 self._messages.append({"role": "tool_result", "tool": name,
                                        "text": result})
             step = _step()
@@ -876,6 +923,7 @@ class AgentMode:
                     "args": args,
                 })
                 result = self._execute_tool(name, args)
+                self._turn_iter += 1   # budget: one more loop iteration spent
                 self._messages.append({
                     "role": "tool_result",
                     "tool": name,
