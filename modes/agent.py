@@ -826,6 +826,257 @@ class AgentMode:
             return (getattr(step, "text", "") or "").strip() or candidate
         return candidate
 
+    # ── streaming cloud attempt (Batch 2b) ────────────────────────────────
+    #
+    # The same cloud turn _try_cloud/_handle_cloud run; only the answer is
+    # produced incrementally. Part 3's SSE route owns the turn setup —
+    # begin_turn(), _clear_turn_cache() and the {"role": "user", ...} append
+    # happen before it iterates _handle_cloud_stream() — because neither
+    # method below takes user_input. No path here touches the local engine:
+    # an empty stream is the signal for the route to fall back.
+
+    def _try_cloud_stream(self):
+        """Generator. Yields:
+
+            ("delta", str)
+            ("tool", {"name": ..., "args": ..., "result": ...})
+            ("error", {...})
+            ("end", final_text)
+
+        Yields nothing if cloud is unusable or declines — the caller then
+        decides the fallback (Part 3, same job handle()'s cloud_text check
+        does). Errors
+        are forwarded verbatim and end the stream; the local engine is never
+        called from here.
+        """
+        # mirrors _try_cloud at L599 — keep in sync on any change
+        mode = self._mode()          # fresh from disk, every turn
+        if mode == "local":
+            return              # Local Only never leaves this function
+        if self._is_http() and mode != "cloud":
+            return              # mirrors _try_cloud at L602 — keep in sync on any change
+        be = self._backend_obj()
+        if be is None:
+            return              # mirrors _try_cloud at L604 — keep in sync on any change
+        try:
+            want = be.should_use_cloud()
+            reason = "" if want else (be.why_not_cloud() or "no_usable_key")
+        except Exception as e:
+            log.warning("cloud check failed (%s)", e)
+            return              # mirrors _try_cloud at L611 — keep in sync on any change
+        if not want:
+            # mirrors _try_cloud at L619 — keep in sync on any change.
+            # Cloud Only answers there with _cloud_only_reply(); a generator
+            # cannot, so this yields nothing and Part 3 renders the refusal
+            # (handle()'s Cloud Only branch).
+            log.info("cloud stream declined: %s", reason)
+            return
+        # mirrors _handle_cloud at L688 — keep in sync on any change. The SSE
+        # route passes no system, so the frozen per-turn tier is resolved
+        # here exactly as it is there
+        system = self._with_memory(self._system_prompt()[0])
+        max_iter = config.agent_max_iter(self.name)   # mirrors _handle_cloud at L701 — keep in sync on any change
+        _seen_calls = set()                           # mirrors _handle_cloud at L703 — keep in sync on any change
+        # Read back by _handle_cloud_stream at commit time: only the last
+        # ("done", ...) frame carries the reasoning the final answer was
+        # produced with, and normalize() (core/agent_backend.py L607) hands
+        # it back as reasoning_content — without it the NEXT turn's first
+        # DeepSeek thinking request dies with a 400.
+        self._stream_reasoning = ""
+        final_text = ""
+
+        def _pump_round():
+            """One provider step: forward its deltas, then hand back
+            ``(info, text)``. ``info`` is None when the stream came back
+            empty (every provider failed) or died in-band mid-answer —
+            both mean no ("end", ...) leaves this generator.
+            """
+            # mirrors _handle_cloud at L691 — keep in sync on any change.
+            # Same system/messages/tools/max_tokens; http/http_stream stay
+            # at step_stream's defaults, which is exactly what step() gets
+            # at L691 (it passes neither).
+            text = ""
+            info = None
+            stream = be.step_stream(
+                system=system, messages=self._messages, tools=self._tools,
+                max_tokens=config.agent_max_tokens(self.name))
+            for kind, payload in stream:
+                if kind == "delta":
+                    text += payload
+                    yield ("delta", payload)     # forwarded verbatim
+                elif kind == "done":
+                    info = payload
+                    # mirrors _handle_cloud at L697 — keep in sync on any
+                    # change. Metered inside the pump, so even the round
+                    # refreshed after the last tools (the L736 step) is
+                    # recorded — exactly as _step() records before the loop
+                    # ever looks at its tool_calls.
+                    record_usage("cloud", info.get("model") or "",
+                                 info.get("provider") or "", mode)
+                    self._stream_reasoning = info.get("reasoning") or ""
+                elif kind == "error":
+                    yield ("error", payload)     # forwarded verbatim
+                    return None
+            return (info, text)
+
+        # mirrors _handle_cloud at L700 — the first step, before the loop
+        info, round_text = (yield from _pump_round()) or (None, "")
+        ended = False
+        for _ in range(max_iter):                     # mirrors _handle_cloud at L704 — keep in sync on any change
+            if info is None:
+                # step_stream's empty-stream signal: every provider failed
+                # before a single byte — no ("end", ...) → route falls back.
+                return
+            if not info.get("tool_calls"):
+                final_text = round_text or final_text   # mirrors _handle_cloud at L706 — keep in sync on any change
+                ended = True
+                break
+            for tc in info["tool_calls"]:
+                # mirrors _handle_cloud at L708 — keep in sync on any change
+                fn_info = tc.get("function", {}) if isinstance(tc, dict) else {}
+                name = fn_info.get("name", "")
+                args = fn_info.get("arguments", {}) or {}
+                try:
+                    _key = (name, json.dumps(args, sort_keys=True))
+                except Exception:
+                    _key = (name, str(args))
+                if _key in _seen_calls:
+                    # mirrors _handle_cloud at L716 — keep in sync on any
+                    # change. Skip the repeat, but hand the model its data
+                    # back instead of losing it
+                    self._messages.append({
+                        "role": "tool_result", "tool": name,
+                        "text": self._cached_text(
+                            name, args,
+                            f"(skipped: {name} already called with "
+                            f"identical args this turn)"),
+                    })
+                    continue
+                _seen_calls.add(_key)
+                # mirrors _handle_cloud at L729 — keep in sync on any change.
+                # `reasoning` rides along so the next provider step can pass
+                # it back (DeepSeek 400)
+                self._messages.append({"role": "tool_call", "tool": name,
+                                       "args": args,
+                                       "reasoning": info.get("reasoning")})
+                result = self._execute_tool(name, args)   # mirrors _handle_cloud at L732 — keep in sync on any change
+                self._turn_iter += 1   # budget: one more loop iteration spent
+                self._messages.append({"role": "tool_result", "tool": name,
+                                       "text": result})   # mirrors _handle_cloud at L734 — keep in sync on any change
+                yield ("tool", {"name": name, "args": args,
+                                "result": result})
+            # mirrors _handle_cloud at L736 — step = _step() for the next round
+            info, round_text = (yield from _pump_round()) or (None, "")
+        if not ended:
+            if info is None:
+                # mirrors _handle_cloud at L736 — the refresh after the last
+                # tool round came back empty; there _step() raises and
+                # _try_cloud rolls back (L648), so nothing commits here either
+                return
+            # mirrors _handle_cloud at L737 — keep in sync on any change.
+            # The last pumped round's text stands, tool_calls or not —
+            # exactly what `final_text = step.text or ""` does there
+            final_text = round_text
+        yield ("end", final_text)
+
+    def _handle_cloud_stream(self):
+        """Wrap _try_cloud_stream with _handle_cloud's finalization
+        (verify pass, sanitize, commit/rollback).
+
+        Call contract (Part 3): the route performs begin_turn(),
+        _clear_turn_cache() and the user-message append BEFORE iterating
+        this generator — neither streaming method takes user_input. ``before``
+        is captured after that append, so every rollback below leaves the
+        question in the transcript for the local fallback to answer (the
+        non-streaming rollback at L648 also removes it, because
+        _handle_cloud appended it itself).
+
+        Yields every ("delta"|"tool"|"error", ...) frame verbatim, then at
+        most one ("end", final_text) carrying the *verified* text now in the
+        transcript — the frontend replaces its buffer with it, never appends.
+        """
+        before = len(self._messages)
+        any_output = False
+        partial = ""
+        final_text = None
+        try:
+            for kind, payload in self._try_cloud_stream():
+                if kind == "end":
+                    final_text = payload
+                    continue      # verified below, re-emitted once at the end
+                if kind == "delta":
+                    any_output = True
+                    partial += payload
+                elif kind == "tool":
+                    any_output = True
+                yield kind, payload    # forwarded verbatim
+            if final_text is None:
+                # Cloud declined, every provider failed, or the stream died
+                # after the first delta: nothing committed, and no local call
+                # here — Part 3 decides (the Cloud Only refusal stays Part
+                # 3's job too, as in handle()'s Cloud Only branch). Same
+                # rollback the non-streaming failure path performs.
+                # mirrors _try_cloud at L648 — keep in sync on any change
+                del self._messages[before:]
+                return
+            be = self._backend_obj()
+            if be is not None:
+                mode = self._mode()
+                system = self._with_memory(self._system_prompt()[0])
+
+                def _step():
+                    # mirrors _handle_cloud at L690 — keep in sync on any change
+                    step = be.step(system=system, messages=self._messages,
+                                   tools=self._tools,
+                                   max_tokens=config.agent_max_tokens(self.name))
+                    record_usage("cloud", step.model or "", step.provider or "",
+                                 mode)
+                    return step
+
+                # mirrors _handle_cloud at L742 — keep in sync on any change.
+                # One reviewer pass, running on the unmodified
+                # _verify_cloud/_reviewer_reply
+                final_text = self._verify_cloud(be, final_text, _step)
+            # Sanitize + commit, the mechanism _handle_cloud uses at L744-747:
+            # tool output was already banner-ed and redacted inside
+            # _execute_tool/_guard_result on the way in, so there is nothing
+            # left to strip from the answer — then cap history, then persist.
+            # mirrors _handle_cloud at L744 — keep in sync on any change
+            self.turns += 1
+            self._messages.append({"role": "assistant", "text": final_text,
+                                   "reasoning": getattr(
+                                       self, "_stream_reasoning", "")})
+            self._trim_messages()   # F2: cap history
+            self._save_turn()
+        except GeneratorExit:
+            if any_output:
+                # Commit the partial answer — only because real output
+                # already reached the client. Those deltas and tool
+                # round-trips happened and were rendered, and the
+                # tool_call/tool_result pairs are already in the transcript:
+                # rolling back now would leave history shorter than what the
+                # user saw and one assistant turn short of balanced. The
+                # verify pass is deliberately skipped — no client is left to
+                # correct, and the reviewer would spend a provider call on it.
+                # mirrors _handle_cloud at L744 — keep in sync on any change
+                self.turns += 1
+                self._messages.append({"role": "assistant", "text": partial,
+                                       "reasoning": getattr(
+                                           self, "_stream_reasoning", "")})
+                self._trim_messages()   # F2: cap history
+                self._save_turn()
+            else:
+                # mirrors _try_cloud at L648 — keep in sync on any change
+                del self._messages[before:]
+            raise
+        except Exception:
+            # mirrors _try_cloud at L648 — keep in sync on any change. Same
+            # rollback the non-streaming failure path performs, then the
+            # error keeps travelling so the route can report it.
+            del self._messages[before:]
+            raise
+        yield ("end", final_text)
+
     def handle(self, user_input: str) -> str:
         if not user_input or not user_input.strip():
             raise ValueError("user_input must be non-empty")
