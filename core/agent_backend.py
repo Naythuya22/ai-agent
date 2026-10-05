@@ -208,6 +208,141 @@ def _status_error(status: int, raw: str, headers) -> CloudError:
     return CloudError("bad_response", msg, status)
 
 
+def _sse_events(lines):
+    """Yield ``(event, data)`` for each complete event in an SSE line stream.
+
+    The subset of the SSE format the providers actually use: a blank line
+    dispatches, ``data:`` lines build the payload (several are joined with
+    ``\\n`` per spec), ``event:`` names it (default ``message``), a line
+    starting with ``:`` is a comment, and OpenAI's ``data: [DONE]``
+    terminator dispatches as ``("done", "[DONE]")`` and ends the stream.
+    A trailing event with no blank line after it is dispatched too — some
+    servers close the connection without one.
+    """
+    event, parts = "message", []
+    for raw in lines:
+        line = raw.rstrip("\r\n")
+        if not line:
+            if parts:
+                data = "\n".join(parts)
+                done = data.strip() == "[DONE]"
+                yield ("done", "[DONE]") if done else (event, data)
+                if done:
+                    return
+            event, parts = "message", []
+            continue
+        if line.startswith(":"):
+            continue                    # comment / keep-alive
+        if line.startswith("event:"):
+            event = line[6:].lstrip() or "message"
+        elif line.startswith("data:"):
+            value = line[5:]
+            if value.startswith(" "):   # one optional space after the colon
+                value = value[1:]
+            parts.append(value)
+        # id:, retry: and anything else are ignored on purpose
+    if parts:                           # server closed without a blank line
+        data = "\n".join(parts)
+        yield ("done", "[DONE]") if data.strip() == "[DONE]" else (event, data)
+
+
+def _http_stream(url: str, payload: Any, headers: dict,
+                 timeout: float = HTTP_TIMEOUT):
+    """POST, then yield the response's SSE lines as they arrive.
+
+    Line-iterator twin of ``_http_json``: the same error mapping (an HTTP
+    status becomes the same ``CloudError`` the retry logic already knows),
+    but the body is consumed incrementally instead of read whole. The
+    response is closed in a ``finally`` so a client that stops reading
+    mid-stream does not leak the socket.
+    """
+    data = payload if isinstance(payload, (bytes, bytearray)) else \
+        json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    hdrs = {"Content-Type": "application/json", "User-Agent": "ai-agent/1",
+            "Accept": "text/event-stream"}
+    hdrs.update(headers or {})
+    req = urllib.request.Request(url, data=data, headers=hdrs, method="POST")
+    try:
+        resp = urllib.request.urlopen(req, timeout=timeout)
+    except urllib.error.HTTPError as e:
+        raw = ""
+        try:
+            raw = e.read().decode("utf-8", "replace")
+        except Exception:
+            pass
+        raise _status_error(e.code, raw, e.headers)
+    except urllib.error.URLError as e:
+        raise CloudError("network", str(getattr(e, "reason", e) or e))
+    except OSError as e:
+        raise CloudError("network", str(e))
+    try:
+        for raw_line in resp:
+            yield raw_line.decode("utf-8", "replace").rstrip("\r\n")
+    except OSError as e:
+        raise CloudError("network", str(e))
+    finally:
+        try:
+            resp.close()
+        except Exception:
+            pass
+
+
+def _no_stream_transport(*args, **kwargs):
+    """Stand-in when a test injected ``http`` but no stream transport.
+
+    Raises instead of dialling out: reaching this means the fixture wired
+    the fake transport to the wrong slot, and a real socket from a test
+    would be worse than a loud failure.
+    """
+    raise CloudError("network",
+                     "no stream transport injected for tests")
+
+
+def _stream_transport(http, http_stream):
+    """Which POST-to-SSE implementation ``request_stream`` may use.
+
+    A production call passes neither and gets the real ``_http_stream``.
+    Tests inject a fake; when they inject only ``http`` (the non-stream
+    transport) they have not provided a stream one, so use
+    ``_no_stream_transport`` rather than risk a real connection.
+    """
+    if http_stream is not None:
+        return http_stream
+    if http is not None:
+        return _no_stream_transport
+    return _http_stream
+
+
+def _guarded_stream(events, *, provider, model):
+    """Turn a failure after the first delta into an in-band error frame.
+
+    This is the contract's ``("error", ...)`` yield: before any text has
+    gone out, a CloudError still propagates — that is the pre-stream
+    failure the retry logic already understands — but once deltas have
+    been emitted the caller cannot retry silently, so the failure is
+    reported in-band instead. The message is sanitised like every other
+    one that can reach a log or the UI.
+    """
+    emitted = False
+    try:
+        for kind, payload in events:
+            if kind == "delta":
+                emitted = True
+            yield kind, payload
+    except CloudError as e:
+        if not emitted:
+            raise
+        yield "error", {
+            "error": "%s%s: %s" % (e.kind,
+                                   ("/%s" % e.status) if e.status else "",
+                                   _sanitize(e.message or "", 200)),
+            "kind": e.kind,
+            "status": e.status,
+            "provider": provider,
+            "model": model,
+        }
+
+
 # ──────────────────────────── tools ────────────────────────────
 
 # Python annotation (or default-value type) → JSON Schema type. Annotations
@@ -608,6 +743,18 @@ class Adapter:
     def parse(self, data: dict, *, model: str, key_id: str) -> Step:
         raise NotImplementedError
 
+    def request_stream(self, *, key: str, model: str, system: str,
+                       messages: list, tools: list, max_tokens: int,
+                       http=None, http_stream=None):
+        """Streaming twin of request(): a generator over the provider's SSE.
+
+        Yields ``("delta", text)`` fragments and then exactly one
+        ``("done", info)``; failures raise ``CloudError`` (the caller turns
+        a post-first-byte one into an ``("error", ...)`` frame). ``http`` /
+        ``http_stream`` select the transport — see ``_stream_transport``.
+        """
+        raise NotImplementedError
+
 
 class OpenAIAdapter(Adapter):
     provider = "openai"
@@ -646,6 +793,31 @@ class OpenAIAdapter(Adapter):
             key_id=key_id,
             reasoning=msg.get("reasoning_content") or "",
         )
+
+    def request_stream(self, *, key, model, system, messages, tools,
+                       max_tokens, http=None, http_stream=None):
+        """``"stream": true`` on the endpoint request() already builds.
+
+        Yields ``("delta", text)`` fragments, one ``("done", info)``, and
+        — for a failure after the first delta only — an ``("error", ...)``
+        frame (see ``_guarded_stream``); earlier failures raise CloudError.
+
+        OpenRouter and DeepSeek inherit this unchanged — they speak the
+        OpenAI dialect and only their base_url differs.
+        No ``stream_options`` is sent: gateways that speak this dialect
+        but predate the field reject unknown keys, and a missing usage
+        block only costs the meter an estimate it already falls back to.
+        """
+        url, body, headers = self.request(
+            key=key, model=model, system=system, messages=messages,
+            tools=tools, max_tokens=max_tokens)
+        body["stream"] = True
+        transport = _stream_transport(http, http_stream)
+        events = _openai_stream(transport(url, body, headers),
+                                model=model, provider=self.provider)
+        for event in _guarded_stream(events, provider=self.provider,
+                                     model=model):
+            yield event
 
 
 class GeminiAdapter(Adapter):
@@ -719,6 +891,29 @@ class GeminiAdapter(Adapter):
             usage["completion_tokens"] = u.get("candidatesTokenCount")
         return Step(text=text, tool_calls=calls, usage=usage,
                     model=model, provider=self.provider, key_id=key_id)
+
+    def request_stream(self, *, key, model, system, messages, tools,
+                       max_tokens, http=None, http_stream=None):
+        """The same payload request() builds, on the SSE twin of the URL.
+
+        Yields ``("delta", text)`` fragments, one ``("done", info)``, and
+        — for a failure after the first delta only — an ``("error", ...)``
+        frame (see ``_guarded_stream``); earlier failures raise CloudError.
+
+        ``:streamGenerateContent?alt=sse`` is ``:generateContent``
+        streamed — swapping that fragment is the whole difference.
+        """
+        url, body, headers = self.request(
+            key=key, model=model, system=system, messages=messages,
+            tools=tools, max_tokens=max_tokens)
+        url = url.replace(":generateContent?",
+                          ":streamGenerateContent?alt=sse&", 1)
+        transport = _stream_transport(http, http_stream)
+        events = _gemini_stream(transport(url, body, headers),
+                                model=model, provider=self.provider)
+        for event in _guarded_stream(events, provider=self.provider,
+                                     model=model):
+            yield event
 
 
 class OpenRouterAdapter(OpenAIAdapter):
@@ -802,6 +997,222 @@ class AnthropicAdapter(Adapter):
             usage["completion_tokens"] = u.get("output_tokens")
         return Step(text=text, tool_calls=calls, usage=usage,
                     model=model, provider=self.provider, key_id=key_id)
+
+    def request_stream(self, *, key, model, system, messages, tools,
+                       max_tokens, http=None, http_stream=None):
+        """``"stream": true`` on /messages; named events carry the shape.
+
+        Yields ``("delta", text)`` fragments, one ``("done", info)``, and
+        — for a failure after the first delta only — an ``("error", ...)``
+        frame (see ``_guarded_stream``); earlier failures, including the
+        stream's own ``error`` event, raise CloudError.
+        """
+        url, body, headers = self.request(
+            key=key, model=model, system=system, messages=messages,
+            tools=tools, max_tokens=max_tokens)
+        body["stream"] = True
+        transport = _stream_transport(http, http_stream)
+        events = _anthropic_stream(transport(url, body, headers),
+                                   model=model, provider=self.provider)
+        for event in _guarded_stream(events, provider=self.provider,
+                                     model=model):
+            yield event
+
+
+# ── streaming parsers (SSE → deltas + one "done" per step) ──────────────
+# One per wire dialect, shared by the adapters above: request() builds the
+# URL and headers, these consume the response. Each ends with exactly one
+# ("done", info) whose keys mirror what adapter.parse() would have
+# returned; key_id stays "" — the backend owns key ids and fills it in.
+
+def _openai_stream(lines, *, model, provider):
+    """Consume an OpenAI-dialect SSE body: text deltas, then one ``done``.
+
+    ``reasoning_content`` accumulates instead of streaming — it is replay
+    material for the next request, not something the user reads — and
+    ``tool_calls`` merge by ``index`` because one call's arguments may be
+    split across chunks. Usage is taken from whichever chunk carries it
+    (the final one, when the server bothers).
+    """
+    reasoning, usage, calls = "", {}, {}
+    for event, data in _sse_events(lines):
+        if event == "done":             # data: [DONE]
+            break
+        try:
+            obj = json.loads(data)
+        except ValueError:
+            continue                    # keep-alive or non-JSON noise
+        if not isinstance(obj, dict):
+            continue
+        if isinstance(obj.get("usage"), dict) and obj["usage"]:
+            usage = obj["usage"]
+        choices = obj.get("choices")
+        if not isinstance(choices, list) or not choices:
+            continue
+        choice = choices[0]
+        if not isinstance(choice, dict):
+            continue
+        delta = choice.get("delta")
+        if not isinstance(delta, dict):
+            continue
+        piece = delta.get("content")
+        if isinstance(piece, str) and piece:
+            yield "delta", piece
+        r = delta.get("reasoning_content")
+        if isinstance(r, str):
+            reasoning += r
+        for tc in delta.get("tool_calls") or []:
+            if not isinstance(tc, dict):
+                continue
+            idx = tc.get("index")
+            slot = calls.setdefault(
+                idx if isinstance(idx, int) else 0,
+                {"function": {"name": "", "arguments": ""}})
+            fn = tc.get("function")
+            if isinstance(fn, dict):
+                if isinstance(fn.get("name"), str):
+                    slot["function"]["name"] += fn["name"]
+                if isinstance(fn.get("arguments"), str):
+                    slot["function"]["arguments"] += fn["arguments"]
+    tool_calls = [v for _, v in sorted(calls.items())]
+    for tc in tool_calls:              # the wire carries a JSON string
+        tc["function"]["arguments"] = _args(tc["function"]["arguments"])
+    yield "done", {"usage": usage, "tool_calls": tool_calls,
+                   "reasoning": reasoning, "provider": provider,
+                   "model": model, "key_id": ""}
+
+
+def _gemini_stream(lines, *, model, provider):
+    """Consume Gemini's ``alt=sse`` body: parts yield text as they arrive.
+
+    The last ``usageMetadata`` seen wins — Gemini repeats the counts on
+    later chunks with the running total.
+    """
+    usage, calls = {}, []
+    for event, data in _sse_events(lines):
+        if event == "done":
+            break
+        try:
+            obj = json.loads(data)
+        except ValueError:
+            continue
+        if not isinstance(obj, dict):
+            continue
+        u = obj.get("usageMetadata")
+        if isinstance(u, dict):
+            if u.get("promptTokenCount") is not None:
+                usage["prompt_tokens"] = u.get("promptTokenCount")
+            if u.get("candidatesTokenCount") is not None:
+                usage["completion_tokens"] = u.get("candidatesTokenCount")
+        candidates = obj.get("candidates")
+        if not isinstance(candidates, list) or not candidates:
+            continue
+        cand = candidates[0]
+        if not isinstance(cand, dict):
+            continue
+        content = cand.get("content")
+        parts = content.get("parts") if isinstance(content, dict) else None
+        if not isinstance(parts, list):
+            continue
+        for p in parts:
+            if not isinstance(p, dict):
+                continue
+            text = p.get("text")
+            if isinstance(text, str) and text:
+                yield "delta", text
+            fc = p.get("functionCall")
+            if isinstance(fc, dict):
+                # No part index exists on this wire and each functionCall
+                # arrives whole, so arrival order is the order the
+                # non-streaming parse() collects them in.
+                raw = fc["args"] if "args" in fc else fc.get("arguments")
+                calls.append({"function": {
+                    "name": fc.get("name", ""),
+                    "arguments": _args(raw)}})
+    yield "done", {"usage": usage, "tool_calls": calls, "reasoning": "",
+                   "provider": provider, "model": model, "key_id": ""}
+
+
+def _anthropic_stream(lines, *, model, provider):
+    """Consume Anthropic's message stream: named events, one JSON payload each.
+
+    Text streams through ``content_block_delta``; a tool call's arguments
+    buffer per content-block ``index`` as ``input_json_delta`` fragments
+    and are parsed once the stream ends. An ``error`` event raises
+    CloudError: before the first delta that is an ordinary pre-stream
+    failure for the caller's retry logic, after it the caller turns it
+    into an ``("error", ...)`` frame.
+    """
+    usage, tool_calls = {}, []
+    names, args_buf, order = {}, {}, []
+    for event, data in _sse_events(lines):
+        if event == "done":
+            break
+        try:
+            obj = json.loads(data)
+        except ValueError:
+            continue
+        if not isinstance(obj, dict):
+            continue
+        etype = obj.get("type") or event
+        if etype == "error":
+            err = obj.get("error")
+            err = err if isinstance(err, dict) else {}
+            why = str(err.get("type") or "error")
+            msg = str(err.get("message") or "")
+            if "rate_limit" in why:
+                kind, status = "rate_limit", 429
+            elif "authentication" in why:
+                kind, status = "auth", 401
+            elif "permission" in why:
+                kind, status = "auth", 403
+            elif "overloaded" in why:
+                kind, status = "server", 529   # their outage, not the key
+            else:
+                kind, status = "bad_response", 400
+            raise CloudError(kind, "%s: %s" % (why, _sanitize(msg, 300)),
+                             status)
+        if etype == "message_start":
+            m = obj.get("message")
+            u = m.get("usage") if isinstance(m, dict) else None
+            if isinstance(u, dict) and u.get("input_tokens") is not None:
+                usage["prompt_tokens"] = u.get("input_tokens")
+        elif etype == "content_block_start":
+            block = obj.get("content_block")
+            if isinstance(block, dict) and block.get("type") == "tool_use":
+                idx = obj.get("index")
+                if idx not in names:
+                    order.append(idx)  # blocks answer in index order
+                names[idx] = block.get("name", "")
+                args_buf.setdefault(idx, "")
+        elif etype == "content_block_delta":
+            delta = obj.get("delta")
+            if not isinstance(delta, dict):
+                continue
+            if delta.get("type") == "text_delta":
+                text = delta.get("text")
+                if isinstance(text, str) and text:
+                    yield "delta", text
+            elif delta.get("type") == "input_json_delta":
+                frag = delta.get("partial_json")
+                if isinstance(frag, str):
+                    idx = obj.get("index")
+                    args_buf[idx] = args_buf.get(idx, "") + frag
+        elif etype == "message_delta":
+            u = obj.get("usage")
+            if isinstance(u, dict):
+                if u.get("output_tokens") is not None:
+                    usage["completion_tokens"] = u.get("output_tokens")
+                if u.get("input_tokens") is not None:
+                    usage["prompt_tokens"] = u.get("input_tokens")
+        # content_block_stop / message_stop / ping: nothing to record
+    for idx in order:
+        tool_calls.append({"function": {
+            "name": names.get(idx, ""),
+            "arguments": _args(args_buf.get(idx, ""))}})
+    yield "done", {"usage": usage, "tool_calls": tool_calls,
+                   "reasoning": "", "provider": provider,
+                   "model": model, "key_id": ""}
 
 
 def _fix_sch(sch: dict) -> dict:

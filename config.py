@@ -244,6 +244,12 @@ AGENT_BUDGET_WARN_CTX = _env_int("AI_AGENT_BUDGET_WARN_CTX",
                                  80, maximum=100)
 AGENT_BUDGET_WARN_ITER = 5      # remaining calls threshold
 
+# ── cloud token streaming (Batch 2) ──────────────────────────────
+# Cloud replies arrive as SSE deltas instead of one whole message. The
+# non-streaming routes are unchanged either way.
+# Revert with AI_AGENT_STREAM=0.
+AGENT_CLOUD_STREAM = _env_bool("AI_AGENT_STREAM", True)
+
 
 # ── prompt tier ────────────────────────────────────────────────────────────
 #
