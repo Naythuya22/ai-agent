@@ -11,11 +11,14 @@ Pipeline:
 """
 from __future__ import annotations
 
+import json
 from typing import Optional
 
+import config
 from core.log import get_logger
 from core.log import get_logger
 from core.net import offline_notice
+from core.safety import redact_secrets
 from core.search import (
     classify, translate, route, clean, pack, sources_line,
     Result, is_burmese,
@@ -40,10 +43,32 @@ _SYNTH_PROMPT = (
 )
 
 
+# A recorded failure goes into the model's context, so it is scrubbed of
+# credential shapes first and capped after — never the other way round, or a
+# key straddling the cut would be left half-visible.
+_MAX_ERROR_CHARS = 300
+
+
+def _error_text(e: BaseException) -> str:
+    """One line, credential-free, short enough to sit in a tool result."""
+    raw = "%s: %s" % (type(e).__name__, e)
+    return redact_secrets(raw)[:_MAX_ERROR_CHARS].replace("\n", " ").strip()
+
+
 def _collect_results(backends, raw_query: str, translated_query: str,
-                     per_backend: int, max_total: int) -> list:
-    """Run backends in order, using per-backend query preference."""
+                     per_backend: int, max_total: int) -> tuple:
+    """Run backends in order, using per-backend query preference.
+
+    Returns ``(results, errors)``.
+
+    A backend that raises no longer vanishes. It used to be swallowed by a bare
+    ``except: continue``, which left the model with a short result set and no
+    idea that anything had failed — the exact shape of a hallucination. The
+    failure is recorded instead and rendered into the returned string, so the
+    model can tell an incomplete search from an empty one.
+    """
     out: list = []
+    errors: list = []
     for be in backends:
         try:
             if not be.available():
@@ -54,9 +79,16 @@ def _collect_results(backends, raw_query: str, translated_query: str,
             out.extend(hits)
             if len(out) >= max_total:
                 break
-        except Exception:
-            continue
-    return out
+        except Exception as e:
+            detail = _error_text(e)
+            errors.append({
+                "backend": type(be).__name__,
+                "error": detail,
+                "status": "failed",
+            })
+            log.warning("search backend %s failed: %s",
+                        type(be).__name__, detail)
+    return out, errors
 
 
 def smart_search(
@@ -84,6 +116,9 @@ def smart_search(
     Returns:
         A short answer in the user's language, with a source list at the end.
         If no LLM is given, returns the raw <context> block instead.
+        If a backend raised, a ``TOOL_ERRORS: [...]`` block is appended so the
+        caller can see the search was incomplete (set AI_AGENT_TOOL_ERRORS=0 to
+        restore the old silent behaviour).
     """
     q = (query or "").strip()
     if not q:
@@ -120,7 +155,24 @@ def smart_search(
     backends = route(cat)
 
     # L4 — fetch (Wikipedia uses raw, others use English)
-    raw = _collect_results(backends, q, search_query, per_backend=n, max_total=n * 2)
+    raw, errors = _collect_results(backends, q, search_query, per_backend=n,
+                                   max_total=n * 2)
+
+    def _with_errors(body: str) -> str:
+        """Name the backends that failed, so a partial search looks partial.
+
+        Gated on ``config.TOOL_ERRORS_VISIBLE``: with the flag off this returns
+        ``body`` untouched, which is exactly the old silent behaviour. The
+        string return type never changes — this tool is registered through
+        ``tool_from_function`` and its schema is part of the tool contract.
+        """
+        if not errors:
+            return body
+        if not config.TOOL_ERRORS_VISIBLE:
+            log.debug("%d backend(s) failed, hidden by AI_AGENT_TOOL_ERRORS=0",
+                      len(errors))
+            return body
+        return body + "\n\nTOOL_ERRORS: " + json.dumps(errors, ensure_ascii=False)
 
     # If nothing found → try general fallback
     if not raw and cat != "general":
@@ -145,11 +197,11 @@ def smart_search(
             if any("\u1000" <= ch <= "\u109F" for ch in q)
             else f"No results found. Category: {cat} | Query: {search_query!r}"
         )
-        return msg
+        return _with_errors(msg)
 
     # No LLM → return raw context
     if llm is None:
-        return context
+        return _with_errors(context)
 
     # L7 — synthesize (short prompt)
     prompt = _SYNTH_PROMPT.format(context=context, query=q)
@@ -157,7 +209,8 @@ def smart_search(
         answer = llm.ask(prompt)
         answer = (answer or "").strip()
     except Exception as e:
-        return f"{context}\n\n(LLM synthesis failed: {type(e).__name__})"
+        return _with_errors(
+            f"{context}\n\n(LLM synthesis failed: {type(e).__name__})")
 
     if not answer:
         answer = "(no answer)"
@@ -165,7 +218,7 @@ def smart_search(
     # Append source list at the end
     if src:
         answer = f"{answer}\n\n📚 Sources: {src}"
-    return answer
+    return _with_errors(answer)
 
 
 __all__ = ["smart_search"]

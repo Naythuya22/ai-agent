@@ -6,6 +6,7 @@ import time
 
 from flask import Blueprint, Response, jsonify, request
 
+import config
 from core.log import get_logger
 from routes._helpers import extract_messages
 from routes._state import get_llm
@@ -40,7 +41,10 @@ def chat_completions():
         return jsonify({"error": {"message": "messages required"}}), 400
 
     model = body.get("model", "gemma-4-e4b")
-    max_tokens = body.get("max_tokens", 1024)
+    # The client's own value is honoured; a missing or nonsensical one falls
+    # back to the configured default, and nothing passes the ceiling.
+    max_tokens = config.clamp_max_tokens(body.get("max_tokens"),
+                                         config.CHAT_MAX_TOKENS_DEFAULT)
     stream = body.get("stream", False)
 
     system, prompt = extract_messages(messages)

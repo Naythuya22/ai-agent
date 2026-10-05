@@ -42,11 +42,26 @@ init_lock = threading.RLock()
 # Guards concurrent opencode runs (only used by the code blueprint).
 code_lock = threading.Lock()
 
+# Serialises Agent turns that touch AgentMode._messages. Separate from
+# inference_lock on purpose: a cloud step blocks on a provider socket for up
+# to 30s per attempt, and holding the engine lock for that would stall Chat
+# mode even though no engine is involved. Lock order is always
+# agent_turn_lock -> inference_lock (the local branch takes both); nothing
+# takes it the other way round, so the pair cannot deadlock.
+agent_turn_lock = threading.RLock()
+
 
 @contextmanager
 def inference_guard():
     """Hold the inference lock for one unit of model work."""
     with inference_lock:
+        yield
+
+
+@contextmanager
+def agent_turn_guard():
+    """Hold the agent-turn lock for one full Agent turn (cloud or local)."""
+    with agent_turn_lock:
         yield
 
 

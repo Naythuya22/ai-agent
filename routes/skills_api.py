@@ -13,7 +13,13 @@ from core.skills import (
     save_skill,
 )
 from routes._helpers import json_body
-from routes._state import get_agent_mode, get_chat_mode, ensure_modes, inference_guard
+from routes._state import (
+    agent_turn_guard,
+    get_agent_mode,
+    get_chat_mode,
+    ensure_modes,
+    inference_guard,
+)
 
 bp = Blueprint("skills_api", __name__)
 
@@ -84,8 +90,15 @@ def api_skills_run(name):
     prompt = render(sk, args)
 
     try:
-        with inference_guard():
-            reply = target.handle(prompt)
+        # An Agent skill run goes through the same cloud-or-local loop as a
+        # chat turn, so it takes the agent-turn lock before the engine lock.
+        if mode == "agent":
+            with agent_turn_guard():
+                with inference_guard():
+                    reply = target.handle(prompt)
+        else:
+            with inference_guard():
+                reply = target.handle(prompt)
     except Exception as e:
         return jsonify({"error": f"{type(e).__name__}: {e}"}), 500
 

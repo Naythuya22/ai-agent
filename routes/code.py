@@ -652,6 +652,10 @@ def api_code_browse():
                 continue
     except PermissionError:
         return jsonify({"error": "permission denied"}), 403
+    except OSError as e:
+        # /storage/emulated can vanish mid-request while the
+        # SD card mounts — answer instead of a 500 traceback.
+        return jsonify({"error": f"cannot list {base}: {e}"}), 500
 
     parent = str(base.parent) if base.parent != base else None
     return jsonify({

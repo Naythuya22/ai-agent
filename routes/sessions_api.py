@@ -97,6 +97,60 @@ def api_sessions_delete(sid):
         return jsonify({"error": str(e)}), 500
 
 
+# One round trip instead of one DELETE per session: the sidebar's multi-select
+# can hand over hundreds of ids, and each call re-reads and re-writes the store.
+MAX_BULK_DELETE = 200
+
+
+@bp.route("/api/sessions/bulk_delete", methods=["POST"])
+def api_sessions_bulk_delete():
+    """Delete many sessions at once; ids that are already gone are reported."""
+    ensure_modes()
+    body = json_body()
+    ids = body.get("ids") if isinstance(body, dict) else None
+    if not isinstance(ids, list) or not all(isinstance(i, str) for i in ids):
+        return jsonify({"error": "ids must be a list of strings"}), 400
+    wanted, seen = [], set()
+    for sid in ids:
+        if sid and sid not in seen:
+            seen.add(sid)
+            wanted.append(sid)
+    if not wanted:
+        return jsonify({"error": "ids required"}), 400
+    if len(wanted) > MAX_BULK_DELETE:
+        return jsonify({"error": "too many ids (max %d)" % MAX_BULK_DELETE}), 400
+    try:
+        store = _store()
+        deleted, missing = [], []
+        for sid in wanted:
+            s = store.get_session(sid)
+            if not s or not store.delete_session(sid):
+                missing.append(sid)
+            else:
+                deleted.append(sid)
+        # Same reassignment rule as the single delete, for both modes: if the
+        # thread the mode is showing just disappeared, move to a live one.
+        chat = get_chat_mode()
+        if chat.session_id and chat.session_id in deleted:
+            new_active = store.get_active_id("chat")
+            if new_active:
+                chat.reload_session(new_active)
+            else:
+                chat.reset()
+        agent = get_agent_mode()
+        if agent.session_id and agent.session_id in deleted:
+            new_active = store.get_active_id("agent")
+            if new_active:
+                agent.reload_session(new_active)
+            else:
+                agent.reset()
+        return jsonify({"ok": True, "deleted": deleted, "missing": missing,
+                        "active_chat": store.get_active_id("chat"),
+                        "active_agent": store.get_active_id("agent")})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 @bp.route("/api/sessions/<sid>/activate", methods=["POST"])
 def api_sessions_activate(sid):
     ensure_modes()

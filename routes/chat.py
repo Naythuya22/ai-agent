@@ -2,13 +2,25 @@
 from __future__ import annotations
 
 import json
+import secrets
+
+from pathlib import Path
 
 from flask import Blueprint, Response, jsonify, request, stream_with_context
 
+import config
 from core.burmese import BurmeseValidator
-from core.llm import stream_conversation
+from core.llm import (
+    VISION_OCR_SUGGESTION,
+    build_vision_message,
+    stream_conversation,
+    supports_vision,
+)
 from core.log import get_logger
+from modes.agent import last_usage, record_usage
 from routes._helpers import (
+    active_key_label,
+    agent_context,
     ctx_of,
     extract_and_apply,
     filter_scripts,
@@ -19,6 +31,7 @@ from routes._helpers import (
     sanitize_text,
 )
 from routes._state import (
+    agent_turn_guard,
     ensure_modes,
     get_agent_mode,
     get_chat_mode,
@@ -39,6 +52,18 @@ _current_mode = "chat"
 def api_ctx():
     mode = request.args.get("mode", "chat")
     return jsonify(ctx_of(mode))
+
+
+@bp.route("/api/agent/context", methods=["GET"])
+def api_agent_context():
+    """Agent Mode's context usage against the active model's own window.
+
+    Its own endpoint because Agent Mode can run on a cloud model whose window
+    is nothing like the local engine's — the meter must not fall back to the
+    8192 KV cache figure there. Counts and model name only, never the
+    transcript.
+    """
+    return jsonify(agent_context())
 
 
 @bp.route("/api/context/<size>", methods=["POST"])
@@ -224,11 +249,106 @@ def api_chat_stream():
     )
 
 
+# ---------- Agent-mode image upload (vision input) ----------
+
+# Spec: images up to 5MB; png/jpeg/webp/gif only.
+IMAGE_MAX_BYTES = 5 * 1024 * 1024
+IMAGE_MIMES = {
+    "image/png": ".png",
+    "image/jpeg": ".jpg",
+    "image/webp": ".webp",
+    "image/gif": ".gif",
+}
+
+
+def _uploads_dir() -> Path:
+    """Staging dir for uploaded images (inside the isolated config dir)."""
+    d = Path(config.CONFIG_DIR) / "uploads"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _resolve_image(image_id: str) -> Path | None:
+    """Map a returned image id back to its staged file (no path traversal)."""
+    if not image_id or Path(image_id).name != image_id:
+        return None
+    if not image_id.lower().endswith((".png", ".jpg", ".jpeg", ".webp", ".gif")):
+        return None
+    path = _uploads_dir() / image_id
+    return path if path.is_file() else None
+
+
+def _model_path_for_vision() -> str:
+    """Resolved model path without paying for an engine load."""
+    try:
+        return config.Config.load().resolve_model_path() or ""
+    except Exception as e:
+        log.debug("could not resolve model path for vision: %s: %s",
+                  type(e).__name__, e)
+        return ""
+
+
+@bp.route("/api/agent/upload", methods=["POST"])
+def api_agent_upload():
+    """Validate + stage an image for vision input (Agent mode only)."""
+    f = (request.files or {}).get("file")
+    if f is None or not f.filename:
+        return jsonify({"error": "file required"}), 400
+
+    mimetype = (f.mimetype or "").split(";")[0].strip().lower()
+    if mimetype not in IMAGE_MIMES:
+        return jsonify({
+            "error": "unsupported image type: %s (allowed: png, jpeg, webp, gif)"
+                     % (mimetype or "unknown"),
+        }), 400
+
+    # Read one byte past the ceiling so an oversize body is detected without
+    # buffering a huge file in memory.
+    data = f.read(IMAGE_MAX_BYTES + 1)
+    if len(data) > IMAGE_MAX_BYTES:
+        return jsonify({"error": "image too large (max 5MB)"}), 400
+    if not data:
+        return jsonify({"error": "empty file"}), 400
+
+    ok, reason = supports_vision(_model_path_for_vision())
+    if not ok:
+        return jsonify({
+            "error": "vision unavailable — %s" % reason,
+            "suggestion": VISION_OCR_SUGGESTION,
+        }), 400
+
+    image_id = secrets.token_hex(16) + IMAGE_MIMES[mimetype]
+    (_uploads_dir() / image_id).write_bytes(data)
+    return jsonify({
+        "id": image_id,
+        "name": Path(f.filename).name,
+        "size": len(data),
+        "vision": True,
+    })
+
+
 @bp.route("/api/agent/stream", methods=["POST"])
 def api_agent_stream():
-    msg = (json_body().get("message") or "").strip()
+    body = json_body()
+    msg = (body.get("message") or "").strip()
     if not msg:
         return jsonify({"error": "message required"}), 400
+    image_id = (body.get("image_id") or "").strip()
+    image_path = None
+    vision_model_path = ""
+    if image_id:
+        # Fail before the SSE stream starts so the UI gets a plain 400 with
+        # the reason instead of an error event.
+        image_path = _resolve_image(image_id)
+        if image_path is None:
+            return jsonify({"error": "uploaded image not found — upload it again"}), 400
+        vision_model_path = _model_path_for_vision()
+        ok, reason = supports_vision(vision_model_path)
+        if not ok:
+            return jsonify({
+                "error": "vision unavailable — %s" % reason,
+                "suggestion": VISION_OCR_SUGGESTION,
+            }), 400
     ensure_modes()
     remembered = extract_and_apply(msg)
     agent_mode = get_agent_mode()
@@ -236,9 +356,133 @@ def api_agent_stream():
     def _sse(obj):
         return "data: " + json.dumps(obj) + "\n\n"
 
+    def _tool_events(new_msgs):
+        """tool_call / tool_result events plus the trace carried by `end`.
+
+        The cloud backend answers off-stream, so its whole trace is replayed
+        here in transcript order — the same two shapes the UI already paints
+        while a local turn is still streaming.
+        """
+        events, trace = [], []
+        for m in new_msgs:
+            if not isinstance(m, dict):
+                continue
+            role = m.get("role", "")
+            name = m.get("tool", "")
+            if role == "tool_call":
+                args = m.get("args", {})
+                events.append({"type": "tool_call", "tool": name, "args": args})
+                trace.append({"type": "call", "tool": name, "args": args})
+            elif role == "tool_result":
+                txt = m.get("text", "")
+                events.append({"type": "tool_result", "tool": name,
+                               "result": txt[:500], "result_len": len(txt)})
+                trace.append({"type": "result", "tool": name,
+                              "result": txt[:500], "result_len": len(txt)})
+        return events, trace
+
+    def _end(text, tool_trace, usage, truncated=False):
+        """Terminal SSE event — identical shape for cloud and local turns."""
+        return _sse({
+            "type": "end",
+            "text": text,
+            "tool_trace": tool_trace,
+            "truncated": truncated,
+            "ctx": ctx_of("agent"),
+            "status": "ready",
+            # What really answered — the UI paints the status-bar
+            # chip straight from this instead of refetching config.
+            "last_model": usage.get("model", ""),
+            "last_backend": usage.get("backend", ""),
+            "provider": usage.get("provider", ""),
+            "model_label": usage.get("label", ""),
+            # Which system prompt this turn was given, and where the choice
+            # came from — settings / env / auto.
+            "prompt_tier": usage.get("tier", ""),
+            "prompt_tier_source": usage.get("tier_source", ""),
+        })
+
     def generate():
         if remembered:
             yield _sse({"type": "remembered", "items": remembered})
+        # One Agent turn at a time, cloud or local: AgentMode._messages must
+        # not interleave with a concurrent /api/agent or skill run. This is
+        # deliberately NOT inference_lock — a provider call can block for 30s
+        # and Chat mode must keep running while it does.
+        with agent_turn_guard():
+            try:
+                for ev in _turn():
+                    yield ev
+            except GeneratorExit:
+                return
+            except Exception as e:
+                yield _sse({"type": "error", "error": "%s: %s" % (type(e).__name__, e)})
+
+    def _turn():
+        before_len = len(agent_mode._messages)
+        # This route drives the cloud and local branches itself instead of
+        # calling handle(), so it has to open the turn too: that is what makes
+        # the prompt tier resolve once and stay put if the turn falls back to
+        # the on-device model half way through.
+        agent_mode.begin_turn()
+
+        def _sync_reply(text):
+            """Keep the stored transcript in step with what the UI received.
+
+            The cloud path appends the provider's raw text; without this a
+            sequence the validator cut would still replay from the session.
+            """
+            msgs = agent_mode._messages
+            if not text or not msgs or msgs[-1].get("role") != "assistant":
+                return
+            if msgs[-1].get("text") != text:
+                msgs[-1]["text"] = text
+                agent_mode._save_turn()
+
+        # Cloud backend first (Auto / Cloud Only). A turn carrying an image
+        # stays local: per-provider image payloads are not wired up yet.
+        if image_path is None:
+            cloud_text = None
+            try:
+                cloud_text = agent_mode._try_cloud(msg)
+            except Exception as e:
+                log.error("cloud attempt failed (%s: %s)", type(e).__name__, e)
+                # _try_cloud rolls its own failures back; this covers anything
+                # raised before it took a checkpoint.
+                del agent_mode._messages[before_len:]
+            if cloud_text is None:
+                try:
+                    mode = agent_mode._mode()
+                except Exception:
+                    mode = ""
+                if mode == "cloud":
+                    # Belt and braces, as in AgentMode.handle(): Cloud Only
+                    # never reaches the local engine below.
+                    cloud_text = agent_mode._cloud_only_reply(msg, "exhausted")
+            if cloud_text is not None:
+                events, trace = _tool_events(agent_mode._messages[before_len:])
+                for ev in events:
+                    yield _sse(ev)
+                # Same order as the local path: filter per chunk, validate,
+                # then the whole-string sanitiser on what survived.
+                vcloud = BurmeseValidator()
+                text, cut_now = vcloud.feed(filter_scripts(cloud_text))
+                held = vcloud.flush()
+                if held:
+                    text += held
+                truncated = bool(cut_now or vcloud.cut)
+                if not truncated:
+                    is_loop, cut = is_repetition_loop(text)
+                    if is_loop:
+                        text, truncated = text[:cut], True
+                text = sanitize_text(text)
+                _sync_reply(text)
+                if text:
+                    yield _sse({"type": "chunk", "text": text})
+                yield _end(text, trace, last_usage(), truncated)
+                return
+
+        # Local engine — unchanged from here down.
         try:
             agent_mode._ensure_conv()
             conv = agent_mode._conv
@@ -249,9 +493,20 @@ def api_agent_stream():
             yield _sse({"type": "error", "error": "conversation not ready"})
             return
 
-        before_len = len(agent_mode._messages)
         agent_mode._messages.append({"role": "user", "text": msg})
         current_input = msg
+        if image_path is not None:
+            # Attach the staged image to this turn only — session history
+            # keeps the plain text so a replay never needs the file back.
+            vm = build_vision_message(vision_model_path, str(image_path), msg)
+            if vm is None:
+                yield _sse({
+                    "type": "error",
+                    "error": "vision unavailable — image not sent",
+                    "suggestion": VISION_OCR_SUGGESTION,
+                })
+                return
+            current_input = vm
         max_iter = 8
         final_text = ""
         done = False
@@ -357,19 +612,10 @@ def api_agent_stream():
                                   agent_mode.session_id, type(e).__name__, e)
 
                 new_msgs = agent_mode._messages[before_len:]
-                tool_trace = []
-                for m in new_msgs:
-                    if not isinstance(m, dict):
-                        continue
-                    role = m.get("role", "")
-                    if role == "tool_call":
-                        tool_trace.append({"type": "call", "tool": m.get("tool", ""), "args": m.get("args", {})})
-                    elif role == "tool_result":
-                        txt = m.get("text", "")
-                        tool_trace.append({"type": "result", "tool": m.get("tool", ""), "result": txt[:500], "result_len": len(txt)})
-
-                ctx = ctx_of("agent")
-                yield _sse({"type": "end", "text": final_text, "tool_trace": tool_trace, "truncated": loop_detected or seq_cut, "ctx": ctx, "status": "ready"})
+                _, tool_trace = _tool_events(new_msgs)
+                usage = _record_local_turn(agent_mode)
+                yield _end(final_text, tool_trace, usage,
+                           truncated=loop_detected or seq_cut)
         except GeneratorExit:
             return
         except Exception as e:
@@ -381,6 +627,51 @@ def api_agent_stream():
         headers={"Cache-Control": "no-cache, no-transform",
                  "X-Accel-Buffering": "no"},
     )
+
+
+def _record_local_turn(agent_mode) -> dict:
+    """Record the on-device model the SSE stream just ran.
+
+    The stream drives the conversation itself instead of going through
+    ``AgentMode.handle()``, so without this the status bar would keep showing
+    whatever the previous turn used.
+    """
+    try:
+        from core.agent_backend import friendly_local_name
+        name = friendly_local_name() or "Local model"
+    except Exception:
+        name = "Local model"
+    try:
+        mode = agent_mode._mode()
+    except Exception:
+        mode = ""
+    return record_usage("local", name, "", mode)
+
+
+@bp.route("/api/agent/status", methods=["GET"])
+def api_agent_status():
+    """What the last Agent turn actually ran — the status-bar indicator.
+
+    Deliberately not derived from config: a Cloud Only setting with no usable
+    key must not be able to print a cloud model name nothing ever called.
+    An empty ``label`` means no turn has run yet in this process.
+    """
+    u = last_usage()
+    return jsonify({
+        "ok": True,
+        "last_model": u.get("model", ""),
+        "last_backend": u.get("backend", ""),
+        "provider": u.get("provider", ""),
+        "label": u.get("label", ""),
+        "mode": u.get("mode", ""),
+        "used_at": u.get("at", 0.0),
+        # Which key is selected right now (masked) — the second chip in the
+        # status bar. Selection, not usage; usage is what `label` reports.
+        "key_label": active_key_label(),
+        # Same request paints the context meter, so the UI does not have to
+        # fetch a second endpoint every time it refreshes the chips.
+        "ctx": agent_context(),
+    })
 
 
 @bp.route("/api/agent", methods=["POST"])
@@ -395,6 +686,10 @@ def api_agent():
         r["remembered"] = remembered
         r["status"] = "ready"
         r["ctx"] = ctx_of("agent")
+        u = last_usage()
+        r["last_model"] = u.get("model", "")
+        r["last_backend"] = u.get("backend", "")
+        r["model_label"] = u.get("label", "")
         return jsonify(r)
     except Exception as e:
         return jsonify({"error": f"{type(e).__name__}: {e}"}), 500

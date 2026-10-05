@@ -4,6 +4,60 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+import config
+
+# ── read budget context (set by modes.agent before each read_file) ──
+# Signature of read_file() must NOT change: it is exposed as a tool
+# schema, and the model would try to fill model/base_url itself.
+_read_ctx = {"model": "", "base_url": "", "used_tokens": 0}
+
+
+def set_read_context(*, model: str = "", base_url: str = "",
+                     used_tokens: int = 0) -> None:
+    """Called by AgentMode._execute_tool before dispatching read_file."""
+    _read_ctx["model"] = model or ""
+    _read_ctx["base_url"] = base_url or ""
+    try:
+        _read_ctx["used_tokens"] = int(used_tokens or 0)
+    except (TypeError, ValueError):
+        _read_ctx["used_tokens"] = 0
+
+
+def _resolve_total(model: str, base_url: str) -> int:
+    """Wrap MR.resolve_limit — tolerate int or dict, never raise."""
+    try:
+        from core import model_registry as MR
+    except Exception:
+        return 8_000
+    try:
+        r = MR.resolve_limit(model, base_url)
+    except Exception:
+        return 8_000
+    if isinstance(r, int) and r > 0:
+        return r
+    if isinstance(r, dict):
+        for k in ("limit", "total", "max", "context_window"):
+            v = r.get(k)
+            if isinstance(v, int) and v > 0:
+                return v
+    return 8_000
+
+
+def _max_chars_for_read() -> int:
+    """Model- and usage-aware char budget for one read_file call."""
+    if not getattr(config, "AGENT_ADAPTIVE_READ", True):
+        return getattr(config, "AGENT_READ_FLOOR", 4_000)
+    total = _resolve_total(_read_ctx["model"], _read_ctx["base_url"])
+    reserve = getattr(config, "AGENT_READ_RESERVE", 1_000)
+    floor = getattr(config, "AGENT_READ_FLOOR", 4_000)
+    ceiling = getattr(config, "AGENT_READ_CEILING", 100_000)
+    available = total - _read_ctx["used_tokens"] - reserve
+    if available <= 0:
+        return floor
+    token_budget = int(available * 0.25)
+    chars = token_budget * 2          # Burmese-conservative
+    return max(floor, min(chars, ceiling))
+
 
 def list_files(directory: str) -> str:
     """List files in a directory.
@@ -42,7 +96,7 @@ def read_file(path: str, start_line: int = 1, end_line: int = 200) -> str:
                   For longer files, call again with start_line set
                   to the "next" value shown in the footer.
     """
-    MAX_CHARS = 4000
+    MAX_CHARS = _max_chars_for_read()
     MAX_LINES = 500
     try:
         p = Path(path).expanduser()
@@ -83,9 +137,19 @@ def read_file(path: str, start_line: int = 1, end_line: int = 200) -> str:
 
         parts = [f"[{path}: lines {start_line}-{actual_end} of {total}]", body]
         if char_capped:
-            parts.append(f"... (char cap {MAX_CHARS} reached)")
-        if actual_end < total:
-            parts.append(f"... ({total - actual_end} more lines, use start_line={actual_end + 1})")
+            next_line = start_line + body.count(chr(10))
+            parts.append(
+                f"\n--- OUTPUT TRUNCATED ---\n"
+                f"Read {len(body)} of {sum(len(l)+1 for l in sliced)} chars "
+                f"(budget {MAX_CHARS}).\n"
+                f"To continue: read_file(path=\"{path}\", "
+                f"start_line={next_line})"
+            )
+        elif actual_end < total:
+            parts.append(
+                f"... ({total - actual_end} more lines, "
+                f"use start_line={actual_end + 1})"
+            )
         return chr(10).join(parts)
     except PermissionError:
         return f"Error: permission denied: {path}"
