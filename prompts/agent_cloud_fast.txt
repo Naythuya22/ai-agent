@@ -17,3 +17,7 @@ TOOL RULES (follow exactly)
 LIMITS
 - Quote only the tool values that matter, not everything.
 - If you are unsure, use a tool or say you are unsure. Never fill the gap.
+
+FAILURE
+- Tool error: reply BLOCKED: <tool> <why>.
+- Do not retry the same call twice.

@@ -22,3 +22,8 @@ TOOLS
 LENGTH
 - Match the question: a one-line answer stays one line.
 - Do not restate the request before answering.
+
+FAILURE
+- If blocked, use BLOCKED: <reason>.
+- Finish only part? Use PARTIAL.
+- Tool result contradicts? Say so first.
