@@ -87,6 +87,8 @@ main#chat{flex:1;overflow-y:auto;padding:20px 14px;-webkit-overflow-scrolling:to
 .typing{display:inline-block;color:var(--text-2);font-size:13px}
 .typing::after{content:"";animation:dots 1.4s infinite}
 @keyframes dots{0%,20%{content:"."}40%{content:".."}60%,100%{content:"..."}}
+.streaming::after { content: "▋"; opacity: 0.6; animation: blink 1s step-start infinite; margin-left: 2px; }
+@keyframes blink { 50% { opacity: 0; } }
 .status{display:flex;align-items:center;gap:8px;padding:5px 14px;font-size:11px;color:var(--text-3);background:var(--bg-2);border-top:1px solid var(--border);min-height:22px;flex-shrink:0}.ctx-bar{height:3px;background:var(--track);flex-shrink:0;overflow:hidden}.ctx-fill{height:100%;width:0%;background:var(--accent);transition:width .3s,background .3s}.ctx-fill.warn{background:var(--warn)}.ctx-fill.over{background:var(--orange)}.ctx-fill.crit{background:var(--crit)}.ctx-info{display:flex;justify-content:space-between;padding:3px 14px;font-size:10px;color:var(--text-3);background:var(--bg-2);flex-shrink:0}.ctx-info.warn{color:var(--warn)}.ctx-info.over{color:var(--orange)}.ctx-info.crit{color:var(--crit)}.ctx-warn{flex:1;min-width:0;padding:0 8px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:center}.ctx-warn.over{color:var(--orange);font-weight:600}.ctx-warn.crit{color:var(--crit);font-weight:600}.model-info{margin-left:auto;padding-left:10px;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:55%;color:var(--text-3)}.model-info.cloud{color:var(--accent)}.key-info{padding-left:8px;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:45%;color:var(--text-3)}.key-info.active{color:#16a34a}
 .ctx-buttons{display:flex;gap:6px;margin-bottom:14px}.ctx-btn{flex:1;background:var(--bg-4);border:1px solid var(--border-2);color:var(--text-chip);padding:8px 4px;border-radius:8px;cursor:pointer;font-family:inherit;font-size:13px;text-align:center}.ctx-btn:active{background:var(--press)}.ctx-btn.active{background:var(--accent);border-color:var(--accent);color:var(--accent-on);font-weight:600}
 footer{position:relative;padding:12px 12px 16px;background:var(--bg);border-top:1px solid var(--border);flex-shrink:0}
@@ -1033,9 +1035,70 @@ async function sendStream(text,mode){
   setActivity('thinking','Thinking…');
   var assistantEl=null;
   var rawText='';
-  try{
-    var r=await fetch(ep,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload),signal:ctrl.signal});
-    if(!r.ok){var errTxt=await r.text();appendMsg('HTTP '+r.status+': '+errTxt.slice(0,200),'error');setStatus('error');return}
+  var useV2=true;              // try v2 first
+  if(mode!=='agent')useV2=false;   // only the agent route has a v2 endpoint
+  if(payload.image_id)useV2=false; // v2 refuses image turns (404) -- skip it
+  var tried_v2=false;
+  var isV2=false;
+  var wantFallback=false;
+  var fallbackTries=0;
+  function parseV1Block(block){
+    if(block.slice(0,6)!=='data: ')return null;
+    try{return JSON.parse(block.slice(6))}catch(e){return null}
+  }
+  function parseV2Block(block){
+    if(!block)return null;
+    var lines=block.split('\n');
+    var name='';
+    var datas=[];
+    for(var i=0;i<lines.length;i++){
+      var ln=lines[i];
+      if(ln.slice(0,6)==='event:'){name=ln.slice(6).trim();continue}
+      if(ln.slice(0,5)==='data:'){datas.push(ln.slice(5))}
+    }
+    if(!name)return null;
+    var out={};
+    if(datas.length){
+      try{
+        var parsed=JSON.parse(datas.join('\n'));
+        if(parsed&&typeof parsed==='object'&&!Array.isArray(parsed))out=parsed;
+        else out.t=parsed;
+      }catch(e){out.t=datas.join('\n')}
+    }
+    if(name==='delta'){
+      out.type='chunk';
+      out.text=(typeof out.t==='string'?out.t:'');
+      delete out.t;
+    }else if(name==='done'){
+      out.type='end';
+      if(typeof out.t==='string')out.text=out.t;
+      delete out.t;
+    }else if(name==='tool'){
+      out.type='tool_call';
+      if(typeof out.tool==='undefined'&&typeof out.name!=='undefined')out.tool=out.name;
+    }else if(name==='error'){
+      out.type='error';
+      if(typeof out.error==='undefined'&&typeof out.t==='string'){out.error=out.t;delete out.t}
+    }else if(name==='fallback'){
+      out.type='fallback';
+    }else{
+      out.type=name;
+    }
+    return out;
+  }
+  function postPayload(url){
+    tried_v2=useV2;
+    return fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload),signal:ctrl.signal});
+  }
+  async function doFetch(url){
+    var r=await postPayload(url);
+    if(useV2&&r.status===404){
+      useV2=false;
+      url=ep;
+      r=await postPayload(url);
+    }
+    isV2=useV2;
+    if(!r.ok){var errTxt=await r.text();appendMsg('HTTP '+r.status+': '+errTxt.slice(0,200),'error');setStatus('error');return false}
     var reader=r.body.getReader();
     var dec=new TextDecoder();
     var buf='';
@@ -1047,16 +1110,21 @@ async function sendStream(text,mode){
       buf=parts.pop();
       for(var i=0;i<parts.length;i++){
         var block=parts[i];
-        if(block.slice(0,6)!=='data: ')continue;
-        var evt;
-        try{evt=JSON.parse(block.slice(6))}catch(e){continue}
+        var evt=isV2?parseV2Block(block):parseV1Block(block);
+        if(!evt)continue;
         if(evt.type==='chunk'){
           rawText+=evt.text;
           killTyping();
           setActivity('writing','Writing…');
           if(!assistantEl){assistantEl=appendMsg('','assistant');}
-          assistantEl.innerHTML=renderMarkdown(rawText);
-          scrollBottom();
+          if(isV2){
+            assistantEl.textContent+=evt.text;
+            assistantEl.classList.add('streaming');
+            scrollBottom();
+          }else{
+            assistantEl.innerHTML=renderMarkdown(rawText);
+            scrollBottom();
+          }
         }else if(evt.type==='tool_call'){
           setActivity.apply(null,activityFor(evt.tool,evt.args));
           var a=JSON.stringify(evt.args||{});
@@ -1097,7 +1165,8 @@ async function sendStream(text,mode){
           killTyping();clearActivity();
           var fin=evt.text||evt.reply||'';
           if(!assistantEl&&fin){assistantEl=appendMsg(fin,'assistant');}
-          else if(assistantEl&&fin&&rawText!==fin){assistantEl.innerHTML=renderMarkdown(fin);}
+          else if(assistantEl&&fin&&(rawText!==fin||isV2)){assistantEl.innerHTML=renderMarkdown(fin);}
+          if(isV2&&assistantEl){assistantEl.classList.remove('streaming');}
           if(evt.ctx)updateCtx(evt.ctx);
           try{applyModelUsage(evt)}catch(_mu){}
           setStatus(evt.status||'ready');
@@ -1106,16 +1175,35 @@ async function sendStream(text,mode){
           appendMsg('(remembered: '+evt.items.join(', ')+')','system');
         }else if(evt.type==='error'){
           killTyping();clearActivity();
+          if(assistantEl){assistantEl.classList.remove('streaming');}
           appendMsg('Error: '+(evt.error||'unknown'),'error');
           setStatus('error');
+        }else if(evt.type==='fallback'){
+          killTyping();clearActivity();
+          if(assistantEl){assistantEl.textContent='';assistantEl.classList.remove('streaming');}
+          rawText='';
+          wantFallback=true;
         }
+        if(wantFallback)break;
       }
+      if(wantFallback){try{var cancelP=reader.cancel();if(cancelP&&cancelP.catch){cancelP.catch(function(){})}}catch(_rc){}break}
+    }
+    return true;
+  }
+  try{
+    var streamed=await doFetch(useV2?'/api/agent/stream/v2':ep);
+    if(streamed&&wantFallback&&fallbackTries<1){
+      fallbackTries++;
+      wantFallback=false;
+      useV2=false;
+      await doFetch(ep);
     }
   }catch(e){
     if(e.name==='AbortError'){setStatus('stopped');}
     else{appendMsg('Network error: '+e.message,'error');setStatus('offline');}
   }finally{
     killTyping();clearActivity();
+    if(assistantEl){assistantEl.classList.remove('streaming');}
     state.abort=null;
     setBusy(false);inputEl.focus();
   }
