@@ -1552,6 +1552,202 @@ class AgentBackend:
             ", ".join(tried) or "no keys",
             (" — " + detail) if detail else ""))
 
+    # ---------- one step, streamed ----------
+    def step_stream(self, *, system: str, messages: list, tools: list,
+                    max_tokens: int | None = None, http=None,
+                    http_stream=None):
+        """Yield ("delta", str) then one ("done", info) from the winning
+        provider, or ("error", {...}) after the first delta.
+        Mirrors step()'s ladder. Does NOT call the local engine.
+
+        info = {usage, tool_calls, reasoning, provider, model, key_id}
+
+        A failure before the first delta walks the same ladder step() walks
+        — reasoning flip, context retry at CONTEXT_RETRY_FACTOR,
+        _handle_error, next key, next provider — and when the whole chain
+        is spent this returns without yielding instead of raising
+        BackendExhausted: an empty stream is the signal the caller uses to
+        decide about the local fallback.
+        """
+        # mirrors step() L1425 — keep in sync on any change
+        max_tokens = config.clamp_max_tokens(max_tokens,
+                                             config.agent_max_tokens())
+        self.refresh()                              # mirrors step() L1427
+        if not self.online():
+            # mirrors step() L1428 — there step() raises
+            # BackendExhausted("no network"); a stream yields nothing and
+            # the caller decides about the local fallback.
+            return
+        # mirrors step() L1433 — {"text": ...} → {"content": ...}
+        messages = normalize(messages)
+        # mirrors step() L1438 — LiteRT Tool objects → wire dicts
+        tools = _tool_schemas(tools)
+        last: CloudError | None = None
+        tried = []
+
+        for provider in self.usable():              # mirrors step() L1441
+            adapter = ADAPTERS[provider]()
+            prov_cfg = (self.keys.load().get("providers") or {}).get(provider) or {}
+            model = prov_cfg.get("model") or ""
+            base = prov_cfg.get("base_url") or ""
+            _warn_unknown_model(provider, model)
+            # mirrors step() L1447 — keep in sync on any change
+            if base and adapter.__class__.__name__ in _BASE_URL_ADAPTERS:
+                adapter = adapter.__class__(base)
+
+            def _pump(entry, wire_msgs):
+                """Forward one attempt's frames verbatim.
+
+                A CloudError escapes only while nothing has been forwarded
+                yet — that is the pre-stream failure step() L1491's ladder
+                already understands. Once a delta is out, a failure is
+                reported in-band as an ("error", ...) frame and the stream
+                stops: no key and no provider is retried for output the
+                caller has already seen.
+                """
+                emitted = False
+                try:
+                    for kind, payload in adapter.request_stream(
+                            key=entry.get("key", ""), model=model,
+                            system=system, messages=wire_msgs, tools=tools,
+                            max_tokens=max_tokens, http=http,
+                            http_stream=http_stream):
+                        if kind == "delta":
+                            emitted = True
+                        elif kind == "done":
+                            payload = dict(payload or {})
+                            # the backend owns key ids; the parsers leave ""
+                            # — see the streaming parsers' header comment.
+                            payload["key_id"] = entry.get("id")
+                            # mirrors step() L1456 — a key is good only once
+                            # the whole answer really arrived
+                            self.keys.mark_ok(provider, entry.get("id"))
+                            # mirrors step() L1457 — same meter update
+                            self._log_ok(Step(
+                                tool_calls=payload.get("tool_calls") or [],
+                                usage=payload.get("usage") or {},
+                                model=payload.get("model") or model,
+                                provider=provider,
+                                key_id=entry.get("id")),
+                                provider, model, entry)
+                            yield kind, payload
+                            return          # exactly one done, then stop
+                        elif kind == "error":
+                            yield kind, payload
+                            return          # one in-band error frame ends it
+                        yield kind, payload
+                    # A stream that simply stopped carried no answer at all.
+                    raise CloudError("bad_response",
+                                     "stream ended without a done event")
+                except CloudError as e:
+                    if not emitted:
+                        raise           # pre-first-byte → step()'s ladder
+                    # mirrors step() L1491's failure path, post-first-byte:
+                    # in-band instead of a retry, shaped like the frame
+                    # _guarded_stream emits (the same five keys).
+                    yield "error", {
+                        "error": "%s%s: %s" % (
+                            e.kind, ("/%s" % e.status) if e.status else "",
+                            _sanitize(e.message or "", 200)),
+                        "kind": e.kind,
+                        "status": e.status,
+                        "provider": provider,
+                        "model": model,
+                    }
+
+            # mirrors step() L1463 — this provider's window decides the
+            # budget, not Config.context_size
+            info = MR.describe_limit(model, base)
+            limit = int(info["limit"])
+            # mirrors step() L1465 — keep in sync on any change
+            fit = self._fit(messages, system, tools, limit)
+            # mirrors step() L1466 — keep in sync on any change
+            self._record_context(provider, model, base, info, fit)
+            trimmed_msgs = fit["messages"]
+
+            # mirrors step() L1472 — wire policy is per provider
+            wire = _apply_reasoning_policy(
+                trimmed_msgs, provider, _is_thinking_model(provider, model))
+            seen_ids = set()                        # mirrors step() L1474
+            while True:                             # mirrors step() L1475
+                entry = self.keys.next_key(provider)
+                if entry is None:
+                    break
+                if entry.get("id") in seen_ids:
+                    # mirrors step() L1479 — every usable key had its turn;
+                    # server/bad-response errors park no key, so without
+                    # this the loop would spin on the same key forever.
+                    break
+                seen_ids.add(entry.get("id"))       # mirrors step() L1484
+                # mirrors step() L1489 — one context retry per KEY
+                context_retried = False
+                tried.append("%s/%s" % (provider, mask(entry.get("key", ""))))
+                try:
+                    # mirrors step() L1491 — keep in sync on any change
+                    yield from _pump(entry, wire)
+                    # One ("done", ...) frame went out, or one in-band
+                    # ("error", ...) frame: either way this stream is over —
+                    # no further keys, no further providers.
+                    return
+                except CloudError as e:
+                    # mirrors step() L1494 — keep in sync on any change
+                    if (e.status == 400
+                            and "reasoning_content" in (e.message or "")):
+                        log.warning("%s 400 named reasoning_content — "
+                                    "flipping the replay policy once", provider)
+                        wire = _apply_reasoning_policy(
+                            trimmed_msgs, provider,
+                            provider in THINKING_PROVIDERS)
+                        try:
+                            yield from _pump(entry, wire)
+                            return
+                        except CloudError as retry_err:
+                            e = retry_err
+                    # mirrors step() L1509 — keep in sync on any change
+                    if not context_retried and MR.is_context_error(e.message or ""):
+                        context_retried = True
+                        learned = MR.record_limit(model, base, text=e.message)
+                        if learned and learned != limit:
+                            info = MR.describe_limit(model, base)
+                            info["limit"] = learned
+                            limit = learned
+                        # mirrors step() L1526 — cut harder, same key once
+                        fit = self._fit(messages, system, tools, limit,
+                                        CONTEXT_RETRY_FACTOR)
+                        self._record_context(provider, model, base, info, fit)
+                        wire = _apply_reasoning_policy(
+                            fit["messages"], provider,
+                            _is_thinking_model(provider, model))
+                        log.warning("%s says the context does not fit (%d "
+                                    "tokens, window %s) — retrying once at %d",
+                                    provider, fit["before"], limit,
+                                    int(limit * CONTEXT_RETRY_FACTOR))
+                        try:
+                            yield from _pump(entry, wire)
+                            return
+                        except CloudError as retry_err:
+                            e = retry_err
+                    # mirrors step() L1540 — keep in sync on any change
+                    last = e
+                    self._handle_error(provider, entry, e, model)
+                    if e.kind in ("network",):
+                        # mirrors step() L1542, minus the raise: no other
+                        # provider is reachable either, so end silently and
+                        # let the caller decide about the local fallback.
+                        return
+        # mirrors step() L1546 — every provider ran out of attempts
+        detail = ""
+        if last is not None:
+            detail = "%s%s: %s" % (
+                last.kind, ("/%s" % last.status) if last.status else "",
+                _sanitize(last.message or "", 200))
+        log.warning("cloud stream providers exhausted: %s%s",
+                    ", ".join(tried) or "no keys",
+                    (" — " + detail) if detail else "")
+        # mirrors step() L1551's BackendExhausted message — logged, never
+        # raised: an empty stream is what tells the caller to go local.
+        return
+
     def _handle_error(self, provider: str, entry: dict, err: CloudError,
                       model: str) -> None:
         safe = redact(_sanitize(err.message or err.kind, 500),
