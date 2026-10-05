@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import json
+import os
+import shutil
 from dataclasses import dataclass, asdict
 from pathlib import Path
 
@@ -11,6 +13,78 @@ from core.log import get_logger
 PROJECT_ROOT = Path(__file__).resolve().parent
 CONFIG_DIR = Path.home() / ".ai-agent"
 CONFIG_FILE = CONFIG_DIR / "config.json"
+
+# Fixed, HOME-independent data directory — Agent Mode's API keys live here.
+#
+# The phone runs the server with HOME=/data/data/com.termux/files/home while
+# the shell has HOME=/root, so anything derived from Path.home() is written to
+# two different places and the keys "disappear" after a restart. PROJECT_ROOT
+# is absolute and identical for both, so this path never moves.
+#
+# AI_AGENT_DATA_DIR overrides it (the test harness points it at a throwaway
+# directory). DEFAULT_DATA_DIR stays fixed on purpose: it is the only location
+# the one-time legacy migration below will read from.
+DEFAULT_DATA_DIR = PROJECT_ROOT / "data"
+DATA_DIR = (Path(os.environ["AI_AGENT_DATA_DIR"])
+            if os.environ.get("AI_AGENT_DATA_DIR") else DEFAULT_DATA_DIR)
+AGENT_CONFIG_FILE = DATA_DIR / "agent_config.json"
+
+# HOME dirs the key file may already sit in from before this fix, most
+# specific first. Both the Termux server HOME and the root shell HOME are
+# listed — that mismatch is the whole reason the path became absolute.
+LEGACY_HOMES = (
+    "/data/data/com.termux/files/home",
+    "/root",
+    os.environ.get("HOME") or "",
+    str(Path.home()),
+)
+
+
+def legacy_config_dirs() -> list[Path]:
+    """``<home>/.ai-agent`` for every HOME this install may have run under."""
+    seen: set[str] = set()
+    out: list[Path] = []
+    for home in LEGACY_HOMES:
+        if not home:
+            continue
+        try:
+            d = Path(home) / ".ai-agent"
+        except (OSError, ValueError):
+            continue
+        if str(d) not in seen:
+            seen.add(str(d))
+            out.append(d)
+    return out
+
+
+def migrate_legacy_file(name: str, dest: Path) -> Path | None:
+    """Copy ``name`` out of a legacy HOME dir into ``dest`` (one-time).
+
+    Returns the file it was copied from, or None. Only runs while ``dest`` is
+    missing and only for the real fixed data dir — a harness that retargeted
+    DATA_DIR must never pull a developer's live keys into a test run.
+    """
+    try:
+        if dest.exists() or Path(dest).parent != DEFAULT_DATA_DIR:
+            return None
+    except (OSError, ValueError):
+        return None
+    for src_dir in legacy_config_dirs():
+        src = src_dir / name
+        try:
+            if not src.is_file():
+                continue
+            Path(dest).parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(str(src), str(dest))
+            try:
+                os.chmod(str(dest), 0o600)
+            except OSError:
+                pass        # storage that ignores unix modes still keeps the data
+            return src
+        except OSError:
+            continue
+    return None
+
 
 # Assigned after CONFIG_DIR exists: core.log resolves the log directory from
 # this module, and configuring the logger first would make it fall back to a
@@ -47,6 +121,195 @@ CONTEXT_LABELS = {
 # Empty means "auto-discover": the newest *.litertlm found under models/
 # (or a legacy location) is used. A stale saved path is repaired on load.
 DEFAULT_MODEL = ""
+
+
+# ── output budget and tool-loop cap ───────────────────────────────────────
+#
+# Both numbers used to be hardcoded where they were used — 1024 output tokens,
+# 8 tool iterations — so an online Agent turn was capped by the source and
+# nothing else could raise it. They live here now, and two of them can be
+# moved from the environment without touching a file: AI_AGENT_MAX_TOKENS and
+# AI_AGENT_MAX_ITER.
+#
+# Module constants rather than Config fields on purpose: Config.context_size
+# is the local engine's KV cache, and a cloud request's output budget has
+# nothing to do with it. A malformed or out-of-range environment value falls
+# back to the default rather than raising — a typo in a shell profile must not
+# take the agent down.
+
+# Nothing sent to a provider may ask for more than this, whatever a client
+# asked for. It is the ceiling on the cost of a single request.
+MAX_TOKENS_CEILING = 65_536
+
+
+def _env_int(name: str, default: int, *, minimum: int = 1,
+             maximum: int | None = None) -> int:
+    """An integer from the environment, or ``default`` when it is not sane."""
+    raw = os.environ.get(name)
+    if raw is None or not str(raw).strip():
+        return default
+    try:
+        n = int(str(raw).strip())
+    except (TypeError, ValueError):
+        log.warning("%s=%r is not a number — using %d", name, raw, default)
+        return default
+    if n < minimum or (maximum is not None and n > maximum):
+        log.warning("%s=%d is outside [%d, %s] — using %d", name, n, minimum,
+                    maximum if maximum is not None else "any", default)
+        return default
+    return n
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    """A boolean from the environment — ``1/true/yes/on``, else ``default``.
+
+    Deliberately conservative: an unrecognised value is not "off", it is a
+    typo, and a typo in a shell profile must not quietly switch off something
+    the user believes is on. It warns and keeps the default instead.
+    """
+    raw = os.environ.get(name)
+    if raw is None or not str(raw).strip():
+        return bool(default)
+    text = str(raw).strip().lower()
+    if text in ("1", "true", "yes", "on"):
+        return True
+    if text in ("0", "false", "no", "off"):
+        return False
+    log.warning("%s=%r is not a boolean — using %s", name, raw,
+                "True" if default else "False")
+    return bool(default)
+
+
+# Output tokens per request.
+AGENT_MAX_TOKENS_DEFAULT = _env_int("AI_AGENT_MAX_TOKENS", 8_192,
+                                    maximum=MAX_TOKENS_CEILING)
+CHAT_MAX_TOKENS_DEFAULT = 2_048      # the OpenAI-compatible route
+CODE_MAX_TOKENS_DEFAULT = 16_384     # a code turn wants whole files back
+# The key-validation probe: one cheap round-trip that proves a key works.
+# Not environment-overridable on purpose — this is the one number that must
+# never be inflated by accident, and 8 tokens is enough for the "ok" it asks.
+PROBE_MAX_TOKENS = 8
+
+# Tool-loop iterations per user turn. The loop also exits the moment the model
+# asks for no tools, and again on a repeated identical call, so this is a
+# backstop against a model that calls tools forever — not the normal exit.
+AGENT_MAX_ITER_DEFAULT = _env_int("AI_AGENT_MAX_ITER", 30, maximum=100)
+AGENT_MAX_ITER_CODE = 50
+
+
+# ── Agent Mode robustness (each one reversible from the shell) ─────────────
+#
+# Four behaviours that change what the model is shown, all on by default and
+# all individually switchable. To get the old behaviour back, set the variable
+# to 0 / false / no / off:
+#
+#   AI_AGENT_TOOL_ERRORS=0   a search backend that fails is silent again
+#   AI_AGENT_VERIFY=0        no reviewer round-trip after a tool turn
+#   AI_AGENT_CACHE=0         no reuse of a tool result within one turn
+#   AI_AGENT_INJECTION=0     no untrusted banner on scanned tool output
+#
+# A typo is not read as "off" — _env_bool warns and keeps the default, so a
+# broken shell profile cannot quietly disable a guard.
+
+# Task 1 — a tool that fails internally says so, instead of leaving the model
+# to invent an answer from an empty result set.
+TOOL_ERRORS_VISIBLE = _env_bool("AI_AGENT_TOOL_ERRORS", True)
+
+# Task 2 — one cheap reviewer pass over the tool results before the answer is
+# returned. Cloud only: the local 4B shares a single conversation object, and a
+# review turn there would cost phone tokens and thermal headroom for nothing.
+AGENT_VERIFY_ENABLED = _env_bool("AI_AGENT_VERIFY", True)
+AGENT_VERIFY_MAX_TOKENS = _env_int("AI_AGENT_VERIFY_TOKENS", 512, maximum=1024)
+
+# Task 3 — reuse a read-only tool result inside one user turn.
+AGENT_TURN_CACHE = _env_bool("AI_AGENT_CACHE", True)
+
+# Task 4 — scan tool output for instruction-shaped text and mark it untrusted.
+AGENT_INJECTION_GUARD = _env_bool("AI_AGENT_INJECTION", True)
+
+# ── read_file budget (Batch 1.5) ──────────────────────────────
+# Model-aware char cap. Floor 4K protects small local models, ceiling
+# 100K protects cost, the 25%-of-remaining rule keeps 3-4 reads alive.
+# Revert with AI_AGENT_ADAPTIVE_READ=0.
+AGENT_ADAPTIVE_READ = _env_bool("AI_AGENT_ADAPTIVE_READ", True)
+AGENT_READ_FLOOR    = 4_000
+AGENT_READ_CEILING  = _env_int("AI_AGENT_READ_CEILING",
+                               100_000, maximum=500_000)
+AGENT_READ_RESERVE  = 1_000
+
+
+
+# ── prompt tier ────────────────────────────────────────────────────────────
+#
+# "auto" (the default) lets core.prompts.classify_tier() pick the system prompt
+# from the backend and the model name. The three tier names pin it instead —
+# useful when a provider's model name says nothing useful about its size, or
+# when a local phone answers better with the short on-device prompt.
+#
+# Two places can set the mode and they are not equal: the Settings store wins,
+# and AI_AGENT_PROMPT_TIER is the fallback for a shell that has not been given
+# a Settings page yet. The tier is resolved once per turn — see
+# core.prompts.resolve_tier.
+
+PROMPT_TIER_MODE_DEFAULT = "auto"
+PROMPT_TIER_MODES = ("auto", "cloud_strong", "cloud_fast", "local")
+PROMPT_TIER_ENV = "AI_AGENT_PROMPT_TIER"
+
+
+def stored_prompt_tier_mode() -> str:
+    """The tier pinned in the Settings store, or '' when none is set.
+
+    Separate from prompt_tier_mode() so the resolver can tell a Settings choice
+    from the environment one and report the right source.
+    """
+    try:
+        from core.key_manager import KeyManager
+        stored = (KeyManager().load() or {}).get("prompt_tier_mode")
+    except Exception as e:
+        log.warning("prompt tier in settings unreadable: %s", type(e).__name__)
+        return ""
+    stored = str(stored or "").strip()
+    return stored if stored in PROMPT_TIER_MODES else ""
+
+
+def prompt_tier_mode() -> str:
+    """The effective tier mode: Settings store, then environment, then auto."""
+    stored = stored_prompt_tier_mode()
+    if stored:
+        return stored
+    env = str(os.environ.get(PROMPT_TIER_ENV) or "").strip()
+    if env in PROMPT_TIER_MODES:
+        return env
+    return PROMPT_TIER_MODE_DEFAULT
+
+
+def agent_max_tokens(mode: str = "agent") -> int:
+    """Per-request output budget for ``mode``, never above the ceiling."""
+    base = (CODE_MAX_TOKENS_DEFAULT if (mode or "") == "code"
+            else AGENT_MAX_TOKENS_DEFAULT)
+    return max(1, min(int(base), MAX_TOKENS_CEILING))
+
+
+def agent_max_iter(mode: str = "agent") -> int:
+    """Tool-loop iteration cap for ``mode``."""
+    if (mode or "") == "code":
+        return AGENT_MAX_ITER_CODE
+    return AGENT_MAX_ITER_DEFAULT
+
+
+def clamp_max_tokens(value, default: int) -> int:
+    """A caller's ``max_tokens``: honoured, but bounded by the ceiling.
+
+    ``None``, a non-number or a nonsense value falls back to ``default``, so a
+    bad request body can neither ask for no tokens at all nor for a million.
+    """
+    try:
+        n = int(value)
+    except (TypeError, ValueError):
+        return int(default)
+    if n < 1:
+        return int(default)
+    return min(n, MAX_TOKENS_CEILING)
 
 
 def sibling_model_dirs() -> list[Path]:

@@ -103,6 +103,92 @@ def stream_conversation(conv, message):
     yield ('end', {'text': full_text, 'tool_calls': tool_calls})
 
 
+# ---------- Vision (image input) ----------
+
+# Successful probes are cached per model file — Capabilities() opens the
+# model and parses its metadata, which is expensive for multi-GB files.
+_VISION_CACHE: dict[str, tuple[bool, str]] = {}
+
+# Shown to the user whenever image input is unavailable: what failed, plus a
+# workable substitute path (OCR → paste the text as a normal message).
+VISION_OCR_SUGGESTION = (
+    "OCR အစားထိုးနည်း: ပုံထဲက စာသားကို OCR tool (Google Lens / Text Scanner / "
+    "tesseract-ocr) ဖြင့် ဖတ်ပြီး ရလဒ် စာသားကို ကူးထည့်ပြီး ပြန်မေးပါ — "
+    "ပုံ upload မလိုဘဲ Chat မှာ တန်းလို့ရသည်။"
+)
+
+
+def clear_vision_cache() -> None:
+    """Forget cached capability probes (tests / model swap)."""
+    _VISION_CACHE.clear()
+
+
+def supports_vision(model_path: str) -> tuple[bool, str]:
+    """Probe whether the model accepts image input.
+
+    Returns ``(supported, reason)``. ``reason`` is "" when supported, otherwise
+    it says *why* the probe failed (the route appends VISION_OCR_SUGGESTION).
+
+    Litert-LM is imported lazily and every attribute is getattr-guarded so the
+    test stub (which has no ``Capabilities``) and remote HTTP backends degrade
+    to "unsupported" instead of raising.
+    """
+    if not model_path:
+        return False, "no model file configured"
+    if not Path(model_path).is_file():
+        return False, f"model file not found: {model_path}"
+
+    cached = _VISION_CACHE.get(str(model_path))
+    if cached is not None:
+        return cached
+
+    caps_cls = getattr(litert_lm, "Capabilities", None)
+    if caps_cls is None:
+        result = (False, "litert_lm.Capabilities unavailable in this build")
+    else:
+        caps = None
+        try:
+            caps = caps_cls(model_path)
+            vision = bool(caps.input_modalities.vision)
+            if vision:
+                result = (True, "")
+            else:
+                result = (False, "model reports vision=False (text-only model)")
+        except Exception as e:
+            result = (False, f"capability probe failed: {type(e).__name__}: {e}")
+        finally:
+            close = getattr(caps, "close", None)
+            if callable(close):
+                try:
+                    close()
+                except Exception:
+                    pass
+
+    if result[0]:
+        _VISION_CACHE[str(model_path)] = result
+    return result
+
+
+def build_vision_message(model_path: str, image_path: str, text: str):
+    """Build a litert_lm ``Contents`` message carrying an image + text.
+
+    Returns ``None`` when image input is unsupported or the Litert-LM message
+    types are missing — callers must check :func:`supports_vision` first and
+    report its reason to the user.
+    """
+    ok, _reason = supports_vision(model_path)
+    if not ok:
+        return None
+    content_cls = getattr(litert_lm, "Content", None)
+    contents_cls = getattr(litert_lm, "Contents", None)
+    if content_cls is None or contents_cls is None:
+        return None
+    parts = [content_cls.ImageFile(absolute_path=image_path)]
+    if text:
+        parts.append(content_cls.Text(text))
+    return contents_cls.of(*parts)
+
+
 class LLMError(Exception):
     """LLM-specific errors."""
 
@@ -244,12 +330,26 @@ class LLM:
         except AttributeError as e:
             raise LLMError(f"Unknown backend '{backend_name}': {e}")
 
+        # Images need a vision executor, and litert_lm only creates one when a
+        # vision_backend is passed — otherwise sending a Contents with an
+        # ImageFile raises "Vision executor should not be null, please
+        # TryLoadingVisionExecutor() first." CPU is used for the vision encoder
+        # so it works whatever backend runs the language model.
+        vision_backend = None
+        vision_ok, vision_reason = supports_vision(model_path)
+        if vision_ok:
+            vision_backend = litert_lm.Backend.CPU()
+        else:
+            log.debug("vision executor skipped for %s: %s", model_path,
+                      vision_reason)
+
         t0 = time.time()
         try:
             self._engine = litert_lm.Engine(
                 model_path,
                 backend=backend_obj,
                 max_num_tokens=self.config.context_size,
+                vision_backend=vision_backend,
             )
         except Exception as e:
             if backend_name == "GPU":
@@ -260,6 +360,7 @@ class LLM:
                         model_path,
                         backend=litert_lm.Backend.CPU(),
                         max_num_tokens=self.config.context_size,
+                        vision_backend=vision_backend,
                     )
                     backend_name = "CPU"
                 except Exception as cpu_err:

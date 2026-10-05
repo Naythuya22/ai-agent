@@ -4,12 +4,16 @@
 Myanmar sequence — repeated virama, a virama with nothing to stack onto, an
 orphaned medial — passes straight through: every character in it is
 individually legal. The 4B model produces exactly that garbage under load
-(``ထိင်္္္္န္``). This module validates the *sequence* instead and truncates
-at the first invalid marker.
+(``ထိင်္္္္န္``). This module validates the *sequence* instead.
 
 Rules (enforced here in code, never left to the prompt):
 
-  B1  the same combining mark never repeats back to back
+  B1  the same combining mark never repeats back to back — and this is the
+      one defect that is *repaired*: the repeat is dropped and the message
+      continues. The model writes doubled marks routinely (``ခင်ဗျျာ``), and
+      truncating there cost the rest of the reply: 2 of 3 real replies were
+      cut short by it. A doubled virama is excluded — a collapsed stack has
+      no single correct reading, so it still ends the message.
   B2  a Myanmar combining mark must sit inside a syllable that started with
       a Myanmar base — no orphan marks at the start of a message, after a
       space, after Latin text, …
@@ -18,6 +22,9 @@ Rules (enforced here in code, never left to the prompt):
   B4  more than MAX_MARKS combining marks in a row cannot be a real Burmese
       syllable (backstop for alternating garbage that B1 does not catch).
       Worst mark run measured on real text is 4, so 6 leaves headroom.
+
+B2/B3/B4 have no safe reading, so they truncate at the first invalid marker
+and everything after it is withheld from the UI.
 
 Streaming: chunks split syllables all the time — a chunk can end on a lone
 virama, which is only wrong if nothing follows. ``feed`` therefore holds the
@@ -79,6 +86,36 @@ def scan(text: str, open_syllable: bool = False) -> tuple[int, bool]:
     return len(text), open_syllable
 
 
+def _is_repeat_mark(text: str, idx: int) -> bool:
+    """True when the defect at ``idx`` is B1 — a mark repeated right after
+    itself — and dropping the repeat is a safe repair.
+
+    ``scan`` only reports B1 inside an open syllable (B2 returns first for an
+    orphan), so the neighbour check is enough. A doubled virama is not
+    repairable: it means a collapsed consonant stack with no single reading.
+    """
+    if idx <= 0 or idx >= len(text):
+        return False
+    ch = text[idx]
+    return _is_mark(ch) and ch == text[idx - 1] and ord(ch) != VIRAMA
+
+
+def _repair_repeat_marks(text: str, open_syllable: bool) -> tuple[str, int]:
+    """Drop every repeated combining mark.
+
+    Returns ``(text, fatal_index)``: ``fatal_index`` is ``-1`` once the whole
+    slice validates, otherwise the index of the first defect that has no safe
+    repair (B2/B3/B4), at which point the caller cuts.
+    """
+    while True:
+        idx, _ = scan(text, open_syllable)
+        if idx >= len(text):
+            return text, -1
+        if not _is_repeat_mark(text, idx):
+            return text, idx
+        text = text[:idx] + text[idx + 1:]
+
+
 def _tail_run(text: str) -> tuple[str, str]:
     """Split ``text`` into (everything up to the last non-mark, trailing marks)."""
     i = len(text)
@@ -91,10 +128,11 @@ class BurmeseValidator:
     """Incremental validator for a text stream.
 
     ``feed(chunk)`` returns ``(safe_text, cut)``: ``safe_text`` is what may be
-    shown now, ``cut`` says an invalid marker was found and nothing further
-    will ever be emitted. After a cut, every later call keeps returning
-    ``("", True)`` — one bad syllable ends the message, it does not open a
-    path back in.
+    shown now, ``cut`` says an unrecoverable marker was found and nothing
+    further will ever be emitted. After a cut, every later call keeps returning
+    ``("", True)`` — one unreadable sequence ends the message, it does not
+    open a path back in. Repeated marks never cause a cut: they are dropped
+    and the message carries on.
     """
 
     def __init__(self) -> None:
@@ -120,11 +158,13 @@ class BurmeseValidator:
         if not buf:
             return "", False
 
-        idx, _ = scan(buf, self._open)
-        if idx < len(buf):
-            # Invalid marker found: everything before it is clean and must be
-            # handed out (it includes the held-back run), then the message ends.
-            out = buf[:idx]
+        buf, fatal = _repair_repeat_marks(buf, self._open)
+        if fatal >= 0:
+            # Unreadable marker (orphan mark, stray virama, runaway run):
+            # everything before it is clean and must be handed out (it
+            # includes the held-back run and any repaired duplicates), then
+            # the message ends.
+            out = buf[:fatal]
             self._hold = ""
             self._dead = True
             self.accepted += out
@@ -143,9 +183,9 @@ class BurmeseValidator:
         buf, self._hold = self._hold, ""
         if self._dead or not buf:
             return ""
-        idx, _ = scan(buf, self._open)
-        if idx < len(buf):
-            out, self._dead = buf[:idx], True
+        buf, fatal = _repair_repeat_marks(buf, self._open)
+        if fatal >= 0:
+            out, self._dead = buf[:fatal], True
         elif ord(buf[-1]) == VIRAMA:
             out, self._dead = buf[:-1], True         # B3 with nothing following
         else:

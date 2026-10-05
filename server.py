@@ -49,7 +49,16 @@ def create_app() -> Flask:
     @application.errorhandler(Exception)
     def _log_unhandled(exc):
         if isinstance(exc, HTTPException):
-            return exc.description or exc.name, exc.code
+            code = exc.code or 500
+            text = exc.description or exc.name
+            # Every /api and /v1 caller parses the body as JSON — a plain-text
+            # "The requested URL was not found…" reaches the UI as
+            # `Unexpected token 'T' … is not valid JSON`. The PWA shell and
+            # static files keep the stock HTML so they still render.
+            path = request.path or ""
+            if path.startswith("/api/") or path.startswith("/v1/"):
+                return jsonify({"error": text}), code
+            return text, code
         log.error("unhandled exception on %s %s",
                   request.method, request.path, exc_info=exc)
         return jsonify({"error": f"{type(exc).__name__}: {exc}"}), 500
