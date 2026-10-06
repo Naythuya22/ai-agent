@@ -250,6 +250,14 @@ AGENT_BUDGET_WARN_ITER = 5      # remaining calls threshold
 # Revert with AI_AGENT_STREAM=0.
 AGENT_CLOUD_STREAM = _env_bool("AI_AGENT_STREAM", True)
 
+# ── reflection loop (Batch 3.2) ──────────────────────────────
+# After each turn, ask the model whether a lesson is worth saving
+# to memory. Only durable lessons get saved (never one-time facts).
+# Revert with AI_AGENT_REFLECT=0.
+AGENT_REFLECT_ENABLED = _env_bool("AI_AGENT_REFLECT", True)
+AGENT_REFLECT_MAX_TOKENS = _env_int(
+    "AI_AGENT_REFLECT_TOKENS", 256, maximum=512)
+
 
 # ── prompt tier ────────────────────────────────────────────────────────────
 #

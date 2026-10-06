@@ -136,6 +136,23 @@ _VERIFY_SYSTEM = (
     "Reply with exactly one of the three forms and nothing else."
 )
 
+_REFLECT_PROMPT = """You just finished one turn. Decide whether
+any lesson is worth saving to persistent memory.
+
+User asked: {user_message}
+Tools called: {tool_names}
+Errors hit: {error_count}
+Your final reply (first 150 chars): {final_excerpt}
+
+RULES
+- Save ONLY durable lessons (rules, patterns, user prefs).
+- Do NOT save one-time facts ("user asked about X").
+- If unsure, reply OK (skip).
+- Reply with ONE of these two lines, nothing else:
+    NOTE: <one line, max 200 chars>
+    OK
+"""
+
 
 def _decide_verify(reply: str, candidate: str) -> tuple:
     """``(verdict, value)`` from the reviewer's raw reply.
@@ -314,6 +331,75 @@ class AgentMode:
         if maxi and left <= getattr(config, "AGENT_BUDGET_WARN_ITER", 5):
             note += " — wrap up soon"
         return note
+
+    def _reflect_call(self, prompt: str) -> str:
+        """One cheap LLM call for the reflection step.
+
+        Cloud-only for now (Part 3.2a). Returns "" on any failure —
+        never raises, never touches self._messages, never runs tools.
+        Local reflection is deferred to a later part.
+        """
+        be = self._backend_obj()
+        if be is None:
+            return ""
+        try:
+            if not be.should_use_cloud():
+                return ""
+            step = be.step(
+                system="",
+                messages=[{"role": "user", "text": prompt}],
+                tools=[],
+                max_tokens=config.AGENT_REFLECT_MAX_TOKENS,
+            )
+            return (getattr(step, "text", "") or "").strip()
+        except Exception as e:
+            log.debug("reflect call failed: %s: %s", type(e).__name__, e)
+            return ""
+
+    def _reflect(self, *, user_message: str, tool_names: list,
+                 error_count: int, final_text: str) -> str | None:
+        """After a turn, decide whether a durable lesson should be saved.
+
+        Returns the saved lesson text (str) if memory_write accepted
+        it, or None if nothing was saved. Never raises, never recurses,
+        never changes the transcript.
+
+        The caller (Part 3.2b) decides when to invoke this — it is NOT
+        called anywhere in 3.2a.
+        """
+        if not config.AGENT_REFLECT_ENABLED:
+            return None
+        try:
+            excerpt = (final_text or "")[:150].replace("\n", " ")
+            tools_str = ", ".join(tool_names) if tool_names else "(none)"
+            prompt = _REFLECT_PROMPT.format(
+                user_message=(user_message or "")[:200],
+                tool_names=tools_str,
+                error_count=int(error_count or 0),
+                final_excerpt=excerpt,
+            )
+            reply = self._reflect_call(prompt)
+            if not reply:
+                return None
+            up = reply.strip().upper()
+            if up.startswith("NOTE:"):
+                lesson = reply.strip()[5:].strip()[:200]
+                if not lesson:
+                    log.debug("reflect: empty NOTE, skipped")
+                    return None
+                from tools import memory as _M  # local import: avoid cycle
+                result = _M.memory_write(lesson, "fact")
+                if result.startswith("Error:"):
+                    log.warning("reflect write refused: %s", result)
+                    return None
+                log.info("reflect saved: %s", lesson)
+                return lesson
+            # "OK" or anything else -> nothing saved
+            log.debug("reflect: no lesson (%s)", up[:40])
+            return None
+        except Exception as e:
+            log.debug("reflect failed: %s: %s", type(e).__name__, e)
+            return None
 
     def _with_memory(self, system: str) -> str:
         """The user's profile hint appended to a prompt, when there is one."""
