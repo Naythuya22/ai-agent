@@ -66,6 +66,11 @@ def _retarget_config_module(home: Path) -> None:
 
 
 def bootstrap(tmp_home: bool = True) -> Path:
+    # Batch 3.2b: reflection off — most suites pin API call counts
+    # and the reflection step adds one call per turn. Dedicated
+    # reflection tests (test_reflection.py) turn it back on locally.
+    import config as _cfg
+    _cfg.AGENT_REFLECT_ENABLED = False
     """Full setup: temp HOME + fake model config. Returns the model path.
 
     Safe to call more than once — each call gets a fresh HOME and config is

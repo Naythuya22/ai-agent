@@ -226,6 +226,8 @@ class AgentMode:
         # Tool-loop iterations spent this turn — the "iter" half of the budget
         # hint. Reset alongside the prompt tier in begin_turn().
         self._turn_iter = 0
+        self._turn_tools: list = []   # tool names used this turn
+        self._turn_errors: int = 0    # "Error:" results this turn
         # C5a: In HTTP mode, server owns session state — do not touch store.
         if self._store and not self._is_http():
             try:
@@ -260,6 +262,8 @@ class AgentMode:
         """
         self._turn_prompt = None
         self._turn_iter = 0
+        self._turn_tools = []
+        self._turn_errors = 0
 
     def _system_prompt(self) -> tuple:
         """``(system_prompt, tier)`` for this turn — resolved once, then frozen.
@@ -401,6 +405,19 @@ class AgentMode:
             log.debug("reflect failed: %s: %s", type(e).__name__, e)
             return None
 
+    def _finish_turn(self, user_message: str, final_text: str) -> None:
+        """Run the reflection step after a user turn. Never raises."""
+        try:
+            self._reflect(
+                user_message=user_message,
+                tool_names=list(self._turn_tools),
+                error_count=self._turn_errors,
+                final_text=final_text or "",
+            )
+        except Exception as e:
+            log.debug("finish_turn reflect failed: %s: %s",
+                      type(e).__name__, e)
+
     def _with_memory(self, system: str) -> str:
         """The user's profile hint appended to a prompt, when there is one."""
         if self.memory is None:
@@ -535,21 +552,34 @@ class AgentMode:
         Both loops call this one method and both put its return value straight
         into the transcript, so there is no path that skips the guards.
         """
+        # Batch 3.2b: test stubs build AgentMode via __new__ (no __init__),
+        # so the per-turn reflection counters may not exist yet. Create them
+        # on first use — real instances get them from __init__/begin_turn.
+        if not hasattr(self, "_turn_tools"):
+            self._turn_tools = []
+            self._turn_errors = 0
         tool_map = {fn.__name__: fn for fn in ALL_TOOLS}
         fn = tool_map.get(tool_name)
         if fn is None:
+            self._turn_errors += 1  # Batch 3.2b: Error: result, tool never ran
             return f"Error: unknown tool: {tool_name}"
         if isinstance(tool_args, str):
             try:
                 tool_args = json.loads(tool_args)
             except Exception as e:
+                self._turn_errors += 1  # Batch 3.2b
                 return f"Error: bad args JSON: {e}"
         if not isinstance(tool_args, dict):
+            self._turn_errors += 1  # Batch 3.2b
             return f"Error: args must be dict, got {type(tool_args).__name__}"
 
         hit = self._cache_peek(tool_name, tool_args)
         if hit is not None:
             log.debug("tool cache hit: %s", tool_name)
+            # Batch 3.2b: a cache hit is a real result this turn too — track
+            # it here, not after the fn call, or hits would never count.
+            if tool_name not in self._turn_tools:
+                self._turn_tools.append(tool_name)
             return "[cached] " + hit
 
         # Inject read budget for read_file only (Batch 1.5).
@@ -572,10 +602,23 @@ class AgentMode:
         try:
             out = str(fn(**tool_args))
         except TypeError as e:
+            # Batch 3.2b: dispatched but failed — count name and error.
+            if tool_name not in self._turn_tools:
+                self._turn_tools.append(tool_name)
+            self._turn_errors += 1
             return self._guard_result(
                 tool_name, f"Error: bad arguments for {tool_name}: {e}")
         except Exception as e:
+            if tool_name not in self._turn_tools:
+                self._turn_tools.append(tool_name)
+            self._turn_errors += 1
             return self._guard_result(tool_name, f"Error: {type(e).__name__}: {e}")
+
+        # Batch 3.2b: track what ran this turn (for reflection)
+        if tool_name not in self._turn_tools:
+            self._turn_tools.append(tool_name)
+        if out.startswith("Error:"):
+            self._turn_errors += 1
 
         # An "Error: …" body is a failed call, not a result worth remembering:
         # caching it would make a transient failure look permanent for the turn.
@@ -1189,6 +1232,7 @@ class AgentMode:
             # status bar must show.
             record_usage("local", self._local_label(), "", mode)
             # C5b: HTTP mode — server owns session; skip local save.
+            self._finish_turn(user_input, text)
             return text
         # WiFi + cloud configured → answer from the provider; anything else
         # (no network, no usable key, prefer_cloud off, provider error) falls
@@ -1199,10 +1243,13 @@ class AgentMode:
         system = self._system_prompt()[0]
         cloud_text = self._try_cloud(user_input, system=system)
         if cloud_text is not None:
+            self._finish_turn(user_input, cloud_text)
             return cloud_text
         if mode == "cloud":
             # Belt and braces: Cloud Only never reaches the local model below.
-            return self._cloud_only_reply(user_input, "exhausted")
+            refusal = self._cloud_only_reply(user_input, "exhausted")
+            self._finish_turn(user_input, refusal)
+            return refusal
         self._ensure_conv(system=system)
         assert self._conv is not None
 
@@ -1286,6 +1333,7 @@ class AgentMode:
                 # here would be invisible, so it goes to the log.
                 log.error("could not save agent turn (session %s): %s: %s",
                           self.session_id, type(e).__name__, e)
+        self._finish_turn(user_input, final_text)
         return final_text
 
     def reload_session(self, sid: str) -> bool:
