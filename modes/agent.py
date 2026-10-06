@@ -769,9 +769,11 @@ class AgentMode:
         for item in resolved:
             fn = tool_map.get(item["name"])
             if fn is None:
+                def _unknown(*args, _n=item["name"], **kwargs):
+                    return f"Error: unknown tool: {_n}"
                 batch.append({
                     "name": item["name"], "args": item["args"],
-                    "fn": (lambda n=item["name"]: f"Error: unknown tool: {n}")})
+                    "fn": _unknown})
             else:
                 batch.append({"name": item["name"], "args": item["args"],
                               "fn": fn})
