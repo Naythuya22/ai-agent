@@ -111,10 +111,13 @@ Your tone must be warm, respectful, and brotherly.
   good agent needs, and recommend concrete next steps. This is not
   a "tool" — it is reasoning, and you do it in plain text.
 - For "what are your weaknesses / what should be added" questions:
-    1. Call capability_list() (and self_audit() if useful).
-    2. Read its output verbatim.
-    3. Reason about which gaps matter for this project.
-    4. Recommend, with one line of why each.
+    STEP 1 — Call capability_list() BEFORE writing any reply.
+             If you answer without this tool, the answer is wrong.
+    STEP 2 — Read its output verbatim.
+    STEP 3 — List ONLY the entries it reports as not implemented.
+             You may add one recommendation line per entry.
+    STEP 4 — You may NOT list a capability as missing unless the
+             tool output says so. No guessing.
 - Do NOT claim you lack the ability to analyze or recommend. You
   have it. Use the tool to get facts, then reason on them.
 - Never write a negative self-statement ("I cannot ...", "I am
@@ -211,6 +214,36 @@ Reply with EXACTLY one of:
   NOTE: <one line, <= 200 chars>
   OK
 """
+
+
+# Batch 4.2h: markers that mean "the user is asking about capabilities"
+_CAPABILITY_QUERY_MARKERS = (
+    "အားနည်းချက်", "အားသာချက်", "လိုအပ်ချက်", "လုပ်ဆောင်နိုင်စွမ်း",
+    "စွမ်းရည်", "ဘာလိုအပ်", "ဘာတွေလိုအပ်",
+    "weakness", "weaknesses", "gap", "gaps", "limitation",
+    "capability", "capabilities", "what can you", "what are your",
+    "what should be added", "what is missing",
+)
+_TOOL_REQUIRED_FOR_CAPABILITY = ("capability_list", "self_audit")
+
+
+def _is_capability_query(text: str) -> bool:
+    """True when the user is asking about the agent's own abilities."""
+    if not text:
+        return False
+    low = text.lower()
+    return any(m.lower() in low for m in _CAPABILITY_QUERY_MARKERS)
+
+
+def _capability_nudge() -> str:
+    """Injected into the next user turn when no capability tool ran yet."""
+    return (
+        "\n\n[SYSTEM REMINDER — read this before answering]\n"
+        "The previous reply answered a capability question WITHOUT "
+        "calling the required tool. You must call capability_list() "
+        "NOW and answer from its output. Do NOT list capabilities or "
+        "weaknesses from memory. The tool is the only source of truth."
+    )
 
 
 def _decide_verify(reply: str, candidate: str) -> tuple:
@@ -323,6 +356,7 @@ class AgentMode:
         self._turn_iter = 0
         self._turn_tools = []
         self._turn_errors = 0
+        self._cap_nudged = False   # Batch 4.2h: one nudge per turn
 
     def _system_prompt(self) -> tuple:
         """``(system_prompt, tier)`` for this turn — resolved once, then frozen.
@@ -1072,6 +1106,23 @@ class AgentMode:
         max_iter = config.agent_max_iter(self.name)
         final_text = ""
         _seen_calls = set()   # same dedup guard as the local loop
+
+        # Batch 4.2h: capability enforcement — if the user asked
+        # about capabilities and the first step missed the tool,
+        # remind once and re-step.
+        if (not getattr(self, "_cap_nudged", False)
+                and _is_capability_query(user_input or "")):
+            _tools_now = [
+                (tc.get("function", {}) or {}).get("name", "")
+                for tc in (step.tool_calls or [])
+            ]
+            if not any(t in _TOOL_REQUIRED_FOR_CAPABILITY
+                       for t in _tools_now):
+                self._cap_nudged = True
+                self._messages.append({"role": "user",
+                                        "text": _capability_nudge()})
+                step = _step()
+
         for _ in range(max_iter):
             if not step.tool_calls:
                 final_text = step.text or final_text
