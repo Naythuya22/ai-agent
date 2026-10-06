@@ -402,6 +402,14 @@ def api_agent_stream():
             "prompt_tier_source": usage.get("tier_source", ""),
         })
 
+    def _finish(final_text):
+        # Exactly one call per turn, at every terminal path of _turn().
+        # Reflection must never break the stream, so anything it raises dies here.
+        try:
+            agent_mode._finish_turn(msg, final_text)
+        except Exception:
+            pass
+
     def generate():
         if remembered:
             yield _sse({"type": "remembered", "items": remembered})
@@ -479,7 +487,11 @@ def api_agent_stream():
                 _sync_reply(text)
                 if text:
                     yield _sse({"type": "chunk", "text": text})
-                yield _end(text, trace, last_usage(), truncated)
+                # Frame first: last_usage()/ctx_of() must describe this turn, not
+                # whatever reflection records while it runs.
+                end_frame = _end(text, trace, last_usage(), truncated)
+                _finish(text)
+                yield end_frame
                 return
 
         # Local engine — unchanged from here down.
@@ -487,9 +499,11 @@ def api_agent_stream():
             agent_mode._ensure_conv()
             conv = agent_mode._conv
         except Exception as e:
+            _finish("")
             yield _sse({"type": "error", "error": "%s: %s" % (type(e).__name__, e)})
             return
         if conv is None:
+            _finish("")
             yield _sse({"type": "error", "error": "conversation not ready"})
             return
 
@@ -500,6 +514,7 @@ def api_agent_stream():
             # keeps the plain text so a replay never needs the file back.
             vm = build_vision_message(vision_model_path, str(image_path), msg)
             if vm is None:
+                _finish("")
                 yield _sse({
                     "type": "error",
                     "error": "vision unavailable — image not sent",
@@ -543,6 +558,7 @@ def api_agent_stream():
                                 continue
                             yield _sse({"type": "chunk", "text": safe})
                         elif kind == "error":
+                            _finish("")
                             yield _sse({"type": "error", "error": str(data)})
                             return
                         elif kind == "tool_calls":
@@ -593,6 +609,7 @@ def api_agent_stream():
                         current_input = {"role": "tool", "name": name, "content": result}
 
                 if not done:
+                    _finish("")
                     yield _sse({"type": "error", "error": "max_iter (%d) reached" % max_iter})
                     return
 
@@ -614,11 +631,14 @@ def api_agent_stream():
                 new_msgs = agent_mode._messages[before_len:]
                 _, tool_trace = _tool_events(new_msgs)
                 usage = _record_local_turn(agent_mode)
-                yield _end(final_text, tool_trace, usage,
-                           truncated=loop_detected or seq_cut)
+                end_frame = _end(final_text, tool_trace, usage,
+                                 truncated=loop_detected or seq_cut)
+                _finish(final_text)
+                yield end_frame
         except GeneratorExit:
             return
         except Exception as e:
+            _finish("")
             yield _sse({"type": "error", "error": "%s: %s" % (type(e).__name__, e)})
 
     return Response(
@@ -669,13 +689,20 @@ def api_agent_stream_v2():
         """Named SSE event frames — v1's _sse at L356 emits data-only lines."""
         return "event: %s\ndata: %s\n\n" % (event, json.dumps(data))
 
+    def _finish(final_text):
+        # Exactly one call per turn — see the three outcomes in generate().
+        try:
+            agent_mode._finish_turn(msg, final_text)
+        except Exception:
+            pass
+
     def generate():
-        # mirrors api_agent_stream at L412 — keep in sync: one Agent turn at
+        # mirrors api_agent_stream at L420 — keep in sync: one Agent turn at
         # a time (deliberately NOT inference_lock — a cloud call can block
         # for 30s and Chat mode must keep running while it does).
         with agent_turn_guard():
             try:
-                # mirrors api_agent_stream at L427 — keep in sync: open the
+                # mirrors api_agent_stream at L435 — keep in sync: open the
                 # turn so the prompt tier resolves once and stays put.
                 agent_mode.begin_turn()
                 agent_mode._clear_turn_cache()
@@ -686,6 +713,7 @@ def api_agent_stream_v2():
                 appended_idx = len(agent_mode._messages)
                 agent_mode._messages.append({"role": "user", "text": msg})
                 saw_end = False
+                final_text = ""
                 try:
                     for kind, payload in agent_mode._handle_cloud_stream():
                         if kind == "delta":
@@ -700,6 +728,7 @@ def api_agent_stream_v2():
                             yield _frame("error", payload)
                         elif kind == "end":
                             saw_end = True
+                            final_text = payload if isinstance(payload, str) else ""
                             yield _frame("done", {"t": payload})
                     if not saw_end:
                         # Cloud declined → undo our user append so v1 starts
@@ -708,18 +737,26 @@ def api_agent_stream_v2():
                             del agent_mode._messages[appended_idx:]
                         yield _frame("fallback",
                                      {"reason": "cloud_unavailable"})
+                        # (b) deliberately NO _finish_turn here: v1 runs its own
+                        # reflection when the frontend re-POSTs this turn.
+                    else:
+                        # (a) end frame already delivered — nothing left to yield.
+                        _finish(final_text)
                 except Exception:
+                    # (c) reflect while the turn is still in the transcript,
+                    # then roll back; the outer handler yields the error frame.
+                    _finish("")
                     if len(agent_mode._messages) > appended_idx:
                         del agent_mode._messages[appended_idx:]
                     raise
             except Exception as e:
-                # mirrors api_agent_stream at L418 — keep in sync. The
+                # mirrors api_agent_stream at L426 — keep in sync. The
                 # generator already rolled back on its way out; GeneratorExit
                 # is NOT caught, so a client disconnect lets it close and run
                 # its own commit/rollback.
                 yield _frame("error", {"error": "%s: %s" % (type(e).__name__, e)})
 
-    # mirrors api_agent_stream at L624 — keep in sync
+    # mirrors api_agent_stream at L644 — keep in sync
     return Response(
         stream_with_context(generate()),
         mimetype="text/event-stream",
