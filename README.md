@@ -119,6 +119,7 @@ Read from `config.py`, defaults verbatim:
 | `AI_AGENT_BUDGET_HINT` | 1 | `[BUDGET: …]` line — revert `=0` |
 | `AI_AGENT_BUDGET_WARN_CTX` | 80 | ctx% that turns the hint into a warning |
 | `AI_AGENT_PROMPT_TIER` | auto | pin a tier when Settings has none |
+| `AI_AGENT_REFLECT` | 1 | after each turn, ask the model whether a durable lesson should be saved to memory — revert `=0` |
 
 Booleans take `1/true/yes/on` and `0/false/no/off`; anything else warns and
 keeps the default. Settings wins over `AI_AGENT_PROMPT_TIER`. Other vars live
