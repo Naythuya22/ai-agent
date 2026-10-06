@@ -301,5 +301,24 @@ class CloudTurnCallCountTests(unittest.TestCase):
         self.assertIn("seen-by-the-tool.txt", review["messages"][1]["content"])
 
 
+class ShouldSkipVerifyTests(unittest.TestCase):
+    """Batch 4.2i: capability nudge turns skip the reviewer."""
+
+    def test_skip_when_nudged(self):
+        m = _mode_with_results()
+        m._cap_nudged = True
+        self.assertTrue(m._should_skip_verify())
+
+    def test_no_skip_by_default(self):
+        m = _mode_with_results()
+        m._cap_nudged = False
+        self.assertFalse(m._should_skip_verify())
+
+    def test_no_skip_when_attribute_missing(self):
+        # test stubs build AgentMode via __new__ (no __init__)
+        m = agent_mod.AgentMode.__new__(agent_mod.AgentMode)
+        self.assertFalse(m._should_skip_verify())
+
+
 if __name__ == "__main__":
     unittest.main()

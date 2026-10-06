@@ -1107,21 +1107,13 @@ class AgentMode:
         final_text = ""
         _seen_calls = set()   # same dedup guard as the local loop
 
-        # Batch 4.2h: capability enforcement — if the user asked
-        # about capabilities and the first step missed the tool,
-        # remind once and re-step.
-        if (not getattr(self, "_cap_nudged", False)
-                and _is_capability_query(user_input or "")):
-            _tools_now = [
-                (tc.get("function", {}) or {}).get("name", "")
-                for tc in (step.tool_calls or [])
-            ]
-            if not any(t in _TOOL_REQUIRED_FOR_CAPABILITY
-                       for t in _tools_now):
-                self._cap_nudged = True
-                self._messages.append({"role": "user",
-                                        "text": _capability_nudge()})
-                step = _step()
+        # Batch 4.2i: capability nudge via shared helper (one per turn)
+        _first_names = [
+            (tc.get("function", {}) or {}).get("name", "")
+            for tc in (step.tool_calls or [])
+        ]
+        if self._maybe_nudge_capability(_first_names):
+            step = _step()
 
         for _ in range(max_iter):
             if not step.tool_calls:
@@ -1179,8 +1171,11 @@ class AgentMode:
 
         # One reviewer pass, cloud only (Decision 4) — and only when a tool
         # actually produced evidence this turn.
-        final_text = self._verify_cloud(be, final_text, _step)
-
+        if self._should_skip_verify():
+            # Batch 4.2i: nudge-fired turns are tool-grounded.
+            log.info("verify skipped: capability nudge turn (tool-grounded)")
+        else:
+            final_text = self._verify_cloud(be, final_text, _step)
         self._messages.append({"role": "assistant", "text": final_text,
                                "reasoning": step.reasoning})
         self._trim_messages()   # F2: cap history
@@ -1204,6 +1199,17 @@ class AgentMode:
             max_tokens=config.AGENT_VERIFY_MAX_TOKENS,
         )
         return getattr(reply, "text", "") or ""
+
+    def _should_skip_verify(self) -> bool:
+        """Batch 4.2i: skip reviewer on capability-nudge turns.
+
+        When the capability nudge fires, the follow-up answer is produced
+        from capability_list output — it is tool-grounded. A reviewer pass
+        adds noise and (with small models) sometimes replaces the analysis
+        with a shorter rewrite. Deterministic structural fix; no prompt
+        change, no length heuristic.
+        """
+        return getattr(self, "_cap_nudged", False)
 
     def _verify_cloud(self, be, candidate: str, step_fn) -> str:
         """Return the answer to show, after one review pass.
@@ -1274,6 +1280,38 @@ class AgentMode:
     # happen before it iterates _handle_cloud_stream() — because neither
     # method below takes user_input. No path here touches the local engine:
     # an empty stream is the signal for the route to fall back.
+
+    def _maybe_nudge_capability(self, tool_names):
+        """Append a capability nudge once per turn when needed.
+
+        Returns True if a nudge was appended (caller should re-step).
+        Never raises.
+        """
+        try:
+            if getattr(self, "_cap_nudged", False):
+                return False
+            # Find the most recent non-nudge user message
+            user_text = ""
+            for m in reversed(self._messages):
+                if m.get("role") == "user":
+                    t = str(m.get("text", ""))
+                    if "SYSTEM REMINDER" in t:
+                        continue
+                    user_text = t
+                    break
+            if not _is_capability_query(user_text):
+                return False
+            names = [n for n in (tool_names or []) if n]
+            if any(t in _TOOL_REQUIRED_FOR_CAPABILITY for t in names):
+                return False
+            self._cap_nudged = True
+            self._messages.append({"role": "user",
+                                    "text": _capability_nudge()})
+            log.info("capability nudge appended (no capability tool in first round)")
+            return True
+        except Exception as e:
+            log.debug("capability nudge helper failed: %s", e)
+            return False
 
     def _try_cloud_stream(self):
         """Generator. Yields:
@@ -1362,6 +1400,16 @@ class AgentMode:
         # mirrors _handle_cloud at L700 — the first step, before the loop
         info, round_text = (yield from _pump_round()) or (None, "")
         ended = False
+        # Batch 4.2i: capability nudge (stream path) — if the user
+        # asked about capabilities and the first round missed the
+        # required tool, remind once and re-pump.
+        if info is not None:
+            _first_names = [
+                (tc.get("function", {}) or {}).get("name", "")
+                for tc in (info.get("tool_calls") or [])
+            ]
+            if self._maybe_nudge_capability(_first_names):
+                info, round_text = (yield from _pump_round()) or (None, "")
         for _ in range(max_iter):                     # mirrors _handle_cloud at L704 — keep in sync on any change
             if info is None:
                 # step_stream's empty-stream signal: every provider failed
@@ -1496,7 +1544,11 @@ class AgentMode:
                 # mirrors _handle_cloud at L742 — keep in sync on any change.
                 # One reviewer pass, running on the unmodified
                 # _verify_cloud/_reviewer_reply
-                final_text = self._verify_cloud(be, final_text, _step)
+                if self._should_skip_verify():
+                    # Batch 4.2i: nudge-fired turns are tool-grounded.
+                    log.info("verify skipped: capability nudge turn (tool-grounded)")
+                else:
+                    final_text = self._verify_cloud(be, final_text, _step)
             # Sanitize + commit, the mechanism _handle_cloud uses at L744-747:
             # tool output was already banner-ed and redacted inside
             # _execute_tool/_guard_result on the way in, so there is nothing
