@@ -194,10 +194,17 @@ def capability_list() -> str:
     # not in modes/. Report it separately so "modes: chat, agent" is not
     # read as "no code mode".
     root = Path(__file__).parent.parent
-    code_route = (root / "routes" / "code.py").exists()
-    code_core = (root / "core" / "opencode.py").exists()
-    lines.append(f"code_mode: {'yes' if (code_route and code_core) else 'no'}"
-                 f" — routes/code.py={code_route}, core/opencode.py={code_core}")
+    code_route = (root / "routes" / "code.py").is_file()
+    code_core = (root / "core" / "opencode.py").is_file()
+    if code_route and code_core:
+        lines.append("code_mode: yes (routes/code.py + core/opencode.py)")
+    else:
+        missing = []
+        if not code_route:
+            missing.append("routes/code.py")
+        if not code_core:
+            missing.append("core/opencode.py")
+        lines.append("code_mode: no (missing " + ", ".join(missing) + ")")
     lines.append("context_window: no — model_registry unavailable"
                  if s["context"] == "?" else
                  f"context_window: yes — {s['context']} (model_registry)")
