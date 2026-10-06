@@ -8,7 +8,10 @@ from pathlib import Path
 
 _MAX_CHARS = 4000
 _LOG_TAIL_BYTES = 4096
-_KNOWN_GAPS = ("parallel_tool_calls", "vector_memory", "cost_tracking",
+# Batch 4.2e: refreshed after 4.2 shipped parallel_tool_calls.
+# self_audit / capability_list are the tool that reports this list,
+# so they are NOT gaps.
+_KNOWN_GAPS = ("vector_memory", "cost_tracking",
                "eval_harness", "self_modification", "multi_modal_input")
 _BASELINE_TOOLS = (
     "list_files", "read_file", "write_file",
@@ -187,6 +190,14 @@ def capability_list() -> str:
     lines += ([f"{p}: yes — provider in key_manager.DEFAULT_CONFIG"
                for p in s["providers"]]
               or ["providers: no — key_manager.DEFAULT_CONFIG unreadable"])
+    # Batch 4.2e: code mode lives in routes/code.py + core/opencode.py,
+    # not in modes/. Report it separately so "modes: chat, agent" is not
+    # read as "no code mode".
+    root = Path(__file__).parent.parent
+    code_route = (root / "routes" / "code.py").exists()
+    code_core = (root / "core" / "opencode.py").exists()
+    lines.append(f"code_mode: {'yes' if (code_route and code_core) else 'no'}"
+                 f" — routes/code.py={code_route}, core/opencode.py={code_core}")
     lines.append("context_window: no — model_registry unavailable"
                  if s["context"] == "?" else
                  f"context_window: yes — {s['context']} (model_registry)")
@@ -197,5 +208,7 @@ def capability_list() -> str:
                  if known else "memory: no — ~/.ai-agent/memory.json unreadable")
     lines.append(f"log: yes — {s['log']}" if s["log"] != "?" else
                  "log: no — ~/.ai-agent/logs/agent.log unreadable")
-    lines += [f"{g}: no — not implemented" for g in s["gaps"]]
+    # Batch 4.2e: do NOT give the model a free-form reason to
+    # embellish — the audit only knows that a name is on the gap list.
+    lines += [f"{g}: not implemented" for g in s["gaps"]]
     return _cap("\n".join(lines) + "\n")
