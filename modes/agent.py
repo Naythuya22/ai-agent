@@ -106,6 +106,16 @@ Your tone must be warm, respectful, and brotherly.
 - set alarm/timer/calendar -> call the matching tool immediately.
 - After a tool returns, base your answer ONLY on the tool output.
 
+## Tool Failure Rule (CRITICAL)
+- If a tool call returns "Error:" or a failure message, you MUST NOT
+  describe what its result "would have been". A failed read is a
+  failed read — do not fill the gap from memory or training.
+- Allowed responses to a failed tool:
+    * say the file/content is unavailable,
+    * ask the user for a correct path or target,
+    * try a different tool that actually succeeds.
+- Never paraphrase a file you did not see. Never invent file names.
+
 ## Task Handling
 - Simple task: Just do it.
 - Complex task: Break down and confirm plan first."""
@@ -764,6 +774,21 @@ class AgentMode:
         if be is None or not callable(getattr(be, "run_tools_parallel", None)):
             return _serial_fallback()
 
+        # Batch 4.2c: inject read_file budget before parallel — the
+        # serial path does this inside _execute_tool, but parallel
+        # bypasses it, so callers otherwise see a stale or default cap.
+        if any(item["name"] == "read_file" for item in resolved):
+            try:
+                from tools import file as _file_mod
+                st = be.context_state() or {}
+                _file_mod.set_read_context(
+                    model=getattr(be, "model", "") or "",
+                    base_url=getattr(be, "base_url", "") or "",
+                    used_tokens=int(st.get("used", 0) or 0),
+                )
+            except Exception as e:
+                log.debug("batch read_context inject failed: %s", e)
+
         # Build parallel payload
         batch = []
         for item in resolved:
@@ -791,6 +816,9 @@ class AgentMode:
             if err:
                 text = self._guard_result(item["name"], f"Error: {err}")
                 self._turn_errors += 1
+                # Batch 4.2c: make failure explicit so the model cannot
+                # interpret a failure as content.
+                text = "[FAILED] " + text
             else:
                 text = self._guard_result(item["name"], text)
                 if not text.startswith("Error:"):
