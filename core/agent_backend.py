@@ -1895,10 +1895,18 @@ class AgentBackend:
           - If len(calls) <= 1, run inline (no pool) — a single call
             gains nothing from a thread hop.
         """
+        def _synth(c, error, elapsed_ms):
+            e = c if isinstance(c, dict) else {}
+            return {"name": e.get("name") or "", "args": e.get("args") or {},
+                    "result": "", "error": error,
+                    "elapsed_ms": int(elapsed_ms)}
+
         if not calls:
             return []
         if len(calls) <= 1:
             c = calls[0]
+            if not isinstance(c, dict):
+                return [_synth(c, "Error: bad call entry", 0)]
             name = c.get("name") or ""
             args = c.get("args") or {}
             fn = c.get("fn")
@@ -1924,6 +1932,8 @@ class AgentBackend:
             max_workers=min(MAX_PARALLEL_TOOLS, len(calls)))
 
         def _run(c):
+            if not isinstance(c, dict):
+                return _synth(c, "Error: bad call entry", 0)
             name = c.get("name") or ""
             args = c.get("args") or {}
             fn = c.get("fn")
@@ -1947,18 +1957,33 @@ class AgentBackend:
                         "error": "%s: %s" % (type(e).__name__, e),
                         "elapsed_ms": int((time.time()-t0)*1000)}
 
+        t_start = time.monotonic()
+        slots = [None] * len(calls)
+        submitted = []
         try:
-            futures = [pool.submit(_run, c) for c in calls]
-            results = [f.result(timeout=timeout) for f in futures]
-            return results
+            for i, c in enumerate(calls):
+                try:
+                    fut = pool.submit(_run, c)
+                except Exception as e:
+                    slots[i] = _synth(c, "%s: %s" % (type(e).__name__, e), 0)
+                    continue
+                submitted.append((i, c, fut, time.monotonic()))
+            for i, c, fut, t_sub in submitted:
+                left = timeout - (time.monotonic() - t_sub)
+                try:
+                    slots[i] = fut.result(timeout=max(0.0, left))
+                except FuturesTimeoutError:
+                    slots[i] = _synth(c, "timeout",
+                                      int((time.monotonic() - t_sub) * 1000))
+                except Exception as e:
+                    slots[i] = _synth(c, "%s: %s" % (type(e).__name__, e),
+                                      int((time.monotonic() - t_sub) * 1000))
+            return slots
         except Exception as e:
-            t1 = time.time()
-            results = []
-            for c in calls:
-                results.append({"name": c.get("name") or "", "args": c.get("args") or {},
-                                "result": "", "error": "%s: %s" % (type(e).__name__, e),
-                                "elapsed_ms": int((t1)*0)})  # best effort
-            return results
+            msg = "%s: %s" % (type(e).__name__, e)
+            elapsed = int((time.monotonic() - t_start) * 1000)
+            return [s if s is not None else _synth(c, msg, elapsed)
+                    for s, c in zip(slots, calls)]
         finally:
             if own_pool:
                 pool.shutdown(wait=False)
