@@ -440,6 +440,11 @@ class AgentMode:
                     "user wants to learn", "user asked about",
                     "user wants to", "the user is",
                     "the user has requested", "this turn",
+                    # Batch 4.2d: more transient phrasings observed live
+                    "user is interested", "user is curious",
+                    "user would like", "user needs",
+                    "user hopes", "user expects",
+                    "user is looking", "the user wants",
                 )
                 for marker in _TRANSIENT:
                     if marker in low:
