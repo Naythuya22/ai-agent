@@ -24,6 +24,7 @@ import inspect
 import json
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from pathlib import Path
 import urllib.error
 import urllib.request
@@ -39,6 +40,8 @@ from core.log import get_logger
 log = get_logger("agent_backend")
 
 HTTP_TIMEOUT = 30
+
+MAX_PARALLEL_TOOLS = 4
 
 # A context overflow is answered by trimming harder and trying once — see
 # `AgentBackend.step`. Not a full second walk of the fallback chain: the other
@@ -87,6 +90,14 @@ MODELS: dict = {
                   "claude-3-opus-latest"],
     "deepseek": ["deepseek-chat", "deepseek-reasoner"],
 }
+
+
+# Tools that must run serially even if the model asks in one batch.
+# Read-only tools are safe to parallelize; anything that mutates
+# the filesystem or runs arbitrary code is not.
+SERIAL_ONLY_TOOLS = frozenset({
+    "write_file", "run_python",
+})
 
 
 def cost_per_1k(provider: str, model: str) -> float | None:
@@ -1852,6 +1863,105 @@ class AgentBackend:
         except Exception as e:
             return {"ok": False, "kind": "error",
                     "error": "%s: %s" % (type(e).__name__, e)}
+
+    # ---------- parallel tools ----------
+    def tools_are_parallel_safe(self, names):
+        """True when a batch of tool names can run concurrently."""
+        return (len(names) > 1
+                and not any(n in SERIAL_ONLY_TOOLS for n in names))
+
+    def run_tools_parallel(self, calls, *,
+                            executor=None, timeout=30.0):
+        """Run a list of tool calls concurrently; return results in order.
+
+        Args:
+            calls: list of dicts, each {"name": str, "args": dict,
+                   "fn": callable}. The caller resolves `fn` — this
+                   method does not know how tools are dispatched.
+
+        Returns:
+            list of {"name": str, "args": dict, "result": str,
+                     "error": str|None, "elapsed_ms": int}
+            — one per input call, SAME ORDER as input.
+
+        Rules:
+          - Bounded: at most MAX_PARALLEL_TOOLS workers.
+          - Each call has its own timeout; a timeout becomes
+            error="timeout" with result="".
+          - An exception inside one call NEVER kills the batch — it
+            becomes error="<ExcType>: <msg>" and other calls continue.
+          - Never raises. Never touches self._messages. Never writes
+            to disk. Caller owns side effects.
+          - If len(calls) <= 1, run inline (no pool) — a single call
+            gains nothing from a thread hop.
+        """
+        if not calls:
+            return []
+        if len(calls) <= 1:
+            c = calls[0]
+            name = c.get("name") or ""
+            args = c.get("args") or {}
+            fn = c.get("fn")
+            t0 = time.time()
+            try:
+                res = fn(**args) if callable(fn) else ""
+                if res is None:
+                    res = ""
+                elif not isinstance(res, str):
+                    try:
+                        res = str(res)
+                    except Exception:
+                        res = ""
+                return [{"name": name, "args": args, "result": res,
+                         "error": None, "elapsed_ms": int((time.time()-t0)*1000)}]
+            except Exception as e:
+                return [{"name": name, "args": args, "result": "",
+                         "error": "%s: %s" % (type(e).__name__, e),
+                         "elapsed_ms": int((time.time()-t0)*1000)}]
+
+        own_pool = executor is None
+        pool = executor or ThreadPoolExecutor(
+            max_workers=min(MAX_PARALLEL_TOOLS, len(calls)))
+
+        def _run(c):
+            name = c.get("name") or ""
+            args = c.get("args") or {}
+            fn = c.get("fn")
+            t0 = time.time()
+            try:
+                res = fn(**args) if callable(fn) else ""
+                if res is None:
+                    res = ""
+                elif not isinstance(res, str):
+                    try:
+                        res = str(res)
+                    except Exception:
+                        res = ""
+                return {"name": name, "args": args, "result": res,
+                        "error": None, "elapsed_ms": int((time.time()-t0)*1000)}
+            except FuturesTimeoutError:
+                return {"name": name, "args": args, "result": "",
+                        "error": "timeout", "elapsed_ms": int((time.time()-t0)*1000)}
+            except Exception as e:
+                return {"name": name, "args": args, "result": "",
+                        "error": "%s: %s" % (type(e).__name__, e),
+                        "elapsed_ms": int((time.time()-t0)*1000)}
+
+        try:
+            futures = [pool.submit(_run, c) for c in calls]
+            results = [f.result(timeout=timeout) for f in futures]
+            return results
+        except Exception as e:
+            t1 = time.time()
+            results = []
+            for c in calls:
+                results.append({"name": c.get("name") or "", "args": c.get("args") or {},
+                                "result": "", "error": "%s: %s" % (type(e).__name__, e),
+                                "elapsed_ms": int((t1)*0)})  # best effort
+            return results
+        finally:
+            if own_pool:
+                pool.shutdown(wait=False)
 
 
 _BASE_URL_ADAPTERS = ("OpenAIAdapter", "OpenRouterAdapter",
