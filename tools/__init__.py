@@ -17,6 +17,7 @@ from tools.smart_search import smart_search
 from tools.memory import (
     memory_read, memory_write, memory_search, memory_forget,
 )
+from tools.audit import self_audit, capability_list
 
 ALL_TOOLS = (
     list(FILE_TOOLS)
@@ -25,10 +26,12 @@ ALL_TOOLS = (
     + list(WEB_TOOLS)
     + [smart_search]
     + [memory_read, memory_write, memory_search, memory_forget]
+    + [self_audit, capability_list]
 )
 
 __all__ = [
     "ALL_TOOLS", "run_command", "run_python", "ANDROID_TOOLS", "WEB_TOOLS",
     "smart_search",
     "memory_read", "memory_write", "memory_search", "memory_forget",
+    "self_audit", "capability_list",
 ]
