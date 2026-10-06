@@ -136,21 +136,39 @@ _VERIFY_SYSTEM = (
     "Reply with exactly one of the three forms and nothing else."
 )
 
-_REFLECT_PROMPT = """You just finished one turn. Decide whether
-any lesson is worth saving to persistent memory.
+_REFLECT_PROMPT = """You are reviewing one finished turn to decide
+whether a DURABLE lesson is worth saving to persistent memory.
 
+CURRENT MEMORY (do not duplicate):
+{memory_summary}
+
+THIS TURN
 User asked: {user_message}
 Tools called: {tool_names}
 Errors hit: {error_count}
-Your final reply (first 150 chars): {final_excerpt}
+Final reply (first 150 chars): {final_excerpt}
 
-RULES
-- Save ONLY durable lessons (rules, patterns, user prefs).
-- Do NOT save one-time facts ("user asked about X").
-- If unsure, reply OK (skip).
-- Reply with ONE of these two lines, nothing else:
-    NOTE: <one line, max 200 chars>
-    OK
+SAVE a NOTE only for a DURABLE lesson:
+  * user preference or constraint ("prefers X", "wants Y only")
+  * a repeated error pattern ("tool T fails when Z")
+  * a project-level fact ("this repo uses W")
+  * a workflow rule you plan to follow again
+Anything that fits in the identity/profile sections belongs
+THERE, not in facts.
+
+NEVER save:
+  * anything already in CURRENT MEMORY above (no paraphrase-
+    duplicates)
+  * a description of THIS conversation ("user is asking...",
+    "user is requesting...", "user wants to learn...")
+  * a one-time answer, timestamp, or question
+  * a claim about who the user or assistant IS if it contradicts
+    the identity/profile section (trust the profile)
+  * the current turn's counts, tokens, or latency
+
+Reply with EXACTLY one of:
+  NOTE: <one line, <= 200 chars>
+  OK
 """
 
 
@@ -364,6 +382,13 @@ class AgentMode:
                  error_count: int, final_text: str) -> str | None:
         """After a turn, decide whether a durable lesson should be saved.
 
+        The prompt now embeds the CURRENT memory summary (identity/profile
+        plus facts) so the model can see what is already stored and avoid
+        paraphrase-duplicates, and the candidate NOTE passes a validation
+        gate before memory_write: transient markers ("the user is ..."),
+        reversed identity claims, and a cheap near-duplicate containment
+        test against the existing summary all reject the lesson.
+
         Returns the saved lesson text (str) if memory_write accepted
         it, or None if nothing was saved. Never raises, never recurses,
         never changes the transcript.
@@ -374,6 +399,12 @@ class AgentMode:
         if not config.AGENT_REFLECT_ENABLED:
             return None
         try:
+            try:
+                from tools import memory as _M  # local import: avoid cycle
+                memory_summary = _M.memory_read()
+            except Exception:
+                memory_summary = "(unavailable)"
+            memory_summary = str(memory_summary or "(unavailable)")[:800]
             excerpt = (final_text or "")[:150].replace("\n", " ")
             tools_str = ", ".join(tool_names) if tool_names else "(none)"
             prompt = _REFLECT_PROMPT.format(
@@ -381,6 +412,7 @@ class AgentMode:
                 tool_names=tools_str,
                 error_count=int(error_count or 0),
                 final_excerpt=excerpt,
+                memory_summary=memory_summary,
             )
             reply = self._reflect_call(prompt)
             if not reply:
@@ -390,6 +422,33 @@ class AgentMode:
                 lesson = reply.strip()[5:].strip()[:200]
                 if not lesson:
                     log.debug("reflect: empty NOTE, skipped")
+                    return None
+                reason = None
+                low = lesson.lower()
+                _TRANSIENT = (
+                    "user is asking", "user is requesting",
+                    "user wants to learn", "user asked about",
+                    "user wants to", "the user is",
+                    "the user has requested", "this turn",
+                )
+                for marker in _TRANSIENT:
+                    if marker in low:
+                        reason = "transient marker '%s'" % marker
+                        break
+                if reason is None and (
+                        "ကိုကြီး to refer to the ai" in low
+                        or "ညီ to refer to themselves" in low):
+                    reason = "reversed identity"
+                if reason is None:
+                    head = lesson[:40]
+                    if head:
+                        for line in memory_summary.splitlines():
+                            if head in line.strip():
+                                reason = "near-duplicate"
+                                break
+                if reason:
+                    log.debug("reflect rejected: %s — %s", reason,
+                              lesson[:80])
                     return None
                 from tools import memory as _M  # local import: avoid cycle
                 result = _M.memory_write(lesson, "fact")
