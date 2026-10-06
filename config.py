@@ -250,6 +250,13 @@ AGENT_BUDGET_WARN_ITER = 5      # remaining calls threshold
 # Revert with AI_AGENT_STREAM=0.
 AGENT_CLOUD_STREAM = _env_bool("AI_AGENT_STREAM", True)
 
+# ── parallel tool execution (Batch 4.2) ──────────────────────
+# Only used when a single model response carries >1 tool_call and
+# none of the tools are in SERIAL_ONLY_TOOLS (write_file,
+# run_python). Read-only tools are safe to run concurrently.
+# Revert with AI_AGENT_PARALLEL=0.
+AGENT_PARALLEL_TOOLS = _env_bool("AI_AGENT_PARALLEL", True)
+
 # ── reflection loop (Batch 3.2) ──────────────────────────────
 # After each turn, ask the model whether a lesson is worth saving
 # to memory. Only durable lessons get saved (never one-time facts).

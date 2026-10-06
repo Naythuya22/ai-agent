@@ -685,6 +685,123 @@ class AgentMode:
             self._cache_put(tool_name, tool_args, out)
         return self._guard_result(tool_name, out)
 
+    def _batch_parallel_ok(self, calls) -> bool:
+        """True when a batch of model-shape tool_calls can run concurrently.
+
+        Requirements (all must hold):
+          - config.AGENT_PARALLEL_TOOLS is on
+          - at least 2 calls
+          - backend exposes tools_are_parallel_safe and returns True
+          - no duplicate (name, args) pair within the batch itself
+        """
+        if not getattr(config, "AGENT_PARALLEL_TOOLS", False):
+            return False
+        if not calls or len(calls) < 2:
+            return False
+        be = self._backend_obj()
+        if be is None:
+            return False
+        check = getattr(be, "tools_are_parallel_safe", None)
+        if not callable(check):
+            return False
+        names = []
+        keys = set()
+        for tc in calls:
+            fn_info = tc.get("function", {}) if isinstance(tc, dict) else {}
+            name = fn_info.get("name", "")
+            args = fn_info.get("arguments", {}) or {}
+            names.append(name)
+            try:
+                key = (name, json.dumps(args, sort_keys=True))
+            except Exception:
+                key = (name, str(args))
+            if key in keys:
+                return False
+            keys.add(key)
+        try:
+            return bool(check(names))
+        except Exception:
+            return False
+
+    def _execute_tools_batch(self, calls):
+        """Run model-shape tool_calls concurrently; return per-call dicts.
+
+        Returns a list of {"name": str, "args": dict, "result": str,
+        "error": str|None} in the SAME order as `calls`. Never raises.
+        Applies _guard_result to every result and updates _turn_tools /
+        _turn_errors for the batch.
+        """
+        if not hasattr(self, "_turn_tools"):
+            self._turn_tools = []
+            self._turn_errors = 0
+
+        tool_map = {fn.__name__: fn for fn in ALL_TOOLS}
+        be = self._backend_obj()
+
+        # Resolve names / args from model shape
+        resolved = []
+        for tc in calls:
+            fn_info = tc.get("function", {}) if isinstance(tc, dict) else {}
+            name = fn_info.get("name", "")
+            args = fn_info.get("arguments", {}) or {}
+            if isinstance(args, str):
+                try:
+                    args = json.loads(args)
+                except Exception:
+                    args = {}
+            if not isinstance(args, dict):
+                args = {}
+            resolved.append({"name": name, "args": args})
+
+        def _serial_fallback():
+            out = []
+            for item in resolved:
+                r = self._execute_tool(item["name"], item["args"])
+                out.append({"name": item["name"], "args": item["args"],
+                            "result": r, "error": None})
+            return out
+
+        if be is None or not callable(getattr(be, "run_tools_parallel", None)):
+            return _serial_fallback()
+
+        # Build parallel payload
+        batch = []
+        for item in resolved:
+            fn = tool_map.get(item["name"])
+            if fn is None:
+                batch.append({
+                    "name": item["name"], "args": item["args"],
+                    "fn": (lambda n=item["name"]: f"Error: unknown tool: {n}")})
+            else:
+                batch.append({"name": item["name"], "args": item["args"],
+                              "fn": fn})
+        try:
+            raw = be.run_tools_parallel(batch)
+        except Exception as e:
+            log.debug("parallel batch failed, serial fallback: %s", e)
+            return _serial_fallback()
+
+        # Post-process: guard each result, cache, track
+        out = []
+        for item, r in zip(resolved, raw):
+            text = r.get("result", "") if isinstance(r, dict) else ""
+            err = r.get("error") if isinstance(r, dict) else None
+            if err:
+                text = self._guard_result(item["name"], f"Error: {err}")
+                self._turn_errors += 1
+            else:
+                text = self._guard_result(item["name"], text)
+                if not text.startswith("Error:"):
+                    try:
+                        self._cache_put(item["name"], item["args"], text)
+                    except Exception:
+                        pass
+            if item["name"] not in self._turn_tools:
+                self._turn_tools.append(item["name"])
+            out.append({"name": item["name"], "args": item["args"],
+                        "result": text, "error": err})
+        return out
+
     def _trim_messages(self, max_entries: int = 40) -> None:
         """F2: Cap message history to prevent unbounded memory growth.
 
@@ -893,34 +1010,52 @@ class AgentMode:
             if not step.tool_calls:
                 final_text = step.text or final_text
                 break
-            for tc in step.tool_calls:
-                fn_info = tc.get("function", {}) if isinstance(tc, dict) else {}
-                name = fn_info.get("name", "")
-                args = fn_info.get("arguments", {}) or {}
-                try:
-                    _key = (name, _json.dumps(args, sort_keys=True))
-                except Exception:
-                    _key = (name, str(args))
-                if _key in _seen_calls:
-                    self._messages.append({
-                        "role": "tool_result", "tool": name,
-                        "text": self._cached_text(
-                            name, args,
-                            f"(skipped: {name} already called with "
-                            f"identical args this turn)"),
-                    })
-                    continue
-                _seen_calls.add(_key)
-                # `reasoning` rides along so the next provider step
-                # can pass it back — DeepSeek's thinking mode refuses
-                # the turn with a 400 otherwise.
-                self._messages.append({"role": "tool_call", "tool": name,
-                                       "args": args,
-                                       "reasoning": step.reasoning})
-                result = self._execute_tool(name, args)
-                self._turn_iter += 1   # budget: one more loop iteration spent
-                self._messages.append({"role": "tool_result", "tool": name,
-                                       "text": result})
+            # Batch 4.2b: try parallel batch when safe and no dups.
+            if self._batch_parallel_ok(step.tool_calls):
+                results = self._execute_tools_batch(step.tool_calls)
+                for tc, r in zip(step.tool_calls, results):
+                    name = r["name"]
+                    args = r["args"]
+                    try:
+                        _key = (name, _json.dumps(args, sort_keys=True))
+                    except Exception:
+                        _key = (name, str(args))
+                    _seen_calls.add(_key)
+                    self._messages.append({"role": "tool_call", "tool": name,
+                                           "args": args,
+                                           "reasoning": step.reasoning})
+                    self._turn_iter += 1
+                    self._messages.append({"role": "tool_result", "tool": name,
+                                           "text": r["result"]})
+            else:
+                for tc in step.tool_calls:
+                    fn_info = tc.get("function", {}) if isinstance(tc, dict) else {}
+                    name = fn_info.get("name", "")
+                    args = fn_info.get("arguments", {}) or {}
+                    try:
+                        _key = (name, _json.dumps(args, sort_keys=True))
+                    except Exception:
+                        _key = (name, str(args))
+                    if _key in _seen_calls:
+                        self._messages.append({
+                            "role": "tool_result", "tool": name,
+                            "text": self._cached_text(
+                                name, args,
+                                f"(skipped: {name} already called with "
+                                f"identical args this turn)"),
+                        })
+                        continue
+                    _seen_calls.add(_key)
+                    # `reasoning` rides along so the next provider step
+                    # can pass it back — DeepSeek's thinking mode refuses
+                    # the turn with a 400 otherwise.
+                    self._messages.append({"role": "tool_call", "tool": name,
+                                           "args": args,
+                                           "reasoning": step.reasoning})
+                    result = self._execute_tool(name, args)
+                    self._turn_iter += 1   # budget: one more loop iteration spent
+                    self._messages.append({"role": "tool_result", "tool": name,
+                                           "text": result})
             step = _step()
         if not final_text:
             final_text = step.text or ""
@@ -1119,40 +1254,60 @@ class AgentMode:
                 final_text = round_text or final_text   # mirrors _handle_cloud at L706 — keep in sync on any change
                 ended = True
                 break
-            for tc in info["tool_calls"]:
-                # mirrors _handle_cloud at L708 — keep in sync on any change
-                fn_info = tc.get("function", {}) if isinstance(tc, dict) else {}
-                name = fn_info.get("name", "")
-                args = fn_info.get("arguments", {}) or {}
-                try:
-                    _key = (name, json.dumps(args, sort_keys=True))
-                except Exception:
-                    _key = (name, str(args))
-                if _key in _seen_calls:
-                    # mirrors _handle_cloud at L716 — keep in sync on any
-                    # change. Skip the repeat, but hand the model its data
-                    # back instead of losing it
-                    self._messages.append({
-                        "role": "tool_result", "tool": name,
-                        "text": self._cached_text(
-                            name, args,
-                            f"(skipped: {name} already called with "
-                            f"identical args this turn)"),
-                    })
-                    continue
-                _seen_calls.add(_key)
-                # mirrors _handle_cloud at L729 — keep in sync on any change.
-                # `reasoning` rides along so the next provider step can pass
-                # it back (DeepSeek 400)
-                self._messages.append({"role": "tool_call", "tool": name,
-                                       "args": args,
-                                       "reasoning": info.get("reasoning")})
-                result = self._execute_tool(name, args)   # mirrors _handle_cloud at L732 — keep in sync on any change
-                self._turn_iter += 1   # budget: one more loop iteration spent
-                self._messages.append({"role": "tool_result", "tool": name,
-                                       "text": result})   # mirrors _handle_cloud at L734 — keep in sync on any change
-                yield ("tool", {"name": name, "args": args,
-                                "result": result})
+            # Batch 4.2b: stream parallel — when safe and no dups.
+            if self._batch_parallel_ok(info["tool_calls"]):
+                results = self._execute_tools_batch(info["tool_calls"])
+                for tc, r in zip(info["tool_calls"], results):
+                    name = r["name"]
+                    args = r["args"]
+                    try:
+                        _key = (name, json.dumps(args, sort_keys=True))
+                    except Exception:
+                        _key = (name, str(args))
+                    _seen_calls.add(_key)
+                    self._messages.append({"role": "tool_call", "tool": name,
+                                           "args": args,
+                                           "reasoning": info.get("reasoning")})
+                    self._turn_iter += 1
+                    self._messages.append({"role": "tool_result", "tool": name,
+                                           "text": r["result"]})
+                    yield ("tool", {"name": name, "args": args,
+                                    "result": r["result"]})
+            else:
+                for tc in info["tool_calls"]:
+                    # mirrors _handle_cloud at L708 — keep in sync on any change
+                    fn_info = tc.get("function", {}) if isinstance(tc, dict) else {}
+                    name = fn_info.get("name", "")
+                    args = fn_info.get("arguments", {}) or {}
+                    try:
+                        _key = (name, json.dumps(args, sort_keys=True))
+                    except Exception:
+                        _key = (name, str(args))
+                    if _key in _seen_calls:
+                        # mirrors _handle_cloud at L716 — keep in sync on any
+                        # change. Skip the repeat, but hand the model its data
+                        # back instead of losing it
+                        self._messages.append({
+                            "role": "tool_result", "tool": name,
+                            "text": self._cached_text(
+                                name, args,
+                                f"(skipped: {name} already called with "
+                                f"identical args this turn)"),
+                        })
+                        continue
+                    _seen_calls.add(_key)
+                    # mirrors _handle_cloud at L729 — keep in sync on any change.
+                    # `reasoning` rides along so the next provider step can pass
+                    # it back (DeepSeek 400)
+                    self._messages.append({"role": "tool_call", "tool": name,
+                                           "args": args,
+                                           "reasoning": info.get("reasoning")})
+                    result = self._execute_tool(name, args)   # mirrors _handle_cloud at L732 — keep in sync on any change
+                    self._turn_iter += 1   # budget: one more loop iteration spent
+                    self._messages.append({"role": "tool_result", "tool": name,
+                                           "text": result})   # mirrors _handle_cloud at L734 — keep in sync on any change
+                    yield ("tool", {"name": name, "args": args,
+                                    "result": result})
             # mirrors _handle_cloud at L736 — step = _step() for the next round
             info, round_text = (yield from _pump_round()) or (None, "")
         if not ended:
