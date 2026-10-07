@@ -14,6 +14,7 @@ Runs are serialised through `routes._state.code_lock`.
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import time
 from pathlib import Path
@@ -446,6 +447,8 @@ def api_code_diff():
 
     scope picks which git comparison to show: the working tree against the
     index (default), the index against HEAD, or everything against the last
+    commit. commit=<hash> instead shows one commit's own changes (git show) —
+    what the View diff button asks for, since the tree is clean right after a
     commit. Failures answer 200 with {ok: False, reason} — a folder that is
     not a repo is an ordinary state to ask about, not a server error.
     """
@@ -453,18 +456,33 @@ def api_code_diff():
     if scope not in ("workdir", "staged", "head"):
         return jsonify({"error": "scope must be workdir|staged|head"}), 400
 
+    # commit must be a bare hex hash: the regex is the only thing standing
+    # between the query string and git, so no ref, path or option can pass.
+    commit = (request.args.get("commit") or "").strip()
+    if commit and not re.fullmatch(r"[0-9a-f]{7,40}", commit):
+        return jsonify(
+            {"error": "commit must be a 7-40 char lowercase hex"}), 400
+
     workdir, err = _resolve_workdir()
     if err:
         return jsonify({"error": err}), 500
 
     _ensure_safe_directory(workdir)
 
-    if scope == "workdir":
+    if commit:
+        args = ["show", "--format=", "--patch", commit]
+        # --numstat, not --stat: the parser below reads tab-separated
+        # insertions/deletions/path, which only numstat emits.
+        args_stat = ["show", "--format=", "--numstat", commit]
+    elif scope == "workdir":
         args = ["diff"]
+        args_stat = args + ["--numstat"]
     elif scope == "staged":
         args = ["diff", "--cached"]
+        args_stat = args + ["--numstat"]
     else:
         args = ["diff", "HEAD"]
+        args_stat = args + ["--numstat"]
 
     with code_lock:
         rc_in, _, _ = _git(workdir, ["rev-parse", "--is-inside-work-tree"])
@@ -472,9 +490,13 @@ def api_code_diff():
             return jsonify({"ok": False, "reason": "not a git repository"})
         rc_d, out, err_d = _git(workdir, args)
         if rc_d != 0:
+            if commit:
+                return jsonify({"ok": False,
+                                "reason": ("commit not found: "
+                                           + commit)[:200]})
             reason = (err_d or "").strip()[:200] or "git diff failed"
             return jsonify({"ok": False, "reason": reason})
-        rc_n, numstat, _ = _git(workdir, args + ["--numstat"])
+        rc_n, numstat, _ = _git(workdir, args_stat)
 
     files = insertions = deletions = 0
     if rc_n == 0:
@@ -493,7 +515,7 @@ def api_code_diff():
 
     return jsonify({
         "ok": True,
-        "scope": scope,
+        "scope": ("commit:" + commit) if commit else scope,
         "stat": {"files": files, "insertions": insertions,
                  "deletions": deletions},
         "diff": out[:DIFF_CAP],

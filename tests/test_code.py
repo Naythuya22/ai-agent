@@ -1351,6 +1351,40 @@ class TestApiCodeDiff(unittest.TestCase):
         self.assertEqual(status, 400, body)
         self.assertIn("scope", body["error"])
 
+    def _commit_diff(self, short_hash):
+        """Call the route with ?commit=<hash>; returns (status, body)."""
+        with app.test_request_context("/api/code/diff",
+                                      query_string={"commit": short_hash}):
+            resp = rc.api_code_diff()
+        if isinstance(resp, tuple):
+            return resp[1], resp[0].get_json()
+        return 200, resp.get_json()
+
+    def test_api_code_diff_commit_returns_the_named_commit(self):
+        # setUp left one commit; a second one is what gets asked for, since
+        # the working tree is clean right after it and `git diff HEAD` would
+        # answer with nothing.
+        (self.repo / "newfile.txt").write_text("hello\n")
+        subprocess.run(["git", "-C", str(self.repo), "add", "-A"], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "second"],
+                       check=True)
+        short = subprocess.run(
+            ["git", "-C", str(self.repo), "rev-parse", "--short", "HEAD"],
+            check=True, capture_output=True, text=True).stdout.strip()
+
+        status, body = self._commit_diff(short)
+        self.assertEqual(status, 200, body)
+        self.assertTrue(body["ok"], body)
+        self.assertEqual(body["scope"], "commit:" + short)
+        self.assertIn("newfile", body["diff"])
+        self.assertGreaterEqual(body["stat"]["files"], 1)
+
+    def test_api_code_diff_commit_rejects_bad_hash(self):
+        for bad in ("ZZZZZZZ", "123"):
+            status, body = self._commit_diff(bad)
+            self.assertEqual(status, 400, (bad, body))
+            self.assertIn("commit", body["error"])
+
 
 class TestApiCodeRollback(unittest.TestCase):
     """POST /api/code/rollback against a real repo, with the workdir patched.

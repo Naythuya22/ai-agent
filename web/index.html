@@ -969,8 +969,10 @@ function openDiffViewer(title, diffText){
   var v=document.getElementById('viewer');
   if(v)v.hidden=false;
 }
-function fetchDiffAndShow(label){
-  fetch('/api/code/diff?scope=head')
+function fetchDiffAndShow(label, commitHash){
+  var url='/api/code/diff';
+  if(commitHash)url+='?commit='+encodeURIComponent(commitHash);
+  fetch(url)
     .then(function(r){
       if(!r.ok) throw new Error('HTTP '+r.status);
       return r.json();
@@ -1187,7 +1189,9 @@ async function sendStream(text,mode){
       buf=parts.pop();
       for(var i=0;i<parts.length;i++){
         var block=parts[i];
-        var evt=isV2?parseV2Block(block):parseV1Block(block);
+        // let: the commit bubble's click handler closes over evt, so it must
+        // keep this frame's hash — var would hand it the last frame's evt.
+        let evt=isV2?parseV2Block(block):parseV1Block(block);
         if(!evt)continue;
         if(evt.type==='chunk'){
           rawText+=evt.text;
@@ -1227,7 +1231,7 @@ async function sendStream(text,mode){
             diffBtn.style.cssText='background:var(--accent);color:var(--accent-on);border:0;border-radius:4px;padding:2px 8px;margin-left:6px;font-size:11px;cursor:pointer;font-family:inherit';
             diffBtn.addEventListener('click',function(e){
               if(e&&e.stopPropagation)e.stopPropagation();
-              fetchDiffAndShow(diffLabel);
+              fetchDiffAndShow(diffLabel, evt.hash);
             });
             commitEl.appendChild(diffBtn);
             var rbBtn=document.createElement('button');
