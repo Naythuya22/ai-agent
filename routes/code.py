@@ -492,6 +492,57 @@ def api_code_diff():
     })
 
 
+@bp.route("/api/code/rollback", methods=["POST"])
+def api_code_rollback():
+    """Undo the last N commits with `git reset --hard HEAD~N`.
+
+    confirm must be the literal boolean true and count an int in 1..10, both
+    checked before git runs: the route only ever builds HEAD~<count>, never a
+    ref or path from the client, so a bad call cannot reset elsewhere.
+    Failures answer 200 with {ok: False, reason} — a folder that is not a repo
+    is an ordinary state to ask about, not a server error.
+    """
+    body = json_body()
+    if body.get("confirm") is not True:
+        return jsonify({"error": "confirm must be true"}), 400
+    count = body.get("count", 1)
+    if not isinstance(count, int) or isinstance(count, bool) or not (1 <= count <= 10):
+        return jsonify({"error": "count must be an int in 1..10"}), 400
+
+    workdir, err = _resolve_workdir()
+    if err:
+        return jsonify({"error": err}), 500
+
+    _ensure_safe_directory(workdir)
+
+    with code_lock:
+        rc_in, _, _ = _git(workdir, ["rev-parse", "--is-inside-work-tree"])
+        if rc_in != 0:
+            return jsonify({"ok": False, "reason": "not a git repository"})
+
+        rc_b, before, _ = _git(workdir, ["rev-parse", "--short", "HEAD"])
+        if rc_b != 0:
+            return jsonify({"ok": False, "reason": "no commits to roll back"})
+
+        rc_r, _, err_r = _git(workdir,
+                              ["reset", "--hard", "HEAD~%d" % count])
+        if rc_r != 0:
+            reason = (err_r or "").strip()[:200] or "git reset failed"
+            if rc_r == 124:
+                reason = "timeout"
+            return jsonify({"ok": False, "reason": reason})
+
+        rc_a, after, _ = _git(workdir, ["rev-parse", "--short", "HEAD"])
+
+    return jsonify({
+        "ok": True,
+        "before": before.strip(),
+        "after": after.strip(),
+        "count": count,
+        "workdir": str(workdir),
+    })
+
+
 # ---------- browser-terminal (ttyd) ----------
 
 @bp.route("/api/code/web/start", methods=["POST"])

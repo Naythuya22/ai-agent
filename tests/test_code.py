@@ -1352,5 +1352,67 @@ class TestApiCodeDiff(unittest.TestCase):
         self.assertIn("scope", body["error"])
 
 
+class TestApiCodeRollback(unittest.TestCase):
+    """POST /api/code/rollback against a real repo, with the workdir patched.
+
+    Same harness as TestApiCodeDiff: _resolve_workdir points at a throwaway
+    repo and _ensure_safe_directory is a no-op, so neither test depends on the
+    machine it runs on.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.repo = Path(self._tmp.name)
+        subprocess.run(["git", "init", "-q", str(self.repo)], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "config",
+                        "user.email", "t@t"], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "config",
+                        "user.name", "T"], check=True)
+        (self.repo / "seed.txt").write_text("seed\n")
+        subprocess.run(["git", "-C", str(self.repo), "add", "-A"], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "base"],
+                       check=True)
+
+        self._patch_wd = patch.object(
+            rc, "_resolve_workdir", return_value=(self.repo, None))
+        self._patch_safe = patch.object(
+            rc, "_ensure_safe_directory", return_value=None)
+        self._patch_wd.start()
+        self._patch_safe.start()
+
+    def tearDown(self):
+        self._patch_wd.stop()
+        self._patch_safe.stop()
+        self._tmp.cleanup()
+
+    def _rollback(self, payload):
+        """Call the route in a request context; returns (status, body)."""
+        with app.test_request_context("/api/code/rollback", method="POST",
+                                      json=payload):
+            resp = rc.api_code_rollback()
+        if isinstance(resp, tuple):
+            return resp[1], resp[0].get_json()
+        return 200, resp.get_json()
+
+    def test_api_code_rollback_requires_confirm_true(self):
+        for payload in ({"confirm": False}, {},
+                        {"confirm": "yes"}, {"confirm": 1}):
+            status, body = self._rollback(payload)
+            self.assertEqual(status, 400, (payload, body))
+            self.assertIn("confirm", body["error"])
+
+    def test_api_code_rollback_resets_one_commit(self):
+        (self.repo / "file2.txt").write_text("second\n")
+        subprocess.run(["git", "-C", str(self.repo), "add", "-A"], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "second"],
+                       check=True)
+
+        status, body = self._rollback({"confirm": True})
+        self.assertEqual(status, 200, body)
+        self.assertTrue(body["ok"], body)
+        self.assertNotEqual(body["before"], body["after"])
+        self.assertFalse((self.repo / "file2.txt").exists())
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
