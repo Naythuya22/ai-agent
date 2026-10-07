@@ -147,6 +147,14 @@ def env(config_file: Path | None = None, **extra) -> dict:
     if tok:
         out["AI_AGENT_TOKEN"] = tok
     out.update(extra)
+    # Root cause of the sig11 crash: the opencode-termux wrapper exports
+    # LD_PRELOAD globally (a musl loader), while Termux itself exports its own
+    # bionic one (libtermux-exec-ld-preload.so). A loader built for one libc
+    # handed to a binary built for the other segfaults — musl loader into a
+    # bionic child, bionic loader into the musl opencode binary — so this
+    # key must never reach a child, empty string included. LD_LIBRARY_PATH is
+    # deliberately kept: opencode's own binary needs it.
+    out.pop("LD_PRELOAD", None)
     return out
 
 

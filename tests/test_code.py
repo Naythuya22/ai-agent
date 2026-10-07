@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import shlex
 import subprocess
 import tempfile
@@ -227,6 +228,43 @@ class TestBridgeConfig(unittest.TestCase):
         self.assertEqual(env["OPENCODE_CONFIG"], str(oc.config_file()))
         self.assertEqual(env["TERM"], "dumb")
         self.assertEqual(env["NO_COLOR"], "1")
+
+
+class TestEnvChildEnvironment(unittest.TestCase):
+    """What env() gives a child process, and what it refuses to give.
+
+    LD_PRELOAD must never travel: the opencode-termux wrapper exports a musl
+    loader, Termux exports its own bionic one, and handing either loader to a
+    binary built for the other libc segfaults it. LD_LIBRARY_PATH must travel
+    — opencode's own binary needs it.
+    """
+
+    KEYS = ("LD_PRELOAD", "LD_LIBRARY_PATH")
+
+    def setUp(self):
+        self._saved = {key: os.environ.get(key) for key in self.KEYS}
+        for key in self.KEYS:
+            os.environ.pop(key, None)
+
+    def tearDown(self):
+        for key, value in self._saved.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+    def test_env_strips_ld_preload(self):
+        os.environ["LD_PRELOAD"] = "/sentinel/libfake.so"
+        self.assertNotIn("LD_PRELOAD", oc.env())
+
+    def test_env_restores_after_call(self):
+        os.environ["LD_PRELOAD"] = "/sentinel/libfake.so"
+        oc.env()
+        self.assertEqual(os.environ["LD_PRELOAD"], "/sentinel/libfake.so")
+
+    def test_env_keeps_ld_library_path(self):
+        os.environ["LD_LIBRARY_PATH"] = "/sentinel/libdir"
+        self.assertEqual(oc.env().get("LD_LIBRARY_PATH"), "/sentinel/libdir")
 
 
 class TestSessionStore(unittest.TestCase):
