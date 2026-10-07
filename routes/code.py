@@ -54,6 +54,15 @@ LANG_DIRECTIVE = (
     "Only the natural-language explanation should match the user's language."
 )
 
+BURMESE_SUMMARY_DIRECTIVE = (
+    "REPLY TAIL (required): end every reply with a section "
+    "titled '## မြန်မာလို အကျဉ်း' explaining in plain Burmese: "
+    "(1) what changed, file by file; (2) why; (3) warnings or "
+    "next steps; (4) the test count. Keep code terms — function "
+    "names, paths, git hashes, HTTP statuses — in English; do "
+    "not translate them. The rest of the reply stays in English."
+)
+
 
 # ---------- shared helpers ----------
 
@@ -85,7 +94,7 @@ def build_code_prompt(task, code_history=None):
     conversation, so replaying it here would duplicate context (and was the
     reason the old aider path truncated messages to 280 chars).
     """
-    return f"{LANG_DIRECTIVE}\n\nCurrent request:\nUser: {task}"
+    return f"{LANG_DIRECTIVE}\n\n{BURMESE_SUMMARY_DIRECTIVE}\n\nCurrent request:\nUser: {task}"
 
 
 def commit_changes(workdir, files, message):

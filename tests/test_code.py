@@ -1414,5 +1414,14 @@ class TestApiCodeRollback(unittest.TestCase):
         self.assertFalse((self.repo / "file2.txt").exists())
 
 
+class TestBuildCodePrompt(unittest.TestCase):
+    """build_code_prompt() must always carry both directives and the task."""
+
+    def test_build_code_prompt_includes_burmese_summary(self):
+        out = rc.build_code_prompt("hello")
+        self.assertIn("မြန်မာလို အကျဉ်း", out)
+        self.assertIn("hello", out)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
