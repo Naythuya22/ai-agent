@@ -1,3 +1,4 @@
+# test 4
 # test 3
 """OpenAI-compatible HTTP server wrapping LiteRT (for opencode).
 
