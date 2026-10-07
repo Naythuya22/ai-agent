@@ -1291,5 +1291,66 @@ class TestOneShotRunsHoldCodeLock(unittest.TestCase):
         self._assert_locked(seen, resp)
 
 
+class TestApiCodeDiff(unittest.TestCase):
+    """GET /api/code/diff against a real repo, with the workdir patched.
+
+    The route resolves its folder through _resolve_workdir(), which would
+    point at whatever project the harness left active — so it is patched to a
+    throwaway repo and _ensure_safe_directory to a no-op, keeping both tests
+    independent of the machine they run on.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.repo = Path(self._tmp.name)
+        subprocess.run(["git", "init", "-q", str(self.repo)], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "config",
+                        "user.email", "t@t"], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "config",
+                        "user.name", "T"], check=True)
+        (self.repo / "seed.txt").write_text("seed\n")
+        subprocess.run(["git", "-C", str(self.repo), "add", "-A"], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "base"],
+                       check=True)
+
+        self._patch_wd = patch.object(
+            rc, "_resolve_workdir", return_value=(self.repo, None))
+        self._patch_safe = patch.object(
+            rc, "_ensure_safe_directory", return_value=None)
+        self._patch_wd.start()
+        self._patch_safe.start()
+
+    def tearDown(self):
+        self._patch_wd.stop()
+        self._patch_safe.stop()
+        self._tmp.cleanup()
+
+    def _diff(self, scope):
+        """Call the route in a request context; returns (status, body)."""
+        with app.test_request_context(f"/api/code/diff?scope={scope}"):
+            resp = rc.api_code_diff()
+        if isinstance(resp, tuple):
+            return resp[1], resp[0].get_json()
+        return 200, resp.get_json()
+
+    def test_api_code_diff_workdir_returns_the_unstaged_changes(self):
+        (self.repo / "newfile.txt").write_text("hello\n")
+        # `git diff` never lists an untracked file: intent-to-add registers
+        # the path (without staging its content), which is what makes the
+        # working-tree scope able to show it at all.
+        subprocess.run(["git", "-C", str(self.repo), "add", "-N",
+                        "newfile.txt"], check=True)
+        status, body = self._diff("workdir")
+        self.assertEqual(status, 200, body)
+        self.assertTrue(body["ok"], body)
+        self.assertIn("newfile.txt", body["diff"])
+        self.assertGreaterEqual(body["stat"]["files"], 1)
+
+    def test_api_code_diff_rejects_unknown_scope(self):
+        status, body = self._diff("banana")
+        self.assertEqual(status, 400, body)
+        self.assertIn("scope", body["error"])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

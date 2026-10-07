@@ -43,6 +43,9 @@ _ttyd_proc = None
 CODE_HISTORY_CAP = 20
 BRIDGE_BASE = oc.BRIDGE_BASE
 RUN_TIMEOUT = oc.DEFAULT_TIMEOUT
+# The UI cannot render more than this, and a huge diff must not be shipped to
+# a mobile client — /api/code/diff truncates its payload here.
+DIFF_CAP = 200 * 1024
 
 LANG_DIRECTIVE = (
     "LANGUAGE RULE (critical): Match the user's language in your REPLY text. "
@@ -276,6 +279,25 @@ def _ensure_safe_directory(workdir):
                     workdir, type(e).__name__, e)
 
 
+def _git(workdir, args, timeout=15):
+    """Run `git <args>` in workdir. Returns (returncode, stdout, stderr).
+
+    Nothing escapes: a missing git binary answers (127, "", "git not found"),
+    a hung command (124, "", "timeout") — callers only ever read the tuple,
+    so the endpoints can answer with a reason instead of a 500 traceback.
+    """
+    try:
+        r = subprocess.run(["git"] + list(args), cwd=str(workdir),
+                           capture_output=True, text=True, timeout=timeout)
+        return r.returncode, r.stdout, r.stderr
+    except subprocess.TimeoutExpired:
+        return 124, "", "timeout"
+    except FileNotFoundError:
+        return 127, "", "git not found"
+    except Exception as e:
+        return 1, "", f"{type(e).__name__}: {e}"
+
+
 def _project_command_reply(task):
     """Handle the /project sub-commands. Returns a reply payload dict."""
     parts = task.split()
@@ -406,6 +428,67 @@ def api_code():
         "session_id": summary["session_id"],
         "output": "\n".join(l.rstrip() for l in lines)[:4000],
         "elapsed": round(time.time() - t0, 2),
+    })
+
+
+@bp.route("/api/code/diff", methods=["GET"])
+def api_code_diff():
+    """Unified diff of what changed, for the UI's diff viewer.
+
+    scope picks which git comparison to show: the working tree against the
+    index (default), the index against HEAD, or everything against the last
+    commit. Failures answer 200 with {ok: False, reason} — a folder that is
+    not a repo is an ordinary state to ask about, not a server error.
+    """
+    scope = (request.args.get("scope") or "workdir").strip()
+    if scope not in ("workdir", "staged", "head"):
+        return jsonify({"error": "scope must be workdir|staged|head"}), 400
+
+    workdir, err = _resolve_workdir()
+    if err:
+        return jsonify({"error": err}), 500
+
+    _ensure_safe_directory(workdir)
+
+    if scope == "workdir":
+        args = ["diff"]
+    elif scope == "staged":
+        args = ["diff", "--cached"]
+    else:
+        args = ["diff", "HEAD"]
+
+    with code_lock:
+        rc_in, _, _ = _git(workdir, ["rev-parse", "--is-inside-work-tree"])
+        if rc_in != 0:
+            return jsonify({"ok": False, "reason": "not a git repository"})
+        rc_d, out, err_d = _git(workdir, args)
+        if rc_d != 0:
+            reason = (err_d or "").strip()[:200] or "git diff failed"
+            return jsonify({"ok": False, "reason": reason})
+        rc_n, numstat, _ = _git(workdir, args + ["--numstat"])
+
+    files = insertions = deletions = 0
+    if rc_n == 0:
+        for line in numstat.splitlines():
+            parts = line.split("\t")
+            if len(parts) != 3:
+                continue
+            try:
+                ins = int(parts[0])
+                dels = int(parts[1])
+            except ValueError:
+                continue
+            files += 1
+            insertions += ins
+            deletions += dels
+
+    return jsonify({
+        "ok": True,
+        "scope": scope,
+        "stat": {"files": files, "insertions": insertions,
+                 "deletions": deletions},
+        "diff": out[:DIFF_CAP],
+        "workdir": str(workdir),
     })
 
 
