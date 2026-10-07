@@ -92,41 +92,52 @@ def commit_changes(workdir, files, message):
     aider auto-committed every run (AIDER_NO_AUTO_COMMITS=0); opencode leaves
     git alone. Same commit-after-each-change behaviour is kept here, scoped to
     only the paths the run reported, and skipped if the folder is not a repo.
+
+    Always returns a dict: {"ok": True, "hash", "message"} on success, else
+    {"ok": False, "reason"} — returning None on every failure path left the
+    caller unable to say *why* no commit appeared.
     """
     paths = [f.get("path") for f in (files or []) if f.get("path")]
     if not paths:
-        return None
+        return {"ok": False, "reason": "no files to commit"}
     try:
         inside = subprocess.run(
             ["git", "rev-parse", "--is-inside-work-tree"],
             cwd=str(workdir), capture_output=True, text=True, timeout=5,
         )
         if inside.returncode != 0 or inside.stdout.strip() != "true":
-            return None
-        subprocess.run(
+            return {"ok": False, "reason": "not a git repository"}
+        added = subprocess.run(
             ["git", "add", "--"] + paths,
-            cwd=str(workdir), capture_output=True, timeout=15,
+            cwd=str(workdir), capture_output=True, text=True, timeout=15,
         )
+        if added.returncode != 0:
+            return {"ok": False,
+                    "reason": "git add failed: " + added.stderr[:200]}
         staged = subprocess.run(
             ["git", "diff", "--cached", "--name-only"],
             cwd=str(workdir), capture_output=True, text=True, timeout=15,
         )
         if not staged.stdout.strip():
-            return None  # nothing actually changed
+            return {"ok": False, "reason": "nothing staged"}
         first = message.strip().splitlines()[0] if message.strip() else "opencode"
         done = subprocess.run(
             ["git", "commit", "-m", first[:72]],
             cwd=str(workdir), capture_output=True, text=True, timeout=20,
         )
         if done.returncode != 0:
-            return None
+            return {"ok": False,
+                    "reason": "git commit failed: " + done.stderr[:200]}
         head = subprocess.run(
             ["git", "rev-parse", "--short", "HEAD"],
             cwd=str(workdir), capture_output=True, text=True, timeout=5,
         )
-        return {"hash": head.stdout.strip(), "message": first[:72]}
-    except Exception:
-        return None
+        return {"ok": True, "hash": head.stdout.strip(),
+                "message": first[:72]}
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "reason": "git timed out"}
+    except Exception as e:
+        return {"ok": False, "reason": f"{type(e).__name__}: {e}"}
 
 
 _code_history = []  # [{role, text}, ...] — a UI/debug mirror, not the model's context
@@ -369,7 +380,13 @@ def api_code():
     _remember_session(wd, summary["session_id"])
     # Only a clean run gets committed, same as the streaming path: a failed run
     # can leave a half-applied edit behind.
-    commits = commit_changes(wd, summary["files"], task) if rc == 0 else None
+    made, commit_error = None, None
+    if rc == 0:
+        res = commit_changes(wd, summary["files"], task)
+        if res["ok"]:
+            made = {"hash": res["hash"], "message": res["message"]}
+        elif summary["files"]:
+            commit_error = res["reason"]
 
     return jsonify({
         "ok": rc == 0,
@@ -377,7 +394,8 @@ def api_code():
         "returncode": rc,
         "reply": summary["reply"],
         "files": summary["files"],
-        "commits": [commits] if commits else [],
+        "commits": [made] if made else [],
+        "commit_error": commit_error,
         "tokens": summary["tokens"],
         "cost": summary["cost"],
         "session_id": summary["session_id"],
@@ -497,11 +515,13 @@ def api_code_web_run():
     summary = summarize(events)
     _remember_session(workdir, summary["session_id"])
 
-    commits = []
+    commits, commit_error = [], None
     if rc == 0:
         made = commit_changes(workdir, summary["files"], task)
-        if made:
-            commits.append(made)
+        if made["ok"]:
+            commits.append({"hash": made["hash"], "message": made["message"]})
+        elif summary["files"]:
+            commit_error = made["reason"]
 
     shown = summary["reply"] or summary.get("error") or "(no output)"
     _record_code_turn(task, shown[:500])
@@ -510,6 +530,7 @@ def api_code_web_run():
         "reply": shown,
         "files": summary["files"],
         "commits": commits,
+        "commit_error": commit_error,
         "tools": summary["tools"],
         "tokens": summary["tokens"],
         "cost": summary["cost"],
@@ -706,7 +727,16 @@ def api_code_web_run_stream():
                     reply = event.get("reply")
                     commit = None
                     if event.get("rc") == 0 and event.get("files"):
-                        commit = commit_changes(workdir, event["files"], task)
+                        res = commit_changes(workdir, event["files"], task)
+                        if res["ok"]:
+                            commit = {"hash": res["hash"],
+                                      "message": res["message"]}
+                        else:
+                            # Files were reported but nothing was committed:
+                            # its own frame, ahead of `end`, so the UI can say
+                            # why the commit list stayed empty.
+                            yield sse_event({"type": "commit_error",
+                                             "reason": res["reason"]})
                     if commit:
                         # Its own frame, ahead of `end`: the UI renders commits
                         # from a top-level `commit` event, so nesting it in the

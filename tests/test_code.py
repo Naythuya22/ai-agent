@@ -858,6 +858,39 @@ def _lines(*events):
     return "".join(json.dumps(e) + "\n" for e in events)
 
 
+class TestCommitChanges(unittest.TestCase):
+    """commit_changes must always say what happened, never hand back None.
+
+    Returning None on every failure path meant the UI could only show "no
+    commit" with no reason — not a repo, nothing staged and a failed `git
+    commit` all looked identical.
+    """
+
+    def test_a_folder_that_is_not_a_repo_reports_it(self):
+        tmp = Path(tempfile.mkdtemp(prefix="oc-nogit-"))
+        self.assertEqual(
+            rc.commit_changes(tmp, [{"path": "a.txt"}], "msg"),
+            {"ok": False, "reason": "not a git repository"})
+
+    def test_no_paths_is_reported_not_swallowed(self):
+        self.assertEqual(
+            rc.commit_changes(Path(tempfile.gettempdir()), [], "msg"),
+            {"ok": False, "reason": "no files to commit"})
+
+    def test_a_real_commit_reports_ok_with_hash_and_message(self):
+        repo = Path(tempfile.mkdtemp(prefix="oc-commit-"))
+        for args in (["init", "-q"], ["config", "user.email", "t@t"],
+                     ["config", "user.name", "T"]):
+            subprocess.run(["git", "-C", str(repo)] + args, capture_output=True)
+        (repo / "new.txt").write_text("hi\n")
+
+        res = rc.commit_changes(repo, [{"path": "new.txt"}], "add new.txt")
+
+        self.assertTrue(res["ok"], res)
+        self.assertTrue(res["hash"])
+        self.assertTrue(res["message"])
+
+
 class TestCommitFrames(unittest.TestCase):
     """A streamed commit has to reach the UI the way the UI reads it.
 
