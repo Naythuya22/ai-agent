@@ -433,6 +433,12 @@ def api_agent_stream():
         # the prompt tier resolve once and stay put if the turn falls back to
         # the on-device model half way through.
         agent_mode.begin_turn()
+        # Batch 4.2i-B (H2): parity with the v2 route (L708). The
+        # v1 SSE route drives the turn itself, so it must also clear
+        # the per-turn tool cache — otherwise Local Only, Cloud
+        # disabled and image turns (all of which fall back here)
+        # replay stale tool results across user turns.
+        agent_mode._clear_turn_cache()
 
         def _sync_reply(text):
             """Keep the stored transcript in step with what the UI received.

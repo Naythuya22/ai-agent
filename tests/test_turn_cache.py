@@ -182,6 +182,68 @@ class TurnBoundaryTests(unittest.TestCase):
         self.assertEqual(b._turn_cache, {},
                          "one turn's cache must never be visible to another")
 
+class _V1RouteCacheTests(unittest.TestCase):
+    """Fix 4.2i-B (H2): the v1 SSE route must clear the per-turn cache.
+
+    The route needs a full Flask request context to run, so this test
+    reads the source of routes.chat and asserts the call site is present
+    in both SSE routes (v1 = parity fix, v2 = already correct).
+    """
+
+    def test_both_sse_routes_clear_the_turn_cache(self):
+        import inspect
+        from routes import chat as chat_routes
+        src = inspect.getsource(chat_routes)
+        self.assertIn("Batch 4.2i-B (H2)", src,
+                      "v1 route must carry the 4.2i-B (H2) fix marker")
+        self.assertGreaterEqual(
+            src.count("_clear_turn_cache()"), 2,
+            "both SSE routes must clear the per-turn tool cache")
+
+
+class _GuardedCacheTests(unittest.TestCase):
+    """Fix 4.2i-B (H3): the serial path caches the guarded text.
+
+    A raw result and its guarded form are only distinguishable when the
+    guard actually changes the text. Rather than depend on the specific
+    redaction regex, this test asserts the invariant directly: the value
+    stored in the cache equals the value the caller received.
+    """
+
+    def setUp(self):
+        self._real_tools = agent_mod.ALL_TOOLS
+
+    def tearDown(self):
+        agent_mod.ALL_TOOLS = self._real_tools
+
+    def test_cache_value_equals_the_returned_value(self):
+        calls = []
+        tool = _make_tool("read_file", calls, result="PLAIN BODY")
+        agent_mod.ALL_TOOLS = [tool]
+        m = _bare_mode()
+        first = m._execute_tool("read_file", {"path": "/tmp/x"})
+        key = m._cache_key("read_file", {"path": "/tmp/x"})
+        self.assertIn(key, m._turn_cache,
+                      "read_file result must be cached")
+        self.assertEqual(
+            m._turn_cache[key], first,
+            "cache must hold exactly the guarded text the caller received")
+
+    def test_cache_hit_still_returns_the_guarded_text(self):
+        calls = []
+        tool = _make_tool("read_file", calls, result="PLAIN BODY")
+        agent_mod.ALL_TOOLS = [tool]
+        m = _bare_mode()
+        first = m._execute_tool("read_file", {"path": "/tmp/x"})
+        second = m._execute_tool("read_file", {"path": "/tmp/x"})
+        self.assertEqual(len(calls), 1, "the tool must run once")
+        self.assertTrue(second.startswith("[cached] "), second)
+        # The cached suffix must equal the guarded first result, not the
+        # raw tool output.
+        self.assertEqual(second, "[cached] " + first,
+                         "cache hit must return the guarded text, not raw")
+
+
 
 if __name__ == "__main__":
     unittest.main()

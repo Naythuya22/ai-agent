@@ -761,9 +761,14 @@ class AgentMode:
 
         # An "Error: …" body is a failed call, not a result worth remembering:
         # caching it would make a transient failure look permanent for the turn.
+        # Batch 4.2i-B (H3): cache the GUARDED text, not the raw
+        # result — mirrors the batch path (L893-897). Otherwise a
+        # cache hit returns "[cached] " + raw and skips the
+        # injection banner + secret redaction.
+        guarded = self._guard_result(tool_name, out)
         if not out.startswith("Error:"):
-            self._cache_put(tool_name, tool_args, out)
-        return self._guard_result(tool_name, out)
+            self._cache_put(tool_name, tool_args, guarded)
+        return guarded
 
     def _batch_parallel_ok(self, calls) -> bool:
         """True when a batch of model-shape tool_calls can run concurrently.
