@@ -150,6 +150,10 @@ footer{position:relative;padding:12px 12px 16px;background:var(--bg);border-top:
 .viewer-pane[hidden]{display:none}
 .viewer-name{padding:10px 16px;font-size:12px;color:var(--text-2);border-bottom:1px solid var(--border-2);background:var(--bg-3)}
 .viewer-pre{margin:0;padding:16px;font-size:12px;line-height:1.6;overflow:auto;white-space:pre-wrap;word-break:break-word;color:var(--text);max-height:72vh}
+.diff-line{display:block}
+.diff-add{color:#7dd3a0}
+.diff-del{color:#f28b82}
+.diff-hunk{color:var(--muted,#888)}
 .viewer-close{position:absolute;top:14px;right:16px;width:40px;height:40px;border-radius:50%;border:1px solid rgba(255,255,255,.28);background:rgba(0,0,0,.55);color:#fff;font-size:22px;line-height:1;cursor:pointer}
 .viewer-close:hover{background:rgba(0,0,0,.8)}
 /* Prominent send button (Agent mode only) */
@@ -937,6 +941,34 @@ function openTextViewer(name,text){
   if(viewerPreEl)viewerPreEl.textContent=text||'';
   if(viewerTextEl)viewerTextEl.hidden=false;
   viewerEl.hidden=false;
+}
+function openDiffViewer(title, diffText){
+  // Reuses the existing #viewer overlay. Renders the diff as
+  // plain text with a small +/- coloring via CSS classes on
+  // each line, so the .viewer-pre pane keeps its scroll
+  // behaviour but shows the diff semantics.
+  var nameEl=document.getElementById('viewer-name');
+  var paneEl=document.getElementById('viewer-text');
+  var preEl=document.getElementById('viewer-pre');
+  if(!nameEl||!paneEl||!preEl)return;
+  nameEl.textContent=title||'Diff';
+  // Build line-by-line; use textContent per line so no HTML
+  // from the diff can inject.
+  preEl.textContent='';
+  var lines=String(diffText||'').split('\n');
+  for(var i=0;i<lines.length;i++){
+    var ln=lines[i];
+    var span=document.createElement('span');
+    span.className='diff-line';
+    if(ln.length&&ln.charAt(0)==='+')span.className+=' diff-add';
+    else if(ln.length&&ln.charAt(0)==='-')span.className+=' diff-del';
+    else if(ln.length&&ln.charAt(0)==='@')span.className+=' diff-hunk';
+    span.textContent=ln;
+    preEl.appendChild(span);
+    preEl.appendChild(document.createTextNode('\n'));
+  }
+  var v=document.getElementById('viewer');
+  if(v)v.hidden=false;
 }
 if(viewerCloseEl){viewerCloseEl.addEventListener('click',function(e){if(e&&e.stopPropagation)e.stopPropagation();closeViewer()})}
 if(viewerEl){viewerEl.addEventListener('click',function(e){if(e.target===viewerEl)closeViewer()})}
