@@ -14,6 +14,7 @@ import shlex
 import subprocess
 import tempfile
 import threading
+import time
 import unittest
 from contextlib import closing, contextmanager
 from pathlib import Path
@@ -736,6 +737,100 @@ class TestAbortedStream(unittest.TestCase):
         self.assertTrue(next(gen).startswith("data: "))  # first frame
         gen.close()  # what Flask does when the client hangs up
         self.assertFalse(state["alive"], "opencode survived an aborted stream")
+
+
+class TestStreamTimeouts(unittest.TestCase):
+    """A hung child must not pin the worker thread, code_lock and proot.
+
+    The read loop used to block on readline() forever, so a stalled provider
+    call or a frozen proot mount left the Flask worker alive, code_lock held
+    and the opencode + proot children running. It now polls with select and
+    kills a child that goes silent (idle) or outlives the run limit (hard).
+    """
+
+    def _drive(self, lines=(), select_ready=False, idle=90, hard=300):
+        """Run the stream against a fake child; return (proc, events).
+
+        select_ready=True reports the pipe readable on every call, so the
+        fake stdout is drained line by line; False never reports it, which is
+        exactly what a child that stopped writing looks like.
+        """
+
+        class FakeStdout:
+            def __init__(self, owner, lines):
+                self.owner = owner
+                self.lines = list(lines)
+
+            def readline(self):
+                if self.lines:
+                    return self.lines.pop(0)
+                # EOF: nothing left to read, and the child has exited.
+                self.owner.returncode = 0
+                return ""
+
+        class FakeProc:
+            pid = 4242
+
+            def __init__(self):
+                self.returncode = None
+                self.terminated = False
+                self.stdout = FakeStdout(self, lines)
+
+            def poll(self):
+                return self.returncode
+
+            def wait(self, timeout=None):
+                if self.returncode is None:
+                    self.returncode = 0
+                return self.returncode
+
+            def terminate(self):
+                self.terminated = True
+                self.returncode = -15
+
+            def kill(self):
+                self.terminated = True
+                self.returncode = -9
+
+        proc = FakeProc()
+
+        def fake_select(rlist, wlist, xlist, timeout=None):
+            if select_ready:
+                return (list(rlist), [], [])
+            # The ceilings are wall-clock seconds: nap rather than spin so the
+            # test still finishes in about a second.
+            time.sleep(min(timeout or 0, 0.1))
+            return ([], [], [])
+
+        with patch.object(cs.subprocess, "Popen", lambda cmd, **kw: proc), \
+             patch.object(cs.select, "select", fake_select), \
+             patch.object(cs, "STREAM_IDLE_TIMEOUT", idle), \
+             patch.object(cs, "STREAM_HARD_TIMEOUT", hard):
+            frames = list(cs.stream_opencode(
+                ["opencode"], "/w", {}, threading.Lock()))
+        return proc, [json.loads(f[6:]) for f in frames]
+
+    def test_stream_opencode_idle_timeout_kills_the_child(self):
+        proc, events = self._drive(select_ready=False, idle=1, hard=5)
+        self.assertIn("idle_timeout", [e.get("reason") for e in events])
+        self.assertTrue(proc.terminated, "the hung child was never terminated")
+        self.assertEqual(events[-1]["type"], "end")
+
+    def test_stream_opencode_hard_timeout_fires_first_when_no_output(self):
+        proc, events = self._drive(select_ready=False, idle=999, hard=1)
+        self.assertIn("hard_timeout", [e.get("reason") for e in events])
+        self.assertNotIn("idle_timeout", [e.get("reason") for e in events])
+        self.assertTrue(proc.terminated, "the hung child was never terminated")
+        self.assertEqual(events[-1]["type"], "end")
+
+    def test_stream_opencode_still_ends_normally_on_eof(self):
+        proc, events = self._drive([json.dumps(EVENT_TEXT) + "\n"],
+                                   select_ready=True)
+        self.assertIn("chunk", [e["type"] for e in events])
+        self.assertEqual(events[-1]["type"], "end")
+        self.assertFalse([e for e in events if e.get("reason")],
+                         "a clean EOF must not report a timeout")
+        self.assertFalse(proc.terminated, "a finished child must not be killed")
 
 
 # ── a faked opencode child ─────────────────────────────────────────────────

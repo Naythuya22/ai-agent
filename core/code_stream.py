@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import re
+import select
 import subprocess
 import time
 
@@ -23,6 +24,14 @@ _ANSI_RE = re.compile(r"\x1b\[[0-9;]*[a-zA-Z]")
 
 # opencode tool name -> the edit operation we report to the UI.
 _EDIT_TOOLS = {"write": "create", "edit": "edit", "patch": "edit"}
+
+# Streaming ceilings, mirroring routes.code.RUN_TIMEOUT for the whole run: a
+# child that has gone quiet (stalled provider call, frozen proot mount, an
+# opencode bug) is killed instead of pinning the worker thread, code_lock and
+# the child forever. The idle budget must stay safely under the hard one,
+# and both above zero.
+STREAM_IDLE_TIMEOUT = 90     # seconds with no output at all
+STREAM_HARD_TIMEOUT = 300    # seconds for the whole run
 
 
 def _strip_ansi(s: str) -> str:
@@ -175,6 +184,7 @@ def stream_opencode(cmd, workdir, env, lock, on_session=None, on_event=None):
         SSE-formatted strings (already ending in \\n\\n)
     """
     proc = None
+    timed_out = None
     events: list[dict] = []
     t0 = time.time()
     step_n = 0
@@ -196,7 +206,31 @@ def stream_opencode(cmd, workdir, env, lock, on_session=None, on_event=None):
                 bufsize=1,
                 text=True,
             )
-            for line in iter(proc.stdout.readline, ""):
+            last_output = time.time()
+            while True:
+                # The ceilings are checked before every poll: readline() below
+                # blocks forever once opencode stops writing, which would pin
+                # this thread, code_lock and the child along with it.
+                now = time.time()
+                if now - last_output > STREAM_IDLE_TIMEOUT:
+                    timed_out = "idle_timeout"
+                    break
+                if now - t0 > STREAM_HARD_TIMEOUT:
+                    timed_out = "hard_timeout"
+                    break
+                try:
+                    ready = bool(select.select([proc.stdout], [], [], 1.0)[0])
+                except (OSError, ValueError):
+                    # A stdout that cannot be polled (a test fake, a stream
+                    # with no fileno): fall back to the blocking read this
+                    # loop replaced, so those readers behave as before.
+                    ready = True
+                if not ready:
+                    continue
+                line = proc.stdout.readline()
+                if line == "" and proc.poll() is not None:
+                    break  # EOF: the child closed its output and has exited
+                last_output = time.time()
                 event = parse_event(line)
                 if event is None:
                     # Not JSON: almost certainly a warning. Surface it rather
@@ -251,10 +285,11 @@ def stream_opencode(cmd, workdir, env, lock, on_session=None, on_event=None):
                 if on_event:
                     on_event(event)
 
-            try:
-                proc.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                proc.kill()
+            if timed_out is None:
+                try:
+                    proc.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
         except GeneratorExit:
             # The browser hung up (user navigated away, or pressed stop).
             # opencode is mid-edit here, so it must not be left running.
@@ -271,7 +306,21 @@ def stream_opencode(cmd, workdir, env, lock, on_session=None, on_event=None):
     elapsed = round(time.time() - t0, 1)
     summary = summarize(events)
 
-    if not summary["reply"] and not summary["files"] and proc and proc.returncode:
+    if timed_out == "idle_timeout":
+        # _terminate (finally above) has already run; say why the run stopped
+        # before the terminal end frame so the UI is not left guessing.
+        yield sse_event({
+            "type": "error",
+            "error": f"opencode idle for {STREAM_IDLE_TIMEOUT}s with no output",
+            "reason": "idle_timeout",
+        })
+    elif timed_out == "hard_timeout":
+        yield sse_event({
+            "type": "error",
+            "error": f"opencode exceeded the {STREAM_HARD_TIMEOUT}s run limit",
+            "reason": "hard_timeout",
+        })
+    elif not summary["reply"] and not summary["files"] and proc and proc.returncode:
         yield sse_event({
             "type": "error",
             "error": summary["error"]
