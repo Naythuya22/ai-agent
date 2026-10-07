@@ -45,11 +45,7 @@ class ChatMode:
     def __init__(self, llm: LLM, memory=None):
         self.llm = llm
         self.memory = memory
-        provider = None
-        if memory is not None:
-            def provider():
-                hint = memory.get_system_hint() or ''
-                return f"{CHAT_SYSTEM}\n\n{hint}" if hint else CHAT_SYSTEM
+        provider = self._system_provider()
         self._store = SessionStore() if SessionStore else None
         self.session_id = None
         initial = None
@@ -87,6 +83,26 @@ class ChatMode:
                           self.session_id, type(e).__name__, e)
         return reply
 
+    def _system_provider(self):
+        """Chat persona + memory hint — single source of truth for
+        every session lifecycle (Fix 4.2i-A).
+
+        __init__ had the correct provider; reload_session,
+        compress_session and reset each built a DIFFERENT provider
+        that returned only the memory hint (or None), dropping
+        CHAT_SYSTEM. After any session switch, /summary, /clear or
+        /new the model lost the Burmese persona and its language
+        rules. Returning the same lazy closure here restores them.
+        """
+        if self.memory is None:
+            return None
+        memory = self.memory
+
+        def provider():
+            hint = memory.get_system_hint() or ''
+            return f"{CHAT_SYSTEM}\n\n{hint}" if hint else CHAT_SYSTEM
+        return provider
+
     def reload_session(self, sid: str) -> bool:
         """Switch to a different session by id."""
         if not self._store:
@@ -97,10 +113,7 @@ class ChatMode:
             s = self._store.get_session(sid) or {}
             msgs = list(s.get("messages", []))
             self.session.clear()
-            provider = None
-            if self.memory is not None:
-                def provider():
-                    return self.memory.get_system_hint() or None
+            provider = self._system_provider()
             self.session = self.llm.create_chat(
                 system_provider=provider,
                 initial_messages=msgs,
@@ -163,10 +176,7 @@ class ChatMode:
         except Exception as e:
             log.error("could not save summarized chat: %s: %s", type(e).__name__, e)
 
-        provider = None
-        if self.memory is not None:
-            def provider():
-                return self.memory.get_system_hint() or None
+        provider = self._system_provider()
         self.session.clear()
         self.session = self.llm.create_chat(
             system_provider=provider,
@@ -198,10 +208,7 @@ class ChatMode:
                 self.session_id = self._store.get_active_id("chat")
             except Exception as e:
                 log.error("could not clear chat session: %s: %s", type(e).__name__, e)
-        provider = None
-        if self.memory is not None:
-            def provider():
-                return self.memory.get_system_hint() or None
+        provider = self._system_provider()
         self.session = self.llm.create_chat(system_provider=provider)
 
     def close(self) -> None:
