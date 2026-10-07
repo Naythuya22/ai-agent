@@ -199,3 +199,5 @@ attempt; anything else fails fast.
 
 Design decisions live in `notes/` (`notes/SESSION-2-FINDINGS.md`); for the
 current change history run `git log` in a clone of this repo.
+
+## Test section
