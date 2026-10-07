@@ -1,10 +1,18 @@
 """Session management + conversation history endpoints."""
 from __future__ import annotations
 
+from contextlib import contextmanager
+
 from flask import Blueprint, jsonify, request
 
 from routes._helpers import json_body
-from routes._state import ensure_modes, get_agent_mode, get_chat_mode
+from routes._state import (
+    agent_turn_guard,
+    ensure_modes,
+    get_agent_mode,
+    get_chat_mode,
+    inference_guard,
+)
 from core.log import get_logger
 
 log = get_logger("routes.sessions")
@@ -16,6 +24,22 @@ def _store():
     """SessionStore is imported lazily — it touches ~/.ai-agent on load."""
     from sessions import SessionStore
     return SessionStore()
+
+
+@contextmanager
+def _session_swap_guard():
+    """Serialise a session swap against an in-flight stream (4.2i-C-H5).
+
+    reload_session/reset close the cached Conversation and rebuild it from
+    disk. If a stream is mid-generation on that Conversation the native
+    engine sees a freed handle and can drop the process. Take the same
+    locks a stream holds — the chat stream holds inference_lock, the agent
+    stream holds agent_turn_lock — so the swap waits for it to drain.
+    Lock order matches routes/_state.py: agent_turn_lock -> inference_lock.
+    """
+    with agent_turn_guard():
+        with inference_guard():
+            yield
 
 
 @bp.route("/api/sessions", methods=["GET"])
@@ -46,11 +70,13 @@ def api_sessions_create():
     title = (body.get("title") or "").strip()
     try:
         sid = _store().create_session(mode, title)
-        # Reload active mode if same
-        if mode == "chat":
-            get_chat_mode().reload_session(sid)
-        elif mode == "agent":
-            get_agent_mode().reload_session(sid)
+        # Reload active mode if same. 4.2i-C-H5: serialised against an
+        # in-flight stream so its Conversation is not swapped underneath.
+        with _session_swap_guard():
+            if mode == "chat":
+                get_chat_mode().reload_session(sid)
+            elif mode == "agent":
+                get_agent_mode().reload_session(sid)
         return jsonify({"ok": True, "id": sid})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -80,18 +106,21 @@ def api_sessions_delete(sid):
         ok = store.delete_session(sid)
         if not ok:
             return jsonify({"error": "delete failed"}), 500
-        # If active deleted, reload new active
+        # If active deleted, reload new active. 4.2i-C-H5: whole block
+        # under the swap guard — a stream on the dying thread drains
+        # before the mode swaps Conversations.
         new_active = store.get_active_id(mode)
-        if mode == "chat" and get_chat_mode().session_id == sid:
-            if new_active:
-                get_chat_mode().reload_session(new_active)
-            else:
-                get_chat_mode().reset()
-        elif mode == "agent" and get_agent_mode().session_id == sid:
-            if new_active:
-                get_agent_mode().reload_session(new_active)
-            else:
-                get_agent_mode().reset()
+        with _session_swap_guard():
+            if mode == "chat" and get_chat_mode().session_id == sid:
+                if new_active:
+                    get_chat_mode().reload_session(new_active)
+                else:
+                    get_chat_mode().reset()
+            elif mode == "agent" and get_agent_mode().session_id == sid:
+                if new_active:
+                    get_agent_mode().reload_session(new_active)
+                else:
+                    get_agent_mode().reset()
         return jsonify({"ok": True, "new_active": new_active})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -130,20 +159,22 @@ def api_sessions_bulk_delete():
                 deleted.append(sid)
         # Same reassignment rule as the single delete, for both modes: if the
         # thread the mode is showing just disappeared, move to a live one.
-        chat = get_chat_mode()
-        if chat.session_id and chat.session_id in deleted:
-            new_active = store.get_active_id("chat")
-            if new_active:
-                chat.reload_session(new_active)
-            else:
-                chat.reset()
-        agent = get_agent_mode()
-        if agent.session_id and agent.session_id in deleted:
-            new_active = store.get_active_id("agent")
-            if new_active:
-                agent.reload_session(new_active)
-            else:
-                agent.reset()
+        # 4.2i-C-H5: whole block under the swap guard.
+        with _session_swap_guard():
+            chat = get_chat_mode()
+            if chat.session_id and chat.session_id in deleted:
+                new_active = store.get_active_id("chat")
+                if new_active:
+                    chat.reload_session(new_active)
+                else:
+                    chat.reset()
+            agent = get_agent_mode()
+            if agent.session_id and agent.session_id in deleted:
+                new_active = store.get_active_id("agent")
+                if new_active:
+                    agent.reload_session(new_active)
+                else:
+                    agent.reset()
         return jsonify({"ok": True, "deleted": deleted, "missing": missing,
                         "active_chat": store.get_active_id("chat"),
                         "active_agent": store.get_active_id("agent")})
@@ -160,12 +191,14 @@ def api_sessions_activate(sid):
         if not s:
             return jsonify({"error": "not found"}), 404
         mode = s.get("mode", "chat")
-        if mode == "chat":
-            ok = get_chat_mode().reload_session(sid)
-        elif mode == "agent":
-            ok = get_agent_mode().reload_session(sid)
-        else:
-            ok = False
+        # 4.2i-C-H5: serialised against an in-flight stream.
+        with _session_swap_guard():
+            if mode == "chat":
+                ok = get_chat_mode().reload_session(sid)
+            elif mode == "agent":
+                ok = get_agent_mode().reload_session(sid)
+            else:
+                ok = False
         if not ok:
             return jsonify({"error": "activate failed"}), 500
         return jsonify({"ok": True, "mode": mode})
@@ -202,10 +235,12 @@ def api_new():
         # loudly instead of losing it without a trace.
         log.error("could not archive %s session before reset", mode, exc_info=True)
     try:
-        if mode == "agent":
-            get_agent_mode().reset()
-        else:
-            get_chat_mode().reset()
+        # 4.2i-C-H5: serialised against an in-flight stream.
+        with _session_swap_guard():
+            if mode == "agent":
+                get_agent_mode().reset()
+            else:
+                get_chat_mode().reset()
     except Exception as e:
         return jsonify({"error": str(e)}), 500
     return jsonify({"ok": True, "archived": archived, "mode": mode})

@@ -9,7 +9,7 @@ from flask import Blueprint, Response, jsonify, request
 import config
 from core.log import get_logger
 from routes._helpers import extract_messages
-from routes._state import get_llm
+from routes._state import get_llm, inference_guard
 
 log = get_logger("routes.openai")
 
@@ -49,23 +49,30 @@ def chat_completions():
 
     system, prompt = extract_messages(messages)
 
+    # 4.2i-C-H4: one unit of model work, same lock Chat mode takes
+    # (routes/chat.py, modes/agent.py local branch). The engine, its KV
+    # cache and every cached Conversation are shared mutable state, and
+    # Flask runs threaded=True; without this an opencode /v1 call and a
+    # chat turn can drive the same native engine at once and the LiteRT
+    # bridge drops the process.
     try:
-        llm = get_llm()
-        engine = llm._engine
-        assert engine is not None
-        conv = engine.create_conversation(
-            system_message=system or None,
-            max_output_tokens=max_tokens,
-        )
-        try:
-            resp = conv.send_message(prompt)
-        finally:
+        with inference_guard():
+            llm = get_llm()
+            engine = llm._engine
+            assert engine is not None
+            conv = engine.create_conversation(
+                system_message=system or None,
+                max_output_tokens=max_tokens,
+            )
             try:
-                conv.__exit__(None, None, None)
-            except Exception as e:
-                log.debug("could not close the bridge conversation: %s: %s",
-                          type(e).__name__, e)
-        reply = resp["content"][0]["text"]
+                resp = conv.send_message(prompt)
+            finally:
+                try:
+                    conv.__exit__(None, None, None)
+                except Exception as e:
+                    log.debug("could not close the bridge conversation: %s: %s",
+                              type(e).__name__, e)
+            reply = resp["content"][0]["text"]
     except Exception as e:
         return jsonify({
             "error": {"message": f"{type(e).__name__}: {e}"}
