@@ -17,6 +17,7 @@ import threading
 import unittest
 from contextlib import closing, contextmanager
 from pathlib import Path
+from unittest.mock import patch
 
 from _harness import bootstrap, current_home, get_app
 
@@ -25,6 +26,7 @@ bootstrap()
 from core import code_stream as cs  # noqa: E402
 from core import opencode as oc  # noqa: E402
 from core import projects as ps  # noqa: E402
+from routes import _state as rstate  # noqa: E402
 from routes import code as rc  # noqa: E402
 
 app = get_app()
@@ -1133,6 +1135,65 @@ class TestSessionMapKeys(unittest.TestCase):
         self.assertIsNone(oc.get_session(gone))
         self.assertIsNone(oc.forget_session(gone))
 
+
+
+class TestOneShotRunsHoldCodeLock(unittest.TestCase):
+    """The one-shot routes must serialise through code_lock like the stream.
+
+    api_code and api_code_web_run called _run() with no lock, while
+    stream_opencode held code_lock for a whole streamed run — so a one-shot
+    run and a streamed run on the same folder could drive opencode at once
+    and corrupt files through its write/edit tools.
+    """
+
+    def _fake_run(self):
+        """A stand-in for _run that records the lock state it saw.
+
+        Returns (0, []) — _run's (returncode, lines) contract.
+        """
+        seen = {}
+
+        def fake(workdir, prompt, *args, **kwargs):
+            seen["locked"] = rstate.code_lock.locked()
+            return 0, []
+
+        return seen, fake
+
+    def _assert_locked(self, seen, resp):
+        self.assertEqual(resp.status_code, 200, resp.get_data(as_text=True))
+        self.assertIn("locked", seen, "the fake _run was never called")
+        self.assertTrue(seen["locked"],
+                        "the one-shot run did not hold code_lock")
+
+    def test_api_code_runs_under_code_lock(self):
+        seen, fake = self._fake_run()
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.object(rc, "_run", new=fake), \
+                 patch.object(rc, "_require_opencode", return_value=None), \
+                 patch.object(rc, "commit_changes",
+                              return_value={"ok": False, "reason": "test"}), \
+                 app.test_request_context(
+                     "/api/code", method="POST",
+                     json={"task": "x", "workdir": tmp}):
+                resp = rc.api_code()
+        self._assert_locked(seen, resp)
+
+    def test_api_code_web_run_runs_under_code_lock(self):
+        seen, fake = self._fake_run()
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.object(rc, "_run", new=fake), \
+                 patch.object(rc, "_require_opencode", return_value=None), \
+                 patch.object(rc, "_resolve_workdir",
+                              return_value=(Path(tmp), None)), \
+                 patch.object(rc, "ensure_git_identity"), \
+                 patch.object(rc, "_ensure_safe_directory"), \
+                 patch.object(rc, "commit_changes",
+                              return_value={"ok": False, "reason": "test"}), \
+                 app.test_request_context(
+                     "/api/code/web/run", method="POST",
+                     json={"message": "x"}):
+                resp = rc.api_code_web_run()
+        self._assert_locked(seen, resp)
 
 
 if __name__ == "__main__":

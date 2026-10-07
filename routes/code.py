@@ -369,24 +369,29 @@ def api_code():
 
     prompt = build_code_prompt(task)
 
-    t0 = time.time()
-    try:
-        rc, lines = _run(wd, prompt)
-    except OpencodeError as e:
-        return jsonify({"error": str(e)}), 500
+    # This path previously bypassed the lock the streamed path takes
+    # (stream_opencode takes code_lock for its whole run), and opencode writes
+    # real files in the shared folder — so a one-shot run and a streamed run
+    # could edit the same files at once and corrupt them.
+    with code_lock:
+        t0 = time.time()
+        try:
+            rc, lines = _run(wd, prompt)
+        except OpencodeError as e:
+            return jsonify({"error": str(e)}), 500
 
-    events = [e for e in (cs_parse(l) for l in lines) if e is not None]
-    summary = summarize(events)
-    _remember_session(wd, summary["session_id"])
-    # Only a clean run gets committed, same as the streaming path: a failed run
-    # can leave a half-applied edit behind.
-    made, commit_error = None, None
-    if rc == 0:
-        res = commit_changes(wd, summary["files"], task)
-        if res["ok"]:
-            made = {"hash": res["hash"], "message": res["message"]}
-        elif summary["files"]:
-            commit_error = res["reason"]
+        events = [e for e in (cs_parse(l) for l in lines) if e is not None]
+        summary = summarize(events)
+        _remember_session(wd, summary["session_id"])
+        # Only a clean run gets committed, same as the streaming path: a failed
+        # run can leave a half-applied edit behind.
+        made, commit_error = None, None
+        if rc == 0:
+            res = commit_changes(wd, summary["files"], task)
+            if res["ok"]:
+                made = {"hash": res["hash"], "message": res["message"]}
+            elif summary["files"]:
+                commit_error = res["reason"]
 
     return jsonify({
         "ok": rc == 0,
@@ -505,26 +510,32 @@ def api_code_web_run():
 
     prompt = build_code_prompt(task)
 
-    t0 = time.time()
-    try:
-        rc, lines = _run(workdir, prompt)
-    except OpencodeError as e:
-        return jsonify({"error": str(e)}), 500
+    # This path previously bypassed the lock the streamed path takes
+    # (stream_opencode takes code_lock for its whole run), and opencode writes
+    # real files in the shared folder — so a one-shot run and a streamed run
+    # could edit the same files at once and corrupt them.
+    with code_lock:
+        t0 = time.time()
+        try:
+            rc, lines = _run(workdir, prompt)
+        except OpencodeError as e:
+            return jsonify({"error": str(e)}), 500
 
-    events = [e for e in (cs_parse(l) for l in lines) if e is not None]
-    summary = summarize(events)
-    _remember_session(workdir, summary["session_id"])
+        events = [e for e in (cs_parse(l) for l in lines) if e is not None]
+        summary = summarize(events)
+        _remember_session(workdir, summary["session_id"])
 
-    commits, commit_error = [], None
-    if rc == 0:
-        made = commit_changes(workdir, summary["files"], task)
-        if made["ok"]:
-            commits.append({"hash": made["hash"], "message": made["message"]})
-        elif summary["files"]:
-            commit_error = made["reason"]
+        commits, commit_error = [], None
+        if rc == 0:
+            made = commit_changes(workdir, summary["files"], task)
+            if made["ok"]:
+                commits.append({"hash": made["hash"],
+                                "message": made["message"]})
+            elif summary["files"]:
+                commit_error = made["reason"]
 
-    shown = summary["reply"] or summary.get("error") or "(no output)"
-    _record_code_turn(task, shown[:500])
+        shown = summary["reply"] or summary.get("error") or "(no output)"
+        _record_code_turn(task, shown[:500])
 
     return jsonify({
         "reply": shown,
