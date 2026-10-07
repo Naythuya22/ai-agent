@@ -1,3 +1,4 @@
+# test 3
 """OpenAI-compatible HTTP server wrapping LiteRT (for opencode).
 
 Entry point only. Every route lives in a blueprint under `routes/`; shared
