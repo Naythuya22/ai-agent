@@ -997,7 +997,9 @@ function askAndRollback(label){
     body:JSON.stringify({confirm:true,count:1})
   })
     .then(function(r){
-      return r.json().then(function(j){return {ok:r.ok,body:j};});
+      return r.json().then(function(j){
+        return {ok:r.ok,status:r.status,body:j};
+      });
     })
     .then(function(res){
       var b=res.body||{};
@@ -1005,8 +1007,8 @@ function askAndRollback(label){
         appendMsg('↩️ rolled back '+(b.before||'')+' → '+(b.after||'')+
                   ' (count '+b.count+')','system');
       }else{
-        appendMsg('⚠️ rollback failed: '+
-                  (b.reason||('HTTP '+res.status)),'error');
+        var why=b.reason||b.error||('HTTP '+res.status);
+        appendMsg('⚠️ rollback failed: '+why,'error');
       }
     })
     .catch(function(e){
