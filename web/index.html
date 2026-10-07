@@ -965,10 +965,26 @@ function openDiffViewer(title, diffText){
     else if(ln.length&&ln.charAt(0)==='@')span.className+=' diff-hunk';
     span.textContent=ln;
     preEl.appendChild(span);
-    preEl.appendChild(document.createTextNode('\n'));
   }
   var v=document.getElementById('viewer');
   if(v)v.hidden=false;
+}
+function fetchDiffAndShow(label){
+  fetch('/api/code/diff?scope=head')
+    .then(function(r){
+      if(!r.ok) throw new Error('HTTP '+r.status);
+      return r.json();
+    })
+    .then(function(body){
+      if(!body.ok){openDiffViewer(label||'Diff','(unavailable: '+(body.reason||'unknown')+')');return;}
+      var stat=body.stat||{};
+      var head=label||'Last commit';
+      head+='  +'+stat.insertions+' -'+stat.deletions+'  ('+stat.files+' files)';
+      openDiffViewer(head, body.diff||'(no changes)');
+    })
+    .catch(function(e){
+      openDiffViewer(label||'Diff','(error: '+e.message+')');
+    });
 }
 if(viewerCloseEl){viewerCloseEl.addEventListener('click',function(e){if(e&&e.stopPropagation)e.stopPropagation();closeViewer()})}
 if(viewerEl){viewerEl.addEventListener('click',function(e){if(e.target===viewerEl)closeViewer()})}
@@ -1171,7 +1187,21 @@ async function sendStream(text,mode){
           appendMsg('📁 '+op+(evt.path||'?'),'tool');
         }else if(evt.type==='commit'){
           setActivity('running','Committing');
-          appendMsg('🔧 '+(evt.hash||'').slice(0,7)+' '+evt.message,'tool');
+          var commitEl=appendMsg('🔧 '+(evt.hash||'').slice(0,7)+' '+evt.message,'tool');
+          if(commitEl){
+            // let: this branch runs inside the per-frame for loop, so the
+            // click handler must keep this frame's label, not the last one.
+            let diffLabel=String(evt.message||evt.hash||'');
+            var diffBtn=document.createElement('button');
+            diffBtn.type='button';
+            diffBtn.textContent='View diff';
+            diffBtn.style.cssText='background:var(--accent);color:var(--accent-on);border:0;border-radius:4px;padding:2px 8px;margin-left:6px;font-size:11px;cursor:pointer;font-family:inherit';
+            diffBtn.addEventListener('click',function(e){
+              if(e&&e.stopPropagation)e.stopPropagation();
+              fetchDiffAndShow(diffLabel);
+            });
+            commitEl.appendChild(diffBtn);
+          }
         }else if(evt.type==='log'){
           var lt=String(evt.text||'').trim();
           if(lt)setStatus('opencode: '+lt.slice(0,80));
