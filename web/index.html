@@ -986,6 +986,33 @@ function fetchDiffAndShow(label){
       openDiffViewer(label||'Diff','(error: '+e.message+')');
     });
 }
+function askAndRollback(label){
+  var warn='Undo the last commit?\n\n'+
+    'This runs git reset --hard HEAD~1 on the project folder. '+
+    'Uncommitted changes and later commits will be lost.';
+  if(!window.confirm(warn))return;
+  fetch('/api/code/rollback',{
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({confirm:true,count:1})
+  })
+    .then(function(r){
+      return r.json().then(function(j){return {ok:r.ok,body:j};});
+    })
+    .then(function(res){
+      var b=res.body||{};
+      if(b.ok){
+        appendMsg('↩️ rolled back '+(b.before||'')+' → '+(b.after||'')+
+                  ' (count '+b.count+')','system');
+      }else{
+        appendMsg('⚠️ rollback failed: '+
+                  (b.reason||('HTTP '+res.status)),'error');
+      }
+    })
+    .catch(function(e){
+      appendMsg('⚠️ rollback error: '+e.message,'error');
+    });
+}
 if(viewerCloseEl){viewerCloseEl.addEventListener('click',function(e){if(e&&e.stopPropagation)e.stopPropagation();closeViewer()})}
 if(viewerEl){viewerEl.addEventListener('click',function(e){if(e.target===viewerEl)closeViewer()})}
 if(document.addEventListener){
@@ -1201,6 +1228,15 @@ async function sendStream(text,mode){
               fetchDiffAndShow(diffLabel);
             });
             commitEl.appendChild(diffBtn);
+            var rbBtn=document.createElement('button');
+            rbBtn.type='button';
+            rbBtn.textContent='Rollback';
+            rbBtn.style.cssText='background:#a33;color:#fff;border:0;border-radius:4px;padding:2px 8px;margin-left:6px;font-size:11px;cursor:pointer;font-family:inherit';
+            rbBtn.addEventListener('click',function(e){
+              if(e&&e.stopPropagation)e.stopPropagation();
+              askAndRollback(diffLabel);
+            });
+            commitEl.appendChild(rbBtn);
           }
         }else if(evt.type==='log'){
           var lt=String(evt.text||'').trim();
