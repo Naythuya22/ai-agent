@@ -30,8 +30,8 @@ _EDIT_TOOLS = {"write": "create", "edit": "edit", "patch": "edit"}
 # opencode bug) is killed instead of pinning the worker thread, code_lock and
 # the child forever. The idle budget must stay safely under the hard one,
 # and both above zero.
-STREAM_IDLE_TIMEOUT = 90     # seconds with no output at all
-STREAM_HARD_TIMEOUT = 300    # seconds for the whole run
+STREAM_IDLE_TIMEOUT = 300    # was 90; MiMo has long silent thinking phases
+STREAM_HARD_TIMEOUT = 1200    # was 300; complex edits need room
 
 
 def _strip_ansi(s: str) -> str:
