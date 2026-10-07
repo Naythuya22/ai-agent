@@ -227,6 +227,11 @@ AGENT_TURN_CACHE = _env_bool("AI_AGENT_CACHE", True)
 # Task 4 — scan tool output for instruction-shaped text and mark it untrusted.
 AGENT_INJECTION_GUARD = _env_bool("AI_AGENT_INJECTION", True)
 
+# Dev only — /sw.js re-reads web/index.html on every request instead of
+# serving the hash computed at startup, so a frontend edit reaches the
+# browser without a server restart (Lesson #3). Off by default.
+DEBUG = _env_bool("AI_AGENT_DEBUG", False)
+
 # ── read_file budget (Batch 1.5) ──────────────────────────────
 # Model-aware char cap. Floor 4K protects small local models, ceiling
 # 100K protects cost, the 25%-of-remaining rule keeps 3-4 reads alive.

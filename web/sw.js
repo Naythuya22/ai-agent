@@ -1,6 +1,10 @@
 'use strict';
 
-const CACHE = 'ai-agent-v1';
+// __CACHE_VERSION__ is replaced server-side with sha256(index.html)[:8]
+// (routes/pwa.py). A deploy changes it, so this file changes byte-for-byte
+// and the browser installs the new worker instead of serving stale HTML.
+const CACHE = 'ai-agent-__CACHE_VERSION__';
+const CACHE_PREFIX = 'ai-agent-';
 const SHELL = [
   '/',
   '/manifest.json',
@@ -20,7 +24,11 @@ self.addEventListener('activate', (e) => {
   e.waitUntil(
     caches.keys()
       .then((keys) =>
-        Promise.all(keys.filter((k) => k !== CACHE).map((k) => caches.delete(k)))
+        Promise.all(
+          keys
+            .filter((k) => k.startsWith(CACHE_PREFIX) && k !== CACHE)
+            .map((k) => caches.delete(k))
+        )
       )
       .then(() => self.clients.claim())
   );
@@ -47,6 +55,36 @@ self.addEventListener('fetch', (e) => {
           { status: 503, headers: { 'Content-Type': 'application/json' } }
         )
       )
+    );
+    return;
+  }
+
+  // ── HTML documents → network-first (B1) ──
+  // index.html must never come from the previous deploy's cache while the
+  // device is online; the cache is only the offline fallback.
+  const isDocument = req.mode === 'navigate' || path === '/' || path.endsWith('.html');
+  if (isDocument) {
+    e.respondWith(
+      fetch(req)
+        .then((resp) => {
+          if (resp && resp.status === 200 && resp.type === 'basic') {
+            const copy = resp.clone();
+            caches.open(CACHE).then((c) => c.put(req, copy)).catch(() => {});
+          }
+          return resp;
+        })
+        .catch(() =>
+          caches.match(req).then((cached) =>
+            cached ||
+            caches.match('/').then((shell) =>
+              shell ||
+              new Response('<h1>offline</h1>', {
+                status: 503,
+                headers: { 'Content-Type': 'text/html; charset=utf-8' },
+              })
+            )
+          )
+        )
     );
     return;
   }

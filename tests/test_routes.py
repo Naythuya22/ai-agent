@@ -157,6 +157,73 @@ class TestRoutes(unittest.TestCase):
         self.assertIsNotNone(m, "sw.js has no CACHE constant")
         self.assertEqual(version, m.group(1))
 
+    # ── B1: service-worker cache invalidation on deploy ──────────────
+    @staticmethod
+    def _index_hash():
+        import hashlib
+        from pathlib import Path
+
+        web = Path(__file__).resolve().parent.parent / "web"
+        return hashlib.sha256((web / "index.html").read_bytes()).hexdigest()[:8]
+
+    def test_sw_cache_name_is_index_html_hash(self):
+        """A frontend deploy changes index.html, hence sw.js, hence CACHE."""
+        expected = self._index_hash()
+        with closing(client.get("/sw.js")) as r:
+            js = r.get_data(as_text=True)
+        self.assertNotIn("__CACHE_VERSION__", js,
+                         "placeholder shipped unsubstituted — B1 is back")
+        self.assertIn(f"const CACHE = 'ai-agent-{expected}';", js,
+                      "CACHE is not derived from index.html content")
+        with closing(client.get("/api/sw-version")) as r:
+            self.assertEqual(r.get_json()["version"], expected)
+
+    def test_sw_js_is_always_revalidated(self):
+        """/sw.js must reach the browser on every navigation (no stale SW)."""
+        with closing(client.get("/sw.js")) as r:
+            self.assertEqual(r.status_code, 200)
+            self.assertIn("javascript", r.headers.get("Content-Type", ""))
+            cache_control = r.headers.get("Cache-Control", "")
+        self.assertIn("no-cache", cache_control)
+        self.assertIn("must-revalidate", cache_control)
+
+    def test_sw_drops_stale_caches_and_fetches_html_from_network(self):
+        """Activate purges old ai-agent-* caches; documents are network-first."""
+        with closing(client.get("/sw.js")) as r:
+            js = r.get_data(as_text=True)
+
+        self.assertIn(".filter((k) => k.startsWith(CACHE_PREFIX) && k !== CACHE)",
+                      js, "activate handler does not purge stale caches")
+        self.assertIn("self.clients.claim()", js)
+
+        head, _, tail = js.partition("const isDocument")
+        self.assertTrue(head and tail, "sw.js has no document branch")
+        body, _, _ = tail.partition("return;")
+        net = body.find("fetch(req)")
+        cached = body.find("caches.match(req)")
+        self.assertNotEqual(net, -1, "documents are not fetched from the network")
+        self.assertNotEqual(cached, -1, "no offline fallback for documents")
+        self.assertLess(net, cached, "documents are served cache-first (B1)")
+
+    def test_debug_mode_rereads_index_hash_per_request(self):
+        """AI_AGENT_DEBUG=1 must bypass the startup snapshot, else dev edits
+        never reach the browser without a restart."""
+        import config
+        from routes import pwa
+
+        saved_debug, saved_start = config.DEBUG, pwa._STARTUP_HASH
+        try:
+            pwa._STARTUP_HASH = "stale000"
+            config.DEBUG = False
+            with closing(client.get("/api/sw-version")) as r:
+                self.assertEqual(r.get_json()["version"], "stale000")
+
+            config.DEBUG = True
+            with closing(client.get("/api/sw-version")) as r:
+                self.assertEqual(r.get_json()["version"], self._index_hash())
+        finally:
+            config.DEBUG, pwa._STARTUP_HASH = saved_debug, saved_start
+
     def test_index_html_is_served(self):
         with closing(client.get("/")) as r:
             body = r.get_data(as_text=True)
