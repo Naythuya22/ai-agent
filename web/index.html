@@ -966,6 +966,9 @@ function openDiffViewer(title, diffText){
     span.textContent=ln;
     preEl.appendChild(span);
   }
+  paneEl.hidden=false;
+  var imgEl=document.getElementById('viewer-img');
+  if(imgEl)imgEl.hidden=true;
   var v=document.getElementById('viewer');
   if(v)v.hidden=false;
 }

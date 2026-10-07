@@ -1457,5 +1457,26 @@ class TestBuildCodePrompt(unittest.TestCase):
         self.assertIn("hello", out)
 
 
+class TestWebDiffViewer(unittest.TestCase):
+    def test_openDiffViewer_unhides_its_pane(self):
+        # Resolve web/index.html the same way other path-based
+        # tests in this file resolve files; if in doubt, build it
+        # from __file__ so the test is cwd-independent.
+        here = Path(__file__).resolve().parent.parent
+        html = (here / "web" / "index.html").read_text(
+            encoding="utf-8")
+        start = html.find("function openDiffViewer")
+        self.assertGreater(start, -1, "openDiffViewer missing")
+        end = html.find("\n}", start)
+        self.assertGreater(end, start, "function body not found")
+        body = html[start:end]
+        self.assertIn("paneEl.hidden=false", body,
+                      "openDiffViewer must unhide #viewer-text, "
+                      "otherwise the diff pane stays hidden")
+        self.assertIn("imgEl.hidden=true", body,
+                      "openDiffViewer must hide the image pane "
+                      "for parity with openTextViewer")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
