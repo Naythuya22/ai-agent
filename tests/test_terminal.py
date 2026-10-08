@@ -193,15 +193,19 @@ class _FakeBrowserWS:
 class _FakeTtydWS:
     """The ttyd end: echoes b"hi" only after the browser byte has landed."""
 
-    def __init__(self, url=None, headers=None):
+    def __init__(self, url=None, headers=None, subprotocols=None, on_send=None):
         self.url = url
         self.headers = headers
+        self.subprotocols = subprotocols
         self.sent = []
         self.closed = False
         self._delivered = False
+        self._on_send = on_send
 
     def send(self, data):
         self.sent.append(data)
+        if self._on_send is not None:
+            self._on_send()
 
     def receive(self, timeout=None):
         if not self.sent:
@@ -254,8 +258,8 @@ class TestWebSocketRelay(unittest.TestCase):
         ws = _FakeBrowserWS(incoming=[b"hi"], on_send=shim.stop)
         upstreams = []
 
-        def fake_client(url, headers=None):
-            up = _FakeTtydWS(url, headers)
+        def fake_client(url, headers=None, subprotocols=None):
+            up = _FakeTtydWS(url, headers, subprotocols)
             upstreams.append(up)
             return up
 
@@ -273,9 +277,9 @@ class TestWebSocketRelay(unittest.TestCase):
         shim = _SockThreading(pre_set=True)
         urls = []
 
-        def fake_client(url, headers=None):
+        def fake_client(url, headers=None, subprotocols=None):
             urls.append(url)
-            return _FakeTtydWS(url, headers)
+            return _FakeTtydWS(url, headers, subprotocols)
 
         with patch("simple_websocket.Client", fake_client):
             self._run_relay(_FakeBrowserWS(), shim=shim, path="/terminal/ws?arg=x")
@@ -284,6 +288,42 @@ class TestWebSocketRelay(unittest.TestCase):
         self.assertTrue(urls[0].endswith("?arg=x"),
                         f"query string dropped: {urls[0]}")
         self.assertEqual(urls[0], terminal.TTYD_WS + "?arg=x")
+
+    def test_ws_upstream_requests_tty_subprotocol(self):
+        # ttyd 1.7.7 accepts a handshake without "tty" but never routes data:
+        # the relay must ask for the subprotocol or the terminal stays blank.
+        shim = _SockThreading(pre_set=True)
+        calls = []
+
+        def fake_client(url, **kwargs):
+            calls.append({"url": url, **kwargs})
+            return _FakeTtydWS(url, kwargs.get("headers"),
+                               kwargs.get("subprotocols"))
+
+        with patch("simple_websocket.Client", fake_client):
+            self._run_relay(_FakeBrowserWS(), shim=shim)
+
+        self.assertEqual(len(calls), 1, "the upstream client was never built")
+        self.assertEqual(calls[0].get("subprotocols"), ["tty"])
+
+    def test_ws_forwards_first_browser_byte_to_upstream(self):
+        # The first frame is ttyd's handshake prompt; drop it and nothing starts.
+        shim = _SockThreading()
+        ws = _FakeBrowserWS(incoming=[b'{"AuthToken":""}'])
+        upstreams = []
+
+        def fake_client(url, headers=None, subprotocols=None):
+            up = _FakeTtydWS(url, headers, subprotocols, on_send=shim.stop)
+            upstreams.append(up)
+            return up
+
+        with patch("simple_websocket.Client", fake_client):
+            self._run_relay(ws, shim=shim, timeout=2.0)
+
+        self.assertEqual(len(upstreams), 1, "the upstream client was never built")
+        self.assertEqual(upstreams[0].sent, [b'{"AuthToken":""}'],
+                         "the browser's first byte never reached ttyd")
+        self.assertTrue(upstreams[0].closed, "the upstream was never closed")
 
 
 if __name__ == "__main__":

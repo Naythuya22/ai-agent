@@ -133,9 +133,13 @@ def terminal_ws(ws):
     qs = request.query_string.decode("ascii", "replace")
     url = TTYD_WS + (("?" + qs) if qs else "")
     try:
-        upstream = simple_websocket.Client(url, headers={
-            "Origin": "http://127.0.0.1:8080",
-        })
+        upstream = simple_websocket.Client(
+            url,
+            subprotocols=["tty"],
+            headers={
+                "Origin": "http://127.0.0.1:8080",
+            },
+        )
     except Exception:
         try:
             ws.close(1011, "ttyd unavailable")
