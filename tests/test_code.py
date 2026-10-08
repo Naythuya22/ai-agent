@@ -1501,5 +1501,56 @@ class TestTerminalButton(unittest.TestCase):
                       "#proj-term (Terminal button) missing from #proj-bar")
 
 
+class TestTerminalEmbeddedFrame(unittest.TestCase):
+    """P1-B2B-3b: ttyd is embedded in #code-frame, not opened in a tab."""
+
+    def test_terminal_button_loads_iframe_not_new_tab(self):
+        here = Path(__file__).resolve().parent.parent
+        html = (here / "web" / "index.html").read_text(
+            encoding="utf-8")
+
+        start = html.find("function openCodeFrame")
+        self.assertGreater(start, -1, "openCodeFrame missing")
+
+        end = html.find("function ", start + len("function openCodeFrame"))
+        self.assertGreater(end, start, "openCodeFrame body not bounded")
+        body = html[start:end]
+
+        self.assertNotIn(
+            "window.open(", body,
+            "openCodeFrame must embed ttyd in #code-frame, "
+            "not pop a new tab")
+        self.assertIn(
+            "/terminal/", body,
+            "openCodeFrame must point #code-frame at /terminal/")
+
+    def test_close_button_exists_and_wired(self):
+        here = Path(__file__).resolve().parent.parent
+        html = (here / "web" / "index.html").read_text(
+            encoding="utf-8")
+
+        self.assertIn('id="proj-term-close"', html,
+                      "#proj-term-close (Close terminal) missing")
+        self.assertGreaterEqual(
+            html.count("proj-term-close"), 2,
+            "proj-term-close needs an element and a click listener")
+
+    def test_sw_excludes_terminal_path(self):
+        here = Path(__file__).resolve().parent.parent
+        sw = (here / "web" / "sw.js").read_text(encoding="utf-8")
+
+        self.assertIn("/terminal/", sw,
+                      "sw.js must let /terminal/* pass through")
+
+        fetch_at = sw.find("addEventListener('fetch'")
+        self.assertGreater(fetch_at, -1, "fetch handler missing")
+        term_at = sw.find("/terminal/", fetch_at)
+        self.assertGreater(term_at, -1, "/terminal/ missing from sw.js")
+        self.assertLess(
+            term_at - fetch_at, 500,
+            "/terminal/ must be excluded inside the fetch handler, "
+            "not somewhere else in sw.js")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

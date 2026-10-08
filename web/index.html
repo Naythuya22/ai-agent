@@ -272,6 +272,7 @@ footer{position:relative;padding:12px 12px 16px;background:var(--bg);border-top:
 <p class="hint">Type a message below to start.</p>
 </div>
 </main>
+<div id="term-hint" style="display:none;position:fixed;top:56px;left:0;right:0;z-index:6;padding:5px 14px;font-size:11px;background:var(--bg-5);border-bottom:1px solid var(--border);color:var(--text-2)">Keyboard not working? <a href="http://127.0.0.1:8081/terminal/" target="_blank" rel="noopener">Open in new tab ↗</a></div>
 <iframe id="code-frame" style="display:none;position:fixed;top:56px;left:0;right:0;bottom:96px;width:100%;height:calc(100% - 152px);border:0;background:var(--frame-bg);z-index:5"></iframe>
 <div class="ctx-bar"><div id="ctx-fill" class="ctx-fill"></div></div><div id="ctx-info" class="ctx-info"><span id="ctx-text">ctx: -</span><span id="ctx-warn" class="ctx-warn"></span><span id="ctx-pct">-</span></div><div id="status" class="status"><span id="activity" class="activity" hidden><span class="act-spin"></span><span id="act-label" class="act-label"></span></span><span id="status-text">ready</span><span id="model-info" class="model-info" title="model in use"></span><span id="key-info" class="key-info" title="active API key"></span></div>
 <footer>
@@ -313,6 +314,7 @@ footer{position:relative;padding:12px 12px 16px;background:var(--bg);border-top:
 </select>
 <button id="proj-add" type="button" style="background:var(--accent);color:var(--accent-on);border:0;border-radius:4px;padding:4px 10px;font-size:12px;cursor:pointer;font-family:inherit">+ Add</button>
 <button id="proj-term" title="Open terminal">🖥️ Terminal</button>
+<button id="proj-term-close" type="button" title="Close terminal" style="display:none;background:var(--accent);color:var(--accent-on);border:0;border-radius:4px;padding:4px 10px;font-size:12px;cursor:pointer;font-family:inherit">✕ Close</button>
 </div>
 <div id="proj-modal" style="display:none;position:fixed;inset:0;background:var(--overlay);z-index:100;align-items:center;justify-content:center;padding:16px">
 <div style="background:var(--bg-5);border:1px solid var(--border);border-radius:8px;max-width:480px;width:100%;max-height:80vh;display:flex;flex-direction:column;overflow:hidden">
@@ -580,17 +582,35 @@ async function openCodeFrame(){
     var j=await r.json();
     if(!r.ok||j.error){
       setStatus('terminal error: '+(j.error||('HTTP '+r.status))+(j.hint?' — '+j.hint:''));
-      return
+      return;
     }
-    window.open(j.url,'_blank');
-    if(j.status==='already_running')setStatus('terminal already running');
-    else setStatus('opencode opened in new tab: '+j.url);
+    var fr=document.getElementById('code-frame');
+    if(!fr){console.error('missing #code-frame');return;}
+    fr.src='/terminal/';
+    fr.style.display='block';
+    // Make room for the fallback hint bar above the frame.
+    fr.style.top='84px';
+    fr.style.height='calc(100% - 180px)';
+    var th=document.getElementById('term-hint');
+    if(th)th.style.display='block';
+    chatEl.style.visibility='hidden';
+    var cl=document.getElementById('proj-term-close');
+    if(cl)cl.style.display='inline-block';
+    setStatus(j.status==='already_running'?'terminal already running':'terminal open');
   }catch(e){setStatus('terminal start failed: '+e.message+' — check the server, or pkg install ttyd')}
 }
 function closeCodeFrame(){
   var fr=document.getElementById('code-frame');
-  if(fr){fr.style.display='none';fr.src='about:blank'}
+  if(fr){
+    fr.style.display='none';fr.src='about:blank';
+    fr.style.top='56px';
+    fr.style.height='calc(100% - 152px)';
+  }
   chatEl.style.visibility='visible';
+  var th=document.getElementById('term-hint');
+  if(th)th.style.display='none';
+  var cl=document.getElementById('proj-term-close');
+  if(cl)cl.style.display='none';
 }
 function scrollBottom(){chatEl.scrollTop=chatEl.scrollHeight}
 function clearWelcome(){var w=chatEl.querySelector('.welcome');if(w)w.remove()}
@@ -694,6 +714,8 @@ function killTyping(){if(typingEl){typingEl.remove();typingEl=null}}
 function setBusy(b){state.busy=b;sendBtn.disabled=b&&!state.abort;inputEl.disabled=b;if(b&&state.abort){sendBtn.textContent='\u2715';sendBtn.classList.add('stop')}else{sendBtn.textContent='\u27a4';sendBtn.classList.remove('stop')}if(!b)clearActivity()}
 document.querySelectorAll('.mode-btn').forEach(function(btn){btn.addEventListener('click',function(){try{state.mode=btn.dataset.mode;document.querySelectorAll('.mode-btn').forEach(function(b){b.classList.toggle('active',b.dataset.mode===state.mode)});setStatus('mode: '+state.mode);try{updateModelInfo()}catch(_mi){}try{syncAgentTools()}catch(_e){}chatEl.innerHTML='';var w=document.createElement('div');w.className='welcome';w.innerHTML=state.mode==='code'?'<h1>ai-agent</h1><p>Code mode ready</p><p class="hint">Pick a project, open a file from ☰ → 📁 Project Files, or type a task.</p>':'<h1>ai-agent</h1><p>Loading '+state.mode+'...</p>';chatEl.appendChild(w);if(state.mode==='code'){try{closeCodeFrame()}catch(e){};var _pb=document.getElementById('proj-bar');if(_pb)_pb.style.display='flex';try{loadProjects()}catch(e){};loadCodeHistory();setStatus('Code mode — pick project, then type task')}else{try{closeCodeFrame()}catch(e){};var _pb2=document.getElementById('proj-bar');if(_pb2)_pb2.style.display='none';loadHistory();loadSessions()}try{refreshCtx()}catch(_cx){}try{updateCtxButtons()}catch(_cb){}}catch(err){setStatus('mode err: '+err.message);console.error(err)}})});
 document.getElementById('proj-term').addEventListener('click',function(){openCodeFrame()});
+var _tc=document.getElementById('proj-term-close');
+if(_tc)_tc.addEventListener('click',function(){closeCodeFrame();setStatus('terminal closed');});
 menuBtn.addEventListener('click',function(){drawer.classList.add('open');loadSessions();updateCtxButtons();try{loadFileTree()}catch(e){}});
 drawer.addEventListener('click',function(e){if(e.target===drawer)drawer.classList.remove('open')});
 document.querySelectorAll('.ctx-btn').forEach(function(btn){btn.addEventListener('click',function(){setContextSize(parseInt(btn.dataset.size,10))})});
