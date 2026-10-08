@@ -20,6 +20,7 @@ from routes import (
     files,
     skills_api,
     settings_api,
+    terminal,
 )
 from core import auth
 
@@ -36,6 +37,7 @@ BLUEPRINTS = (
     files.bp,
     skills_api.bp,
     settings_api.bp,
+    terminal.bp,
 )
 
 __all__ = ["BLUEPRINTS", "register"]

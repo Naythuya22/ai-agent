@@ -589,7 +589,7 @@ def api_code_web_start():
     if _ttyd_proc is not None and _ttyd_proc.poll() is None:
         return jsonify({
             "ok": True,
-            "url": "http://127.0.0.1:8081",
+            "url": "http://127.0.0.1:8081/terminal",
             "pid": _ttyd_proc.pid,
             "status": "already_running",
         })
@@ -603,6 +603,7 @@ def api_code_web_start():
         return jsonify({"error": err}), 500
 
     cmd = ["ttyd", "-W", "-i", "127.0.0.1", "-p", "8081",
+           "--base-path", "/terminal",
            str(oc.BINARY), "--model", oc.MODEL_REF, str(workdir)]
     try:
         _ttyd_proc = subprocess.Popen(
@@ -622,7 +623,7 @@ def api_code_web_start():
 
     return jsonify({
         "ok": True,
-        "url": "http://127.0.0.1:8081",
+        "url": "http://127.0.0.1:8081/terminal",
         "pid": _ttyd_proc.pid,
         "workdir": str(workdir),
         "command": cmd[6:],
