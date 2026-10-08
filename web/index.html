@@ -141,8 +141,13 @@ footer{position:relative;padding:12px 12px 16px;background:var(--bg);border-top:
 .attach-chip .ac-tile:hover{border-color:var(--accent)}
 .attach-chip img.ac-thumb{object-fit:cover;border:1px solid var(--border-2);cursor:zoom-in;display:block}
 .attach-chip img.ac-thumb[hidden]{display:none}
-/* Full-screen viewer */
-.viewer{position:fixed;inset:0;z-index:60;background:rgba(0,0,0,.9);display:flex;align-items:center;justify-content:center;padding:28px}
+/* Full-screen viewer.
+   110, not 60: the 📁 file tree lives inside .drawer (z-index 100), and a
+   file click opens the viewer while that drawer is still up. At 60 the
+   viewer painted underneath the drawer overlay, so the content loaded and
+   nobody could see it. 110 clears the drawer and the modals (100) but stays
+   under the banners (9998/9999). */
+.viewer{position:fixed;inset:0;z-index:110;background:rgba(0,0,0,.9);display:flex;align-items:center;justify-content:center;padding:28px}
 .viewer[hidden]{display:none}
 .viewer-img{max-width:100%;max-height:100%;border-radius:10px;box-shadow:0 8px 40px rgba(0,0,0,.6)}
 .viewer-img[hidden]{display:none}
@@ -186,6 +191,15 @@ footer{position:relative;padding:12px 12px 16px;background:var(--bg);border-top:
 .sel-btn.danger{background:var(--crit);border-color:var(--crit);color:#ffffff}
 .sel-btn.danger[disabled]{background:var(--disabled-bg);border-color:var(--disabled-bg);color:var(--disabled-text);cursor:default}
 .session-empty{color:var(--text-faint);font-size:12px;padding:6px 0}
+.file-tree{max-height:32vh;overflow-y:auto;margin-bottom:14px}
+.ft-empty{color:var(--text-faint);font-size:12px;padding:6px 0}
+.ft-dir>summary{cursor:pointer;padding:5px 6px;border-radius:6px;color:var(--text-chip);font-size:13px;list-style:none;user-select:none}
+.ft-dir>summary::-webkit-details-marker{display:none}
+.ft-dir>summary:active{background:var(--press)}
+.ft-children{padding-left:10px;border-left:1px solid var(--border);margin-left:9px}
+.ft-file{padding:5px 6px;border-radius:6px;cursor:pointer;color:var(--text-2);font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ft-file:active{background:var(--press)}
+.ft-file.active{background:var(--session-active);color:var(--accent)}
 ::-webkit-scrollbar{width:6px}
 ::-webkit-scrollbar-track{background:transparent}
 ::-webkit-scrollbar-thumb{background:var(--scroll);border-radius:3px}
@@ -411,6 +425,8 @@ footer{position:relative;padding:12px 12px 16px;background:var(--bg);border-top:
 <button class="sel-btn" id="sel-cancel" type="button">Cancel</button>
 </div>
 <div id="session-list" class="session-list"></div>
+<h3>📁 Project Files</h3>
+<div id="file-tree" class="file-tree"><div class="ft-empty">Open the ☰ menu after picking a Code-mode project.</div></div>
 <h3>Settings</h3>
 <button class="cmd" id="settings-btn" data-cmd="settings">&#9881;&#65039; Settings</button>
 <h3>Commands</h3>
@@ -495,6 +511,8 @@ async function loadProjects(){
       if(j.active&&j.active.id===p.id)o.selected=true;
       sel.appendChild(o);
     });
+    // The 📁 Project Files panel reads the same active project.
+    try{loadFileTree()}catch(e){}
   }catch(e){setStatus('project load failed: '+e.message)}
 }
 
@@ -503,7 +521,8 @@ async function activateProject(pid){
   try{
     var r=await fetch('/api/code/projects/'+pid+'/activate',{method:'POST'});
     var j=await r.json();
-    if(j.ok){setStatus('project: '+(j.active||{}).name||'?');}
+    if(j.ok){setStatus('project: '+(j.active||{}).name||'?');
+      try{loadFileTree()}catch(e){}}
   }catch(e){setStatus('activate failed: '+e.message)}
 }
 
@@ -671,8 +690,8 @@ function activityFor(tool,args){
 }
 function killTyping(){if(typingEl){typingEl.remove();typingEl=null}}
 function setBusy(b){state.busy=b;sendBtn.disabled=b&&!state.abort;inputEl.disabled=b;if(b&&state.abort){sendBtn.textContent='\u2715';sendBtn.classList.add('stop')}else{sendBtn.textContent='\u27a4';sendBtn.classList.remove('stop')}if(!b)clearActivity()}
-document.querySelectorAll('.mode-btn').forEach(function(btn){btn.addEventListener('click',function(){try{state.mode=btn.dataset.mode;document.querySelectorAll('.mode-btn').forEach(function(b){b.classList.toggle('active',b.dataset.mode===state.mode)});setStatus('mode: '+state.mode);try{updateModelInfo()}catch(_mi){}try{syncAgentTools()}catch(_e){}chatEl.innerHTML='';var w=document.createElement('div');w.className='welcome';w.innerHTML='<h1>ai-agent</h1><p>Loading '+state.mode+'...</p>';chatEl.appendChild(w);if(state.mode==='code'){try{closeCodeFrame()}catch(e){};var _pb=document.getElementById('proj-bar');if(_pb)_pb.style.display='flex';try{loadProjects()}catch(e){};setStatus('Code mode — pick project, then type task')}else{try{closeCodeFrame()}catch(e){};var _pb2=document.getElementById('proj-bar');if(_pb2)_pb2.style.display='none';loadHistory();loadSessions()}try{refreshCtx()}catch(_cx){}try{updateCtxButtons()}catch(_cb){}}catch(err){setStatus('mode err: '+err.message);console.error(err)}})});
-menuBtn.addEventListener('click',function(){drawer.classList.add('open');loadSessions();updateCtxButtons()});
+document.querySelectorAll('.mode-btn').forEach(function(btn){btn.addEventListener('click',function(){try{state.mode=btn.dataset.mode;document.querySelectorAll('.mode-btn').forEach(function(b){b.classList.toggle('active',b.dataset.mode===state.mode)});setStatus('mode: '+state.mode);try{updateModelInfo()}catch(_mi){}try{syncAgentTools()}catch(_e){}chatEl.innerHTML='';var w=document.createElement('div');w.className='welcome';w.innerHTML=state.mode==='code'?'<h1>ai-agent</h1><p>Code mode ready</p><p class="hint">Pick a project, open a file from ☰ → 📁 Project Files, or type a task.</p>':'<h1>ai-agent</h1><p>Loading '+state.mode+'...</p>';chatEl.appendChild(w);if(state.mode==='code'){try{closeCodeFrame()}catch(e){};var _pb=document.getElementById('proj-bar');if(_pb)_pb.style.display='flex';try{loadProjects()}catch(e){};loadCodeHistory();setStatus('Code mode — pick project, then type task')}else{try{closeCodeFrame()}catch(e){};var _pb2=document.getElementById('proj-bar');if(_pb2)_pb2.style.display='none';loadHistory();loadSessions()}try{refreshCtx()}catch(_cx){}try{updateCtxButtons()}catch(_cb){}}catch(err){setStatus('mode err: '+err.message);console.error(err)}})});
+menuBtn.addEventListener('click',function(){drawer.classList.add('open');loadSessions();updateCtxButtons();try{loadFileTree()}catch(e){}});
 drawer.addEventListener('click',function(e){if(e.target===drawer)drawer.classList.remove('open')});
 document.querySelectorAll('.ctx-btn').forEach(function(btn){btn.addEventListener('click',function(){setContextSize(parseInt(btn.dataset.size,10))})});
 document.querySelectorAll('.cmd').forEach(function(btn){btn.addEventListener('click',function(){drawer.classList.remove('open');var c=btn.dataset.cmd;if(c==='close')return;if(c==='settings'){openSettings();return}runCommand(c)})});
@@ -1351,7 +1370,13 @@ async function newChat(){
 async function showHistory(){
   setStatus('loading history...');
   try{
-    var r=await fetch('/api/history?mode='+state.mode);
+    // Code mode keeps its turns in its own mirror. /api/history only knows
+    // chat/agent and answers with the *chat* thread, so `/history` typed in
+    // Code mode used to print the wrong conversation (same trap that left
+    // the screen on "Loading code..."). Same {role,text} shape either way.
+    var isCode=state.mode==='code';
+    var url=isCode?'/api/code/web/history':('/api/history?mode='+state.mode);
+    var r=await fetch(url);
     var j=await r.json();
     var msgs=j.messages||[];
     if(!msgs.length){appendMsg('(no history)','system');setStatus('ready');return}
@@ -1363,6 +1388,133 @@ async function showHistory(){
     appendMsg('--- End ---','system');
     setStatus('ready');
   }catch(e){appendMsg('Error: '+e.message,'error')}
+}
+
+// ── Project file explorer (P0) ─────────────────────────────────
+// The drawer's 📁 Project Files panel: /api/files/tree renders as a
+// <details>/<summary> tree, a file click fetches /api/files/content and
+// shows it in the existing #viewer overlay as <pre><code class="language-…">.
+// The page only ever sends root-relative paths — the jail lives server-side
+// in routes/files.py (tools._fs_guard.is_safe_path), never in the client.
+var fileTreeEl=document.getElementById('file-tree');
+var activeFileEl=null;
+
+function ftDirNode(node){
+  var det=document.createElement('details');
+  det.className='ft-dir';
+  var sum=document.createElement('summary');
+  sum.textContent='\ud83d\udcc1 '+(node.name||'/');
+  det.appendChild(sum);
+  var kids=document.createElement('div');
+  kids.className='ft-children';
+  var list=node.children||[];
+  for(var i=0;i<list.length;i++){
+    var c=list[i];
+    kids.appendChild(c.type==='dir'?ftDirNode(c):ftFileNode(c));
+  }
+  if(node.truncated||node.error){
+    var t=document.createElement('div');
+    t.className='ft-empty';
+    t.textContent=node.error?('⚠️ '+node.error):'… (more not shown)';
+    kids.appendChild(t);
+  }
+  det.appendChild(kids);
+  return det;
+}
+
+function ftFileNode(node){
+  var d=document.createElement('div');
+  d.className='ft-file';
+  d.textContent='\ud83d\udcc4 '+node.name;
+  d.title=node.path+(typeof node.size==='number'?('  '+node.size+' B'):'');
+  d.setAttribute('data-path',node.path);
+  d.onclick=function(){openFile(node.path,d)};
+  return d;
+}
+
+async function loadFileTree(){
+  if(!fileTreeEl)return;
+  try{
+    var r=await fetch('/api/files/tree');
+    var j=await r.json();
+    fileTreeEl.innerHTML='';
+    if(!r.ok||j.error){
+      var e=document.createElement('div');
+      e.className='ft-empty';
+      var why=(j&&j.error)||('HTTP '+r.status);
+      // Not an error the user caused: no project picked yet. Say so in
+      // their terms instead of echoing the endpoint's 400 body.
+      if(why==='no active project'){
+        why='No project yet — Code mode → 📁 → + Add, then reopen ☰.';
+      }
+      e.textContent='⚠️ '+why;
+      fileTreeEl.appendChild(e);
+      return;
+    }
+    var kids=(j.tree&&j.tree.children)||[];
+    if(!kids.length){
+      var em=document.createElement('div');
+      em.className='ft-empty';
+      em.textContent='(empty project)';
+      fileTreeEl.appendChild(em);
+      return;
+    }
+    for(var i=0;i<kids.length;i++){
+      var c=kids[i];
+      fileTreeEl.appendChild(c.type==='dir'?ftDirNode(c):ftFileNode(c));
+    }
+    activeFileEl=null;
+  }catch(err){
+    fileTreeEl.innerHTML='';
+    var box=document.createElement('div');
+    box.className='ft-empty';
+    box.textContent='⚠️ '+((err&&err.message)||err);
+    fileTreeEl.appendChild(box);
+  }
+}
+
+function openCodeFile(name,text,language){
+  // The #viewer overlay with a <code> child, so a future highlighter has a
+  // language class to hook onto: <pre id="viewer-pre"><code class="language-…">
+  // A missing node must be loud, not a silent no-op: that is exactly the
+  // shape of bug where a file "opens" and the screen changes nothing.
+  if(!viewerEl){console.error('openCodeFile: #viewer not found in DOM');return}
+  if(viewerImgEl){viewerImgEl.hidden=true;viewerImgEl.removeAttribute('src')}
+  if(viewerNameEl)viewerNameEl.textContent=name||'file';
+  if(viewerPreEl){
+    viewerPreEl.innerHTML='';
+    var codeEl=document.createElement('code');
+    codeEl.className='language-'+(language||'text');
+    codeEl.textContent=text||'';
+    viewerPreEl.appendChild(codeEl);
+  }
+  if(viewerTextEl)viewerTextEl.hidden=false;
+  viewerEl.hidden=false;
+}
+
+async function openFile(relPath,el){
+  setStatus('loading '+relPath+'…');
+  try{
+    var r=await fetch('/api/files/content?path='+encodeURIComponent(relPath));
+    var j=await r.json();
+    if(!r.ok||j.error){
+      var why=(j&&j.error)||('HTTP '+r.status);
+      setStatus('open failed: '+why);
+      // A failed click must still produce something on screen — the status
+      // line alone is 11px of text at the very bottom, easy to read as
+      // "nothing happened". The viewer says what went wrong instead.
+      openCodeFile(relPath,'Could not open '+relPath+'\n\n'+why,'text');
+      return;
+    }
+    openCodeFile(j.name||relPath,j.content||'',j.language||'');
+    if(activeFileEl)activeFileEl.className='ft-file';
+    if(el){el.className='ft-file active';activeFileEl=el}
+    setStatus('ready');
+  }catch(e){
+    var msg='Open failed: '+((e&&e.message)||e);
+    setStatus(msg);
+    openCodeFile(relPath,msg,'text');
+  }
 }
 
 function fmtTok(n){
@@ -1663,6 +1815,26 @@ async function loadHistory(){
       appendMsg(m.text||'',m.role==='user'?'user':'assistant');
     }
     setStatus('loaded '+msgs.length+' messages');
+  }catch(e){}
+}
+
+// Code mode has its own mirror, /api/code/web/history — /api/history only
+// knows chat/agent and answers with the *chat* thread, so calling it here
+// would paint the wrong conversation over the code screen. This is what
+// clears the "Code mode ready" placeholder on a reload: an empty mirror
+// (fresh server — _code_history is in-memory) keeps the placeholder, which
+// already states the end state instead of a "Loading…" that never resolves.
+async function loadCodeHistory(){
+  try{
+    var r=await fetch('/api/code/web/history');
+    var j=await r.json();
+    var msgs=(j&&j.messages)||[];
+    if(!msgs.length){setStatus('ready — no code history yet');return}
+    for(var i=0;i<msgs.length;i++){
+      var m=msgs[i];
+      appendMsg(m.text||'',m.role==='user'?'user':'assistant');
+    }
+    setStatus('loaded '+msgs.length+' code messages');
   }catch(e){}
 }
 

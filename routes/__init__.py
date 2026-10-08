@@ -17,6 +17,7 @@ from routes import (
     memory_api,
     sessions_api,
     code,
+    files,
     skills_api,
     settings_api,
 )
@@ -32,6 +33,7 @@ BLUEPRINTS = (
     memory_api.bp,
     sessions_api.bp,
     code.bp,
+    files.bp,
     skills_api.bp,
     settings_api.bp,
 )

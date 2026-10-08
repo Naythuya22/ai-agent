@@ -5,11 +5,45 @@ import os
 from pathlib import Path
 
 import config
+from tools._fs_guard import create_backup, is_safe_path
 
 # ── read budget context (set by modes.agent before each read_file) ──
 # Signature of read_file() must NOT change: it is exposed as a tool
 # schema, and the model would try to fill model/base_url itself.
 _read_ctx = {"model": "", "base_url": "", "used_tokens": 0}
+
+
+# ── path jail (P0) ──────────────────────────────────────────────
+# Every path the file tools touch goes through _guard() first: a traversal
+# segment is refused outright, and with a project selected the path must
+# resolve inside that project. The check runs before stat/open/write, so an
+# escape attempt never reaches the call it is aiming at.
+
+def _jail_root() -> str:
+    """Active project folder, or '' when no project is selected.
+
+    Read fresh on every call: the Code-mode dropdown can change the
+    selection between two tool calls, and the store is a small JSON file.
+    """
+    try:
+        from core import projects as projects_store
+        proj = projects_store.get_active()
+    except Exception:
+        return ""
+    if not isinstance(proj, dict):
+        return ""
+    return str(proj.get("path") or "")
+
+
+def _guard(raw_path: str) -> str:
+    """Error string for a path argument; '' means the path is allowed."""
+    p = Path(raw_path).expanduser()
+    if ".." in p.parts:
+        return f"Error: unsafe path (path traversal): {raw_path}"
+    root = _jail_root()
+    if root and not is_safe_path(str(p), root):
+        return f"Error: unsafe path (outside project root): {raw_path}"
+    return ""
 
 
 def set_read_context(*, model: str = "", base_url: str = "",
@@ -66,6 +100,9 @@ def list_files(directory: str) -> str:
         directory: The directory path to list.
     """
     try:
+        blocked = _guard(directory)
+        if blocked:
+            return blocked
         p = Path(directory).expanduser()
         if not p.exists():
             return f"Error: directory not found: {directory}"
@@ -99,6 +136,9 @@ def read_file(path: str, start_line: int = 1, end_line: int = 200) -> str:
     MAX_CHARS = _max_chars_for_read()
     MAX_LINES = 500
     try:
+        blocked = _guard(path)
+        if blocked:
+            return blocked
         p = Path(path).expanduser()
         if not p.exists():
             return f"Error: file not found: {path}"
@@ -159,15 +199,26 @@ def read_file(path: str, start_line: int = 1, end_line: int = 200) -> str:
 def write_file(path: str, content: str) -> str:
     """Write text content to a file.
 
+    Overwriting an existing file takes a backup first (tools/_fs_guard.py);
+    the backup path comes back in the reply so the model — and the user —
+    can point at it when an edit needs undoing. A backup that cannot be
+    written stops the overwrite instead of passing silently.
+
     Args:
         path: Path to the file to write.
         content: Text content to write.
     """
     try:
+        blocked = _guard(path)
+        if blocked:
+            return blocked
         p = Path(path).expanduser()
+        note = ""
+        if p.is_file():
+            note = "\nBackup saved at: " + create_backup(str(p))
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(content, encoding="utf-8")
-        return f"Wrote {len(content)} chars to {path}"
+        return f"Wrote {len(content)} chars to {path}" + note
     except PermissionError:
         return f"Error: permission denied: {path}"
     except Exception as e:

@@ -55,7 +55,18 @@ def _retarget_config_module(home: Path) -> None:
     pointing at the first temp home. The same is true of DATA_DIR /
     AGENT_CONFIG_FILE, which are *not* HOME-derived — they need the explicit
     re-point here.
+
+    core.projects has the same shape of bug: PROJECTS_FILE is bound to
+    Path.home() at import, so the *previous* temp home's store — with
+    whatever "active project" a suite left behind — would keep answering
+    for every later suite. That leaks into the file tools' path jail
+    (tools/file.py reads the active project on every call), so it is
+    re-pointed here too.
     """
+    proj = sys.modules.get("core.projects")
+    if proj is not None:
+        proj.PROJECTS_FILE = home / ".ai-agent" / "code_projects.json"
+
     cfg = sys.modules.get("config")
     if cfg is None:
         return
