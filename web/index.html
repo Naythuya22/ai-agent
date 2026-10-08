@@ -312,6 +312,7 @@ footer{position:relative;padding:12px 12px 16px;background:var(--bg);border-top:
 <option value="">(no project)</option>
 </select>
 <button id="proj-add" type="button" style="background:var(--accent);color:var(--accent-on);border:0;border-radius:4px;padding:4px 10px;font-size:12px;cursor:pointer;font-family:inherit">+ Add</button>
+<button id="proj-term" title="Open terminal">🖥️ Terminal</button>
 </div>
 <div id="proj-modal" style="display:none;position:fixed;inset:0;background:var(--overlay);z-index:100;align-items:center;justify-content:center;padding:16px">
 <div style="background:var(--bg-5);border:1px solid var(--border);border-radius:8px;max-width:480px;width:100%;max-height:80vh;display:flex;flex-direction:column;overflow:hidden">
@@ -577,13 +578,14 @@ async function openCodeFrame(){
   try{
     var r=await fetch('/api/code/web/start',{method:'POST'});
     var j=await r.json();
-    if(!r.ok||j.error){setStatus('code error: '+(j.error||('HTTP '+r.status)));return}
+    if(!r.ok||j.error){
+      setStatus('terminal error: '+(j.error||('HTTP '+r.status))+(j.hint?' — '+j.hint:''));
+      return
+    }
     window.open(j.url,'_blank');
-    setStatus('opencode opened in new tab: '+j.url);
-    state.mode='chat';
-    document.querySelectorAll('.mode-btn').forEach(function(b){b.classList.toggle('active',b.dataset.mode==='chat')});
-    try{syncAgentTools()}catch(e){}
-  }catch(e){setStatus('code start failed: '+e.message)}
+    if(j.status==='already_running')setStatus('terminal already running');
+    else setStatus('opencode opened in new tab: '+j.url);
+  }catch(e){setStatus('terminal start failed: '+e.message+' — check the server, or pkg install ttyd')}
 }
 function closeCodeFrame(){
   var fr=document.getElementById('code-frame');
@@ -691,6 +693,7 @@ function activityFor(tool,args){
 function killTyping(){if(typingEl){typingEl.remove();typingEl=null}}
 function setBusy(b){state.busy=b;sendBtn.disabled=b&&!state.abort;inputEl.disabled=b;if(b&&state.abort){sendBtn.textContent='\u2715';sendBtn.classList.add('stop')}else{sendBtn.textContent='\u27a4';sendBtn.classList.remove('stop')}if(!b)clearActivity()}
 document.querySelectorAll('.mode-btn').forEach(function(btn){btn.addEventListener('click',function(){try{state.mode=btn.dataset.mode;document.querySelectorAll('.mode-btn').forEach(function(b){b.classList.toggle('active',b.dataset.mode===state.mode)});setStatus('mode: '+state.mode);try{updateModelInfo()}catch(_mi){}try{syncAgentTools()}catch(_e){}chatEl.innerHTML='';var w=document.createElement('div');w.className='welcome';w.innerHTML=state.mode==='code'?'<h1>ai-agent</h1><p>Code mode ready</p><p class="hint">Pick a project, open a file from ☰ → 📁 Project Files, or type a task.</p>':'<h1>ai-agent</h1><p>Loading '+state.mode+'...</p>';chatEl.appendChild(w);if(state.mode==='code'){try{closeCodeFrame()}catch(e){};var _pb=document.getElementById('proj-bar');if(_pb)_pb.style.display='flex';try{loadProjects()}catch(e){};loadCodeHistory();setStatus('Code mode — pick project, then type task')}else{try{closeCodeFrame()}catch(e){};var _pb2=document.getElementById('proj-bar');if(_pb2)_pb2.style.display='none';loadHistory();loadSessions()}try{refreshCtx()}catch(_cx){}try{updateCtxButtons()}catch(_cb){}}catch(err){setStatus('mode err: '+err.message);console.error(err)}})});
+document.getElementById('proj-term').addEventListener('click',function(){openCodeFrame()});
 menuBtn.addEventListener('click',function(){drawer.classList.add('open');loadSessions();updateCtxButtons();try{loadFileTree()}catch(e){}});
 drawer.addEventListener('click',function(e){if(e.target===drawer)drawer.classList.remove('open')});
 document.querySelectorAll('.ctx-btn').forEach(function(btn){btn.addEventListener('click',function(){setContextSize(parseInt(btn.dataset.size,10))})});

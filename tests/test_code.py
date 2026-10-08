@@ -1478,5 +1478,27 @@ class TestWebDiffViewer(unittest.TestCase):
                       "for parity with openTextViewer")
 
 
+class TestTerminalButton(unittest.TestCase):
+    """P1-B1: #proj-term opens ttyd in a new tab, without leaving Code mode."""
+
+    def test_terminal_button_is_wired_and_keeps_code_mode(self):
+        here = Path(__file__).resolve().parent.parent
+        html = (here / "web" / "index.html").read_text(
+            encoding="utf-8")
+
+        start = html.find("function openCodeFrame")
+        self.assertGreater(start, -1, "openCodeFrame missing")
+
+        end = html.find("function ", start + len("function openCodeFrame"))
+        self.assertGreater(end, start, "openCodeFrame body not bounded")
+        body = html[start:end]
+        self.assertNotIn(
+            "state.mode='chat'", body,
+            "openCodeFrame must not flip the UI out of Code mode")
+
+        self.assertIn('id="proj-term"', html,
+                      "#proj-term (Terminal button) missing from #proj-bar")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
