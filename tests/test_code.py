@@ -385,6 +385,7 @@ class TestCodeEndpoints(unittest.TestCase):
         self.assertTrue(body["ok"], body)
         self.assertEqual(seen["cmd"][:6],
                          ["ttyd", "-W", "-i", "127.0.0.1", "-p", "8081"])
+        self.assertEqual(seen["cmd"][6:8], ["--base-path", "/terminal"])
         self.assertIn(str(oc.BINARY), seen["cmd"])
         self.assertEqual(seen["cmd"][-1], str(work))
         self.assertEqual(seen["cwd"], str(work))

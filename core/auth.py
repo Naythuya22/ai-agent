@@ -32,8 +32,13 @@ EXEMPT_EXACT = {
     "/", "/index.html", "/manifest.json", "/sw.js",
     "/api/health", "/api/thermal", "/api/sw-version",
     "/api/net", "/api/mode",
+    # Bare path: Flask 308s it to /terminal/, and a redirect is not something
+    # a client can attach a token to either.
+    "/terminal",
 }
-EXEMPT_PREFIX = ("/static/", "/icons/")
+# /terminal/* is the ttyd HTTP proxy: an iframe cannot send X-Agent-Token,
+# and routes/terminal.py strips the header before it reaches ttyd.
+EXEMPT_PREFIX = ("/static/", "/icons/", "/terminal/")
 
 UNAUTH_BODY = {
     "error": "unauthorized",

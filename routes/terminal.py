@@ -32,6 +32,13 @@ def _validate_path(path: str):
     return None
 
 
+def _validate_query():
+    """Refuse an oversized query instead of silently truncating it."""
+    if len(request.query_string) > _MAX_QUERY:
+        return "query too long"
+    return None
+
+
 def _upstream_url(path: str) -> str:
     qs = request.query_string.decode("ascii", "replace")[:_MAX_QUERY]
     url = f"{TTYD_BASE}{_BASE_PATH}/" + path
@@ -58,6 +65,10 @@ def terminal_proxy(path):
     err = _validate_path(path)
     if err:
         return jsonify({"error": err}), 400
+
+    too_long = _validate_query()
+    if too_long:
+        return jsonify({"error": too_long}), 414
 
     method = request.method.upper()
     if method not in _ALLOWED_METHODS:
