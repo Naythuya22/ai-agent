@@ -247,6 +247,23 @@ class TestWebSocketRelay(unittest.TestCase):
     def test_ws_route_registered(self):
         self.assertIn("/terminal/ws", str(app.url_map))
 
+    def test_ws_route_advertises_tty_subprotocol(self):
+        """Flask must echo Sec-WebSocket-Protocol: tty to the browser."""
+        here = Path(__file__).resolve().parent.parent
+        src = (here / "routes" / "terminal.py").read_text(encoding="utf-8")
+        # Find the route registration line and assert subprotocols= is
+        # on the same statement.
+        i = src.find('_sock.route("/terminal/ws"')
+        self.assertGreater(i, -1, "route registration missing")
+        line = src[i:src.find("\n", i)]
+        self.assertIn('subprotocols=["tty"]', line,
+                      "Flask WS route must advertise the tty subprotocol")
+        # ...and the kwarg must actually reach simple_websocket.Server,
+        # the object that builds the handshake the browser sees.
+        self.assertEqual(app.config.get("SOCK_SERVER_OPTIONS", {}).get(
+            "subprotocols"), ["tty"],
+            "flask-sock never passes subprotocols to Server")
+
     def test_ws_closes_on_ttyd_down(self):
         ws = _FakeBrowserWS()
         with patch("simple_websocket.Client", side_effect=RuntimeError("down")):

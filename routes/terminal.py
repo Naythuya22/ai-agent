@@ -13,7 +13,33 @@ from flask_sock import Sock
 import simple_websocket
 
 bp = Blueprint("terminal", __name__)
-_sock = Sock()
+
+
+class _TtySock(Sock):
+    """flask_sock that can advertise a WebSocket subprotocol to the browser.
+
+    flask-sock 0.7.0 forwards route() kwargs to werkzeug.Rule, which has no
+    `subprotocols` option (TypeError at import time). The handshake is built
+    by simple_websocket.Server instead, which reads `SOCK_SERVER_OPTIONS`,
+    so pop the kwarg here and pass it along when the app binds.
+    """
+
+    def route(self, path, bp=None, **options):
+        subprotocols = options.pop("subprotocols", None)
+        if subprotocols is not None:
+            self.server_options = {"subprotocols": subprotocols}
+        return super().route(path, bp=bp, **options)
+
+    def init_app(self, app):
+        opts = dict(app.config.get("SOCK_SERVER_OPTIONS") or {})
+        for key, value in getattr(self, "server_options", {}).items():
+            opts.setdefault(key, value)
+        if opts:
+            app.config["SOCK_SERVER_OPTIONS"] = opts
+        super().init_app(app)
+
+
+_sock = _TtySock()
 
 TTYD_BASE = "http://127.0.0.1:8081"
 _BASE_PATH = "/terminal"
@@ -195,7 +221,7 @@ def terminal_ws(ws):
 
 # flask_sock's decorator returns None, so register explicitly: the module
 # must keep `terminal_ws` as the raw handler (tests call it directly).
-_sock.route("/terminal/ws")(terminal_ws)
+_sock.route("/terminal/ws", subprotocols=["tty"])(terminal_ws)
 
 
 def init_ws(app):

@@ -1551,6 +1551,18 @@ class TestTerminalEmbeddedFrame(unittest.TestCase):
             "/terminal/ must be excluded inside the fetch handler, "
             "not somewhere else in sw.js")
 
+    def test_terminal_floating_close_button(self):
+        here = Path(__file__).resolve().parent.parent
+        html = (here / "web" / "index.html").read_text(encoding="utf-8")
+        self.assertIn('id="term-x"', html)
+        self.assertGreaterEqual(
+            html.count("getElementById('term-x')"), 3,
+            "term-x must be wired in open + close + listener")
+        self.assertIn("flex-wrap:wrap", html,
+                      "#proj-bar must allow wrapping on mobile")
+        self.assertIn(".pb-label", html,
+                      "mobile label-hiding class missing")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
