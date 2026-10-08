@@ -1,16 +1,19 @@
-"""Same-origin HTTP proxy for ttyd (P1-B2B-1).
+"""Same-origin HTTP proxy for ttyd (P1-B2B-1) + WebSocket relay (P1-B2B-3a).
 
-Backend-only. WebSocket relay is P1-B2B-2, a separate task.
-ttyd runs at 127.0.0.1:8081 with --base-path /terminal.
+Backend-only. ttyd runs at 127.0.0.1:8081 with --base-path /terminal.
 """
 from __future__ import annotations
 
+import threading
 import urllib.error
 import urllib.request
 
 from flask import Blueprint, Response, jsonify, request, stream_with_context
+from flask_sock import Sock
+import simple_websocket
 
 bp = Blueprint("terminal", __name__)
+_sock = Sock()
 
 TTYD_BASE = "http://127.0.0.1:8081"
 _BASE_PATH = "/terminal"
@@ -116,3 +119,81 @@ def terminal_proxy(path):
         status=upstream.status,
         headers=headers,
     )
+
+
+TTYD_WS = "ws://127.0.0.1:8081/terminal/ws"
+
+
+def terminal_ws(ws):
+    """Relay browser <-> ttyd WebSocket.
+
+    `ws` is a simple_websocket.Server (flask_sock's wrapper).
+    Two daemon threads pipe bytes; either closing stops both.
+    """
+    qs = request.query_string.decode("ascii", "replace")
+    url = TTYD_WS + (("?" + qs) if qs else "")
+    try:
+        upstream = simple_websocket.Client(url, headers={
+            "Origin": "http://127.0.0.1:8080",
+        })
+    except Exception:
+        try:
+            ws.close(1011, "ttyd unavailable")
+        except Exception:
+            pass
+        return
+
+    stop = threading.Event()
+
+    def _recv(server):
+        try:
+            return server.receive(timeout=0.5)
+        except Exception:
+            return None
+
+    def browser_to_upstream():
+        try:
+            while not stop.is_set():
+                data = _recv(ws)
+                if data is None:
+                    continue
+                if isinstance(data, str):
+                    data = data.encode("utf-8")
+                upstream.send(data)
+        except Exception:
+            pass
+        finally:
+            stop.set()
+
+    def upstream_to_browser():
+        try:
+            while not stop.is_set():
+                data = _recv(upstream)
+                if data is None:
+                    continue
+                ws.send(data)
+        except Exception:
+            pass
+        finally:
+            stop.set()
+
+    t1 = threading.Thread(target=browser_to_upstream, daemon=True)
+    t2 = threading.Thread(target=upstream_to_browser, daemon=True)
+    t1.start(); t2.start()
+    t1.join(); t2.join()
+
+    for s in (upstream, ws):
+        try:
+            s.close()
+        except Exception:
+            pass
+
+
+# flask_sock's decorator returns None, so register explicitly: the module
+# must keep `terminal_ws` as the raw handler (tests call it directly).
+_sock.route("/terminal/ws")(terminal_ws)
+
+
+def init_ws(app):
+    """Bind the Sock instance to the app. Call once from server.py."""
+    _sock.init_app(app)

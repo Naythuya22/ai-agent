@@ -70,6 +70,12 @@ def create_app() -> Flask:
 
 app = create_app()
 
+# flask_sock keeps a single Sock instance per app: bind it here, before the
+# first request, so /terminal/ws lands in app.url_map.
+from routes.terminal import init_ws  # noqa: E402
+
+init_ws(app)
+
 
 def main() -> None:
     import argparse

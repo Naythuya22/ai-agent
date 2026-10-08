@@ -46,6 +46,10 @@ self.addEventListener('fetch', (e) => {
 
   const path = url.pathname;
 
+  // /terminal/* is a live reverse-proxy for ttyd. Never cache,
+  // never serve from cache — let the browser handle it directly.
+  if (path.startsWith('/terminal/')) return;
+
   // ── API + OpenAI bridge → network, never cache ──
   if (path.startsWith('/api/') || path.startsWith('/v1/')) {
     e.respondWith(
