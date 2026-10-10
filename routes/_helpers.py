@@ -339,7 +339,8 @@ def extract_and_apply(user_msg: str) -> list:
             ex = extract_profile(user_msg)
             prof = ex.get("profile", {})
             for k, v in prof.items():
-                if memory.set_profile(k, v):
+                ok, _reason = memory.set_profile(k, v)
+                if ok:
                     out.append(f"{k}={v}")
         except Exception as e:
             # Profile extraction is best-effort, but a crash here means the

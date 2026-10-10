@@ -261,15 +261,38 @@ class Memory:
         return n
 
     # ---------- Profile ----------
+    #
+    # Profile fields land in the system prompt (get_profile_prompt), so the
+    # same discipline as facts applies: only known keys, bounded length, no
+    # negative self-statements. The extractor (memory_extract.py) already
+    # emits exactly PROFILE_KEYS; this blocks the free-text paths (/set,
+    # /api/profile) from injecting anything else.
 
-    def set_profile(self, key: str, value: str) -> bool:
+    PROFILE_KEYS = ("user_name", "ai_name", "relationship", "tone", "language")
+    MAX_PROFILE_VALUE_CHARS = 100
+
+    def set_profile(self, key: str, value: str) -> tuple[bool, str]:
+        """Set one profile field. Returns ``(ok, reason)``.
+
+        ``reason`` is "" on success; otherwise one of: ``empty``,
+        ``unknown key``, ``too long``, ``negative self``. Callers that only
+        need success/failure use the bool half.
+        """
         key = (key or "").strip()
         value = (value or "").strip()
         if not key or not value:
-            return False
+            return False, "empty"
+        if key not in self.PROFILE_KEYS:
+            return False, "unknown key"
+        if len(value) > self.MAX_PROFILE_VALUE_CHARS:
+            return False, "too long"
+        if _has_negative_self(value):
+            log.debug("profile rejected (negative self): %s=%s",
+                      key, value[:60])
+            return False, "negative self"
         self.data.setdefault("profile", {})[key] = value
         self.save()
-        return True
+        return True, ""
 
     def unset_profile(self, key: str) -> bool:
         key = (key or "").strip()

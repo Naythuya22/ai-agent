@@ -156,3 +156,51 @@ class MemoryToolTests(_MemBase):
         fn = M.memory_forget("nope")
         self.assertIsInstance(fn, str)
         self.assertEqual("no matches", fn)
+
+
+class ProfileValidationTests(_MemBase):
+    """set_profile() must only accept known keys, bounded values, and
+    never a negative self-statement — profile fields land in the system
+    prompt."""
+
+    def test_known_keys_are_accepted(self):
+        for k in ("user_name", "ai_name", "relationship", "tone", "language"):
+            ok, reason = self.mem.set_profile(k, "value-%s" % k)
+            self.assertTrue(ok, msg="%s: %s" % (k, reason))
+            self.assertEqual(reason, "")
+        prof = self.mem.get_profile()
+        self.assertEqual(len(prof), 5)
+
+    def test_unknown_key_is_rejected(self):
+        ok, reason = self.mem.set_profile("evil_key", "anything")
+        self.assertFalse(ok)
+        self.assertEqual(reason, "unknown key")
+        self.assertNotIn("evil_key", self.mem.get_profile())
+
+    def test_empty_key_or_value_is_rejected(self):
+        self.assertEqual(self.mem.set_profile("", "x"), (False, "empty"))
+        self.assertEqual(self.mem.set_profile("tone", ""), (False, "empty"))
+        self.assertEqual(self.mem.set_profile("   ", "x"), (False, "empty"))
+        self.assertEqual(self.mem.set_profile("tone", "   "), (False, "empty"))
+
+    def test_too_long_value_is_rejected(self):
+        ok, reason = self.mem.set_profile("tone", "x" * 101)
+        self.assertFalse(ok)
+        self.assertEqual(reason, "too long")
+        ok2, reason2 = self.mem.set_profile("tone", "x" * 100)
+        self.assertTrue(ok2, msg=reason2)
+
+    def test_negative_self_value_is_rejected(self):
+        ok, reason = self.mem.set_profile("tone", "ညီ မလုပ်နိုင်ပါ")
+        self.assertFalse(ok)
+        self.assertEqual(reason, "negative self")
+        self.assertNotIn("tone", self.mem.get_profile())
+
+    def test_set_profile_returns_ok_and_reason(self):
+        ok, reason = self.mem.set_profile("user_name", "ကိုကြီး")
+        self.assertTrue(ok)
+        self.assertEqual(reason, "")
+        # re-set same key overwrites, does not duplicate
+        ok2, reason2 = self.mem.set_profile("user_name", "ကိုကြီး အသစ်")
+        self.assertTrue(ok2, msg=reason2)
+        self.assertEqual(self.mem.get_profile()["user_name"], "ကိုကြီး အသစ်")

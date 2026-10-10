@@ -38,6 +38,7 @@ def api_profile_set():
     if not key or not val:
         return jsonify({"error": "key and value required"}), 400
     memory = get_memory()
-    if memory.set_profile(key, val):
+    ok, reason = memory.set_profile(key, val)
+    if ok:
         return jsonify({"ok": True, "profile": memory.get_profile()})
-    return jsonify({"error": "invalid key/value"}), 400
+    return jsonify({"ok": False, "reason": reason}), 400

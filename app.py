@@ -184,10 +184,11 @@ class App:
             print(f"{C_DIM}Fields:{C_RESET} user_name ai_name relationship tone language")
             return
         key, value = parts
-        if self.memory.set_profile(key, value):
+        ok, reason = self.memory.set_profile(key, value)
+        if ok:
             print(f"{C_GREEN}Set:{C_RESET} {key} = {value}")
         else:
-            print(f"{C_DIM}(invalid key/value){C_RESET}")
+            print(f"{C_DIM}({reason}){C_RESET}")
 
     def _cmd_unset(self, arg: str) -> None:
         key = arg.strip()
@@ -790,7 +791,8 @@ class App:
                 if prof:
                     applied = []
                     for k, v in prof.items():
-                        if self.memory.set_profile(k, v):
+                        ok, _reason = self.memory.set_profile(k, v)
+                        if ok:
                             applied.append(f"{k}={v}")
                     if applied:
                         print(f"{C_DIM}(remembered: {', '.join(applied)}){C_RESET}")
