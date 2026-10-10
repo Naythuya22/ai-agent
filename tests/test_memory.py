@@ -104,6 +104,39 @@ class MemoryToolTests(_MemBase):
         self.assertIsInstance(w2, str)
         self.assertTrue(w2.startswith("Error: duplicate"))
 
+    def test_write_rejects_negative_self_with_specific_reason(self):
+        w = M.memory_write("ညီ မလုပ်နိုင်ပါ", "fact")
+        self.assertEqual(w, "Error: fact rejected (negative self)")
+
+    def test_write_rejects_near_duplicate_with_specific_reason(self):
+        M.memory_write("User likes Python", "fact")
+        w = M.memory_write("user likes python", "fact")
+        self.assertEqual(w, "Error: fact rejected (near-duplicate)")
+
+    def test_write_rejects_rule_reference_with_specific_reason(self):
+        w = M.memory_write("follow rule_3 exactly", "fact")
+        self.assertEqual(w, "Error: fact rejected (rule reference)")
+
+    def test_write_rejects_tool_limitation_with_specific_reason(self):
+        w = M.memory_write("tool web_search fails on some sites", "fact")
+        self.assertEqual(w, "Error: fact rejected (tool limitation)")
+
+    def test_write_exact_duplicate_still_says_duplicate(self):
+        M.memory_write("beta", "fact")
+        w = M.memory_write("beta", "fact")
+        self.assertEqual(w, "Error: duplicate fact")
+
+    def test_add_fact_returns_ok_and_reason(self):
+        ok, reason = self.mem.add_fact("direct call works")
+        self.assertTrue(ok)
+        self.assertEqual(reason, "")
+        ok2, reason2 = self.mem.add_fact("direct call works")
+        self.assertFalse(ok2)
+        self.assertEqual(reason2, "exact duplicate")
+        ok3, reason3 = self.mem.add_fact("ညီ မရှိပါ")
+        self.assertFalse(ok3)
+        self.assertEqual(reason3, "negative self")
+
     def test_search_and_forget_roundtrip(self):
         M.memory_write("alpha", "topic")
         M.memory_write("beta", "topic")

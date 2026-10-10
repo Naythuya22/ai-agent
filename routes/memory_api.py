@@ -19,8 +19,10 @@ def api_remember():
     text = (json_body().get("text") or "").strip()
     if not text:
         return jsonify({"error": "text required"}), 400
-    ok = get_memory().add_fact(text, source="web")
-    return jsonify({"ok": ok})
+    ok, reason = get_memory().add_fact(text, source="web")
+    if ok:
+        return jsonify({"ok": True})
+    return jsonify({"ok": False, "reason": reason})
 
 
 @bp.route("/api/profile", methods=["GET"])

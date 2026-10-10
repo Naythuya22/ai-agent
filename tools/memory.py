@@ -4,7 +4,11 @@ from __future__ import annotations
 from datetime import datetime
 from pathlib import Path
 
-from memory import Memory, MAX_FACT_CHARS
+from memory import (
+    Memory, MAX_FACT_CHARS,
+    _has_negative_self, _is_rule_reference, _is_tool_limitation,
+    _normalize_for_dup,
+)
 
 
 def _iso_now() -> str:
@@ -87,9 +91,10 @@ def memory_write(fact: str, category: str = "fact") -> str:
             topic     -> a recent subject of work
             project   -> a project path the user is working on
 
-    Refuses: empty text, > 500 chars, unknown category, exact
-    duplicates. Returns what was written (or why it was rejected)
-    — never raises on a user-reachable path.
+    Refuses: empty text, > 500 chars, unknown category, duplicates
+    (exact or near), negative self-statements, rule references, tool
+    limitations. Returns what was written — or why it was rejected,
+    with the specific reason. Never raises on a user-reachable path.
     """
     try:
         text = (fact or "").strip()
@@ -104,12 +109,26 @@ def memory_write(fact: str, category: str = "fact") -> str:
         if isinstance(m, str):
             return m
         if cat == "fact":
-            if not m.add_fact(text, source="manual"):
-                return "Error: duplicate fact"
+            ok, reason = m.add_fact(text, source="manual")
+            if not ok:
+                if reason == "exact duplicate":
+                    return "Error: duplicate fact"
+                return f"Error: fact rejected ({reason})"
             return f"Wrote {cat}: {text}"
         elif cat == "identity":
+            if _has_negative_self(text):
+                return "Error: identity rejected (negative self)"
+            if _is_rule_reference(text):
+                return "Error: identity rejected (rule reference)"
             identity = m.data.setdefault("identity", {})
+            norm = _normalize_for_dup(text)
+            for k, v in identity.items():
+                if _normalize_for_dup(v) == norm:
+                    return f"Error: identity duplicate of {k}"
             keys = list(identity.keys())
+            rule_keys = [k for k in keys if k.startswith("rule_")]
+            if len(rule_keys) >= 20:
+                return "Error: identity rules at capacity (20)"
             n = 0
             while f"rule_{n}" in keys:
                 n += 1

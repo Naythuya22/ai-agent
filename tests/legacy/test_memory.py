@@ -36,9 +36,9 @@ def main() -> int:
 
         # ---- Test 2: add_fact + save ----
         print("\n[Test 2] add_fact + save")
-        ok = m.add_fact("User is learning Python", source="test")
+        ok, reason = m.add_fact("User is learning Python", source="test")
         if not ok:
-            print("  ❌ FAIL: add_fact returned False")
+            print(f"  ❌ FAIL: add_fact returned ({ok}, {reason!r})")
             return 2
         if not test_path.exists():
             print("  ❌ FAIL: file not created")
@@ -55,9 +55,12 @@ def main() -> int:
 
         # ---- Test 4: Dedup ----
         print("\n[Test 4] Dedup facts")
-        ok2 = m2.add_fact("User is learning Python")
+        ok2, reason2 = m2.add_fact("User is learning Python")
         if ok2:
             print("  ❌ FAIL: duplicate accepted")
+            return 4
+        if reason2 != "exact duplicate":
+            print(f"  ❌ FAIL: expected exact duplicate, got {reason2!r}")
             return 4
         print("  ✅ OK duplicate rejected")
 

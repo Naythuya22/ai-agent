@@ -149,10 +149,11 @@ class App:
         if not text:
             print(f"{C_RED}Usage:{C_RESET} /remember <text>")
             return
-        if self.memory.add_fact(text, source=self.mode_name):
+        ok, reason = self.memory.add_fact(text, source=self.mode_name)
+        if ok:
             print(f"{C_GREEN}Remembered:{C_RESET} {text}")
         else:
-            print(f"{C_DIM}(duplicate or invalid){C_RESET}")
+            print(f"{C_DIM}({reason}){C_RESET}")
 
     def _cmd_memory(self) -> None:
         print(self.memory.show())

@@ -11,8 +11,20 @@ _LOG_TAIL_BYTES = 4096
 # Batch 4.2e: refreshed after 4.2 shipped parallel_tool_calls.
 # self_audit / capability_list are the tool that reports this list,
 # so they are NOT gaps.
-_KNOWN_GAPS = ("vector_memory", "cost_tracking",
-               "eval_harness", "self_modification", "multi_modal_input")
+# 2026-10-10: multi_modal_input was half-wrong — local vision is wired
+# (core/llm.py + routes/chat.py image upload). Split into cloud_vision_input
+# (image turns stay local; per-provider payloads not wired) and audio_input
+# (no route, no STT). cost_tracking -> cost_tracking_cumulative: the rate
+# table (cost_per_1k) and per-turn usage exist; a running session total does
+# not.
+_KNOWN_GAPS = (
+    "vector_memory",
+    "cost_tracking_cumulative",  # rate exists, cumulative missing
+    "eval_harness",              # code tests exist, AI eval does not
+    "self_modification",
+    "cloud_vision_input",        # local yes, cloud no
+    "audio_input",               # local + cloud no
+)
 _BASELINE_TOOLS = (
     "list_files", "read_file", "write_file",
     "run_command", "run_python",
@@ -154,8 +166,9 @@ def self_audit() -> str:
 
     Reports: tools (count + names), modes, providers, context window,
     memory stats, recent log warnings/errors, and the known gaps
-    (parallel_tool_calls, vector_memory, cost_tracking, eval_harness,
-    self_modification, multi_modal_input). Missing sources become '?'.
+    (vector_memory, cost_tracking_cumulative, eval_harness,
+    self_modification, cloud_vision_input, audio_input). Missing sources
+    become '?'.
     """
     s = _collect()
     mem, tools, ctx = s["memory"], s["tools"], s["context"]
