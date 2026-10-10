@@ -4,6 +4,7 @@ from __future__ import annotations
 from datetime import datetime
 from pathlib import Path
 
+from core.tfidf import BM25Lite
 from memory import (
     Memory, MAX_FACT_CHARS,
     _has_negative_self, _is_rule_reference, _is_tool_limitation,
@@ -152,8 +153,8 @@ def memory_write(fact: str, category: str = "fact") -> str:
 
 
 def memory_search(query: str) -> str:
-    """Case-insensitive substring search across every memory
-    field: identity, facts, topics, projects.
+    """Search memory: exact substring matches first, then BM25-ranked
+    fuzzy matches (Burmese n-gram tokens).
 
     Returns matching entries with their category, or 'no matches'.
     Use before writing to check whether a fact is already known.
@@ -166,23 +167,60 @@ def memory_search(query: str) -> str:
         if isinstance(m, str):
             return m
         d = m.data
-        hits = []
+        hits: list[str] = []
+        seen: set[str] = set()
+
+        def _add(label: str, text: str) -> None:
+            line = f"{label}: {text}"
+            if line not in seen:
+                seen.add(line)
+                hits.append(line)
+
+        # 1) exact substring (kept — guaranteed correct, case-insensitive)
         p = d.get("profile") or {}
         for v in p.values():
             if v and q in str(v).lower():
-                hits.append(f"profile: {v}")
+                _add("profile", str(v))
         for k, v in (d.get("identity") or {}).items():
             if q in k.lower() or q in str(v).lower():
-                hits.append(f"identity: {k}={v}")
+                _add("identity", f"{k}={v}")
         for f in d.get("facts") or []:
             if q in str(f.get("text", "")).lower():
-                hits.append(f"fact: {f.get('text','')}")
+                _add("fact", str(f.get("text", "")))
         for t in d.get("recent_topics") or []:
             if q in str(t.get("text", "")).lower():
-                hits.append(f"topic: {t.get('text','')}")
+                _add("topic", str(t.get("text", "")))
         for pr in d.get("active_projects") or []:
             if q in str(pr.get("path", "")).lower() or q in str(pr.get("note", "")).lower():
-                hits.append(f"project: {pr.get('path','')} — {pr.get('note','')}")
+                _add("project", f"{pr.get('path','')} — {pr.get('note','')}")
+
+        # 2) BM25 fuzzy pass — Burmese n-gram / Latin word overlap
+        #    (appends ranked hits the substring pass missed)
+        items: list[tuple[str, str, str]] = []  # (id, label, display)
+        table: dict[str, tuple[str, str]] = {}
+        for v in p.values():
+            if v:
+                items.append((f"profile:{v}", "profile", str(v)))
+        for k, v in (d.get("identity") or {}).items():
+            items.append((f"identity:{k}", "identity", f"{k}={v}"))
+        for f in d.get("facts") or []:
+            items.append((f"fact:{f.get('text','')}", "fact", str(f.get("text", ""))))
+        for t in d.get("recent_topics") or []:
+            items.append((f"topic:{t.get('text','')}", "topic", str(t.get("text", ""))))
+        for pr in d.get("active_projects") or []:
+            items.append(
+                (f"project:{pr.get('path','')}", "project",
+                 f"{pr.get('path','')} — {pr.get('note','')}"),
+            )
+        for item_id, lab, disp in items:
+            table[item_id] = (lab, disp)
+        if items:
+            idx = BM25Lite()
+            idx.build([(i, txt) for i, _lab, txt in items])
+            for item_id, _score in idx.search(q, k=10):
+                lab, disp = table[item_id]
+                _add(lab, disp)
+
         if not hits:
             return "no matches"
         out = []

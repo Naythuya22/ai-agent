@@ -204,3 +204,54 @@ class ProfileValidationTests(_MemBase):
         ok2, reason2 = self.mem.set_profile("user_name", "ကိုကြီး အသစ်")
         self.assertTrue(ok2, msg=reason2)
         self.assertEqual(self.mem.get_profile()["user_name"], "ကိုကြီး အသစ်")
+
+
+class BM25SearchTests(_MemBase):
+    """memory_search: exact substring first, BM25 n-gram fuzzy second."""
+
+    def test_exact_substring_still_works(self):
+        M.memory_write("Termux port is 8080", "fact")
+        s = M.memory_search("8080")
+        self.assertIn("Termux port is 8080", s)
+
+    def test_empty_query_is_error(self):
+        self.assertEqual(M.memory_search(""), "Error: empty query")
+        self.assertEqual(M.memory_search("   "), "Error: empty query")
+
+    def test_empty_memory_no_matches(self):
+        self.assertEqual(M.memory_search("anything"), "no matches")
+
+    def test_burmese_fuzzy_overlap(self):
+        # substring "ဘဏ္ဍာရေး" is NOT in the fact, but n-gram
+        # 2-4 overlap (ငွေကြေး-style shared sequences) must hit.
+        M.memory_write("ကိုကြီးက ငွေကြေးစာအုပ် ဖတ်တယ်", "fact")
+        M.memory_write("သိပ္ပံနည်းပညာ သတင်း", "topic")
+        s = M.memory_search("ငွေကြေးစာအုပ်")
+        self.assertIn("ငွေကြေးစာအုပ်", s)  # exact hit
+        s2 = M.memory_search("ငွေကြေး")
+        self.assertIn("ငွေကြေးစာအုပ်", s2)  # fuzzy partial (n-gram)
+        self.assertNotIn("သိပ္ပံနည်းပညာ", s2)
+
+    def test_latin_fuzzy_word_overlap(self):
+        M.memory_write("ai-agent runs on Termux", "fact")
+        # "Termux" exact substring — pass
+        self.assertIn("Termux", M.memory_search("termux"))
+        # shared word overlap without full substring of the fact
+        M.memory_write("Python backend serves port 8080", "fact")
+        s = M.memory_search("backend")
+        self.assertIn("backend", s.lower())
+
+    def test_dedup_between_passes(self):
+        M.memory_write("alpha beta gamma", "topic")
+        s = M.memory_search("alpha beta")
+        # exact pass + BM25 pass must not duplicate the same line
+        lines = [ln for ln in s.splitlines() if "alpha beta gamma" in ln]
+        self.assertEqual(len(lines), 1)
+
+    def test_cap_20_with_more_marker(self):
+        for i in range(25):
+            M.memory_write(f"uniqueitem{i} filler text", "topic")
+        s = M.memory_search("uniqueitem")
+        lines = s.splitlines()
+        self.assertLessEqual(len(lines), 21)
+        self.assertTrue(any("more)" in ln for ln in lines))
