@@ -208,8 +208,13 @@ class TestAgentPrompt(unittest.TestCase):
 
     def test_language_rules_demand_burmese_and_no_mixing(self):
         """Replaces the thank-you-example check: the prompt still pins the
-        language contract that makes the example unnecessary."""
-        self.assertIn("Always reply in Burmese", self.prompt)
+        language contract that makes the example unnecessary.
+
+        2026-10-10: AGENT_SYSTEM was rewritten Burmese-native — the exact
+        English slogan "Always reply in Burmese" became "…reply in
+        Burmese." Assert on the phrases the current prompt actually carries.
+        """
+        self.assertIn("reply in Burmese", self.prompt)
         self.assertIn("Never mix languages within a sentence", self.prompt)
         self.assertIn("English is ONLY for technical terms", self.prompt)
 
@@ -238,8 +243,14 @@ class TestAgentPrompt(unittest.TestCase):
 
     def test_response_style_rules_are_present(self):
         """Replaces the dropped BURMESE CORRECTNESS block: the honesty and
-        concision rules this prompt does carry."""
-        for frag in ("Be concise", "Never make things up", "Skip generic greetings"):
+        concision rules this prompt does carry.
+
+        2026-10-10: "Be concise" was dropped in the Burmese-native rewrite;
+        the Brevity section carries the same contract as "Answer first" +
+        "Two lines beats ten".
+        """
+        for frag in ("Answer first", "Two lines beats ten",
+                     "Never make things up", "Skip generic greetings"):
             self.assertIn(frag, self.prompt)
 
     def test_prompt_names_the_wrong_honorific_variants(self):

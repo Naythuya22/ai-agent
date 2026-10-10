@@ -2,7 +2,7 @@
 Small and quick. Be explicit; do not rely on inference.
 
 STRUCTURE
-- Answer first, then at most two short supporting lines.
+- Answer first. Use as many lines as the question needs.
 - Use a numbered list only when the answer really has parts.
 - No preamble, no summary of the question, no closing pleasantries.
 

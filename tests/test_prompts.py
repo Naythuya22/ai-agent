@@ -146,14 +146,18 @@ class LoaderTests(unittest.TestCase):
         self.assertIs(P.load_prompt("local"), P.load_prompt("local"))
 
     def test_prompts_fit_their_budget(self):
-        budgets = {"cloud_strong": 800, "cloud_fast": 600, "local": 500}
+        # 2026-10-10: budgets re-tuned after the Burmese-native rewrite.
+        # Burmese tokenizes dense (~1.5 chars/token), so the same rules cost
+        # more tokens than the old English prompts. Caps keep ~10% headroom
+        # so minor wording edits do not fail, but runaway growth still does.
+        budgets = {"cloud_strong": 1050, "cloud_fast": 1150, "local": 950}
         for tier, cap in budgets.items():
             n = P.estimate_tokens(P.load_prompt(tier))
             self.assertLessEqual(n, cap, "%s is %d tokens (budget %d)"
                                  % (tier, n, cap))
         base = P.estimate_tokens(
             (P.PROMPTS_DIR / P.BASE_NAME).read_text(encoding="utf-8"))
-        self.assertLessEqual(base, 200, "_base.txt is %d tokens" % base)
+        self.assertLessEqual(base, 700, "_base.txt is %d tokens" % base)
 
 
 class ResolveTests(unittest.TestCase):

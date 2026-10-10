@@ -36,9 +36,11 @@ class FailureVocabTests(unittest.TestCase):
         self.assertTrue(has_burmese, "local prompt missing Burmese")
 
     def test_all_prompts_still_fit_budget(self):
+        # 2026-10-10: same re-tune as test_prompts.py — Burmese-native rewrite
+        # made the composed prompts denser; caps track that with ~10% headroom.
         base = self._read("_base.txt")
-        self.assertLessEqual(P.estimate_tokens(base), 200)
-        caps = {"cloud_strong": 800, "cloud_fast": 600, "local": 500}
+        self.assertLessEqual(P.estimate_tokens(base), 700)
+        caps = {"cloud_strong": 1050, "cloud_fast": 1150, "local": 950}
         for tier, cap in caps.items():
             loaded = P.load_prompt(tier)
             n = P.estimate_tokens(loaded)

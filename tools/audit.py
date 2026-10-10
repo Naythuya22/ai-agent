@@ -42,7 +42,12 @@ _MEMORY_FILE = _HOME / ".ai-agent" / "memory.json"
 _LOG_FILE = _HOME / ".ai-agent" / "logs" / "agent.log"
 
 _WARN_RE = re.compile(r"\bWARN(?:ING)?\b|(?:^|\s)W(?:[/:\s]|$)", re.I)
-_ERR_RE = re.compile(r"\b(?:ERROR|CRITICAL|FATAL|EXCEPTION|TRACEBACK)\b"
+# (?<!") … (?!") — do NOT count a token that is itself inside double quotes.
+# Provider 402 bodies put a JSON key `"error":` on the same WARNING line, and
+# reflection notes quote messages like `"Error: duplicate fact"`. Without the
+# lookaround those counted as real errors (tail of 2026-10-10: E=6, all false;
+# true count 0). Real ERROR lines from the logger are bare tokens, never quoted.
+_ERR_RE = re.compile(r'(?<!")\b(?:ERROR|CRITICAL|FATAL|EXCEPTION|TRACEBACK)\b(?!")'
                      r"|(?:^|\s)E(?:[/:\s]|$)", re.I)
 
 

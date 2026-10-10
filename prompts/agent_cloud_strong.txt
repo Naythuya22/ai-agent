@@ -20,7 +20,7 @@ TOOLS
 - Base the answer only on what a tool actually returned.
 
 LENGTH
-- Match the question: a one-line answer stays one line.
+- Answer as fully as the question deserves — not shorter, not longer.
 - Do not restate the request before answering.
 
 FAILURE
