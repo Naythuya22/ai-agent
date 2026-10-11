@@ -83,9 +83,50 @@ class TestRunner(unittest.TestCase):
         with self.assertRaises(ValueError):
             run([], mode="bogus")
 
-    def test_run_live_notimplemented(self):
-        with self.assertRaises(NotImplementedError):
-            run([_case()], mode="live")
+    def test_run_live_unreachable_server_scores_as_failure(self):
+        # 127.0.0.1:1 refuses fast — wiring check, NO real model.
+        from eval.runner import run_live
+        c = _case(expect={"must_include": ["__never__"]})
+        scores = run_live([c], base_url="http://127.0.0.1:1", timeout=1)
+        self.assertEqual(len(scores), 1)
+        self.assertFalse(scores[0].passed)
+        self.assertTrue(all(not ch.ok for ch in scores[0].checks))
+
+    def test_run_live_parses_reply_and_tools(self):
+        import json as _json
+        from unittest import mock
+        from eval.runner import run_live
+
+        payload = _json.dumps({
+            "reply": "hello world",
+            "tool_trace": [
+                {"type": "call", "tool": "memory_search", "args": {}},
+                {"type": "result", "tool": "memory_search", "result": "ok"},
+            ],
+            "status": "ready",
+        }).encode("utf-8")
+        fake_resp = mock.MagicMock()
+        fake_resp.__enter__.return_value.read.return_value = payload
+        fake_resp.__exit__.return_value = False
+        c = _case(expect={"must_include": ["hello"], "tools": ["memory_search"]})
+        with mock.patch("urllib.request.urlopen", return_value=fake_resp):
+            scores = run_live([c], base_url="http://example.invalid")
+        self.assertTrue(scores[0].passed)
+
+    def test_run_live_agent_error_scores_as_failure(self):
+        import json as _json
+        from unittest import mock
+        from eval.runner import run_live
+
+        payload = _json.dumps({"error": "boom"}).encode("utf-8")
+        fake_resp = mock.MagicMock()
+        fake_resp.__enter__.return_value.read.return_value = payload
+        fake_resp.__exit__.return_value = False
+        c = _case(expect={"must_include": ["__never__"]})
+        with mock.patch("urllib.request.urlopen", return_value=fake_resp):
+            scores = run_live([c], base_url="http://example.invalid")
+        self.assertFalse(scores[0].passed)
+        self.assertTrue(all(not ch.ok for ch in scores[0].checks))
 
     def test_load_cases_filters_category(self):
         with tempfile.TemporaryDirectory() as td:

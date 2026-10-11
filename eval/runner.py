@@ -2,17 +2,22 @@
 
 stub mode (default): each case carries its own scripted answer + tool
 calls under a ``stub`` key — verifies the harness itself, not model
-quality. live mode (Phase 3): plugs the real agent backend.
+quality. live mode: POSTs each case to the real agent server
+(``POST /api/agent``) and scores the reply + tool_trace.
 """
 from __future__ import annotations
 
 import json
 import time
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 from eval.scorer import Score, score_case
 
 CASES_DIR = Path(__file__).resolve().parent / "cases"
+DEFAULT_BASE_URL = "http://127.0.0.1:8080"
+LIVE_TIMEOUT_S = 120
 
 
 def load_cases(path: Path | None = None,
@@ -47,9 +52,48 @@ def run_stub(cases: list[dict]) -> list[Score]:
     return scores
 
 
-def run_live(cases: list[dict]) -> list[Score]:
-    """Placeholder — real-model eval lands in Phase 3."""
-    raise NotImplementedError("live mode arrives in Phase 3")
+def run_live(cases: list[dict], base_url: str = DEFAULT_BASE_URL,
+             token: str | None = None,
+             timeout: float = LIVE_TIMEOUT_S) -> list[Score]:
+    """POST each case to ``base_url/api/agent`` and score the reply.
+
+    Expects the standard agent JSON: ``{reply, tool_trace, ...}`` where
+    tool_trace entries look like ``{type: "call", tool: name, ...}``.
+    Connection or HTTP errors score as a failed case (never raises).
+    """
+    scores: list[Score] = []
+    for case in cases:
+        payload = json.dumps({"message": case.get("input", "")}).encode("utf-8")
+        headers = {"Content-Type": "application/json"}
+        if token:
+            headers["X-Agent-Token"] = token
+        req = urllib.request.Request(
+            f"{base_url.rstrip('/')}/api/agent",
+            data=payload, headers=headers, method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+        except (urllib.error.URLError, OSError, json.JSONDecodeError) as e:
+            scores.append(score_case(
+                case, f"[live-error] {type(e).__name__}: {e}", []))
+            continue
+        if not isinstance(data, dict):
+            scores.append(score_case(
+                case, "[live-error] bad response shape", []))
+            continue
+        if data.get("error"):
+            scores.append(score_case(
+                case, f"[agent-error] {data['error']}", []))
+            continue
+        answer = data.get("reply") or ""
+        tools = [
+            t.get("tool", "")
+            for t in (data.get("tool_trace") or [])
+            if isinstance(t, dict) and t.get("type") == "call"
+        ]
+        scores.append(score_case(case, answer, tools))
+    return scores
 
 
 def run(cases: list[dict], mode: str = "stub") -> list[Score]:

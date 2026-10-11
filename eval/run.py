@@ -2,7 +2,7 @@
 """Eval CLI:  python3 eval/run.py [--category X] [--stub|--live]
 
 stub (default) verifies the harness with scripted answers;
-live calls the real agent backend (Phase 3).
+live POSTs to a running agent server (``POST /api/agent``).
 """
 from __future__ import annotations
 
@@ -13,7 +13,18 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from eval.report import render, summarize
-from eval.runner import load_cases, run, write_results
+from eval.runner import DEFAULT_BASE_URL, load_cases, run, write_results
+
+
+def _live_token(cli_token: str | None) -> str | None:
+    """CLI --token wins; else read the server's auth_token file if present."""
+    if cli_token:
+        return cli_token
+    try:
+        from core.auth import configured_token
+        return configured_token()
+    except Exception:
+        return None
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -21,7 +32,13 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--category", default=None,
                     help="run only this category")
     ap.add_argument("--live", action="store_true",
-                    help="real-model mode (Phase 3)")
+                    help="real-model mode (needs a running agent server)")
+    ap.add_argument("--url", default=DEFAULT_BASE_URL,
+                    help=f"agent base URL (default {DEFAULT_BASE_URL})")
+    ap.add_argument("--token", default=None,
+                    help="X-Agent-Token (default: read auth_token file)")
+    ap.add_argument("--timeout", type=float, default=120,
+                    help="per-case timeout seconds (default 120)")
     ap.add_argument("--no-save", action="store_true",
                     help="skip writing results JSON")
     args = ap.parse_args(argv)
@@ -36,11 +53,13 @@ def main(argv: list[str] | None = None) -> int:
         print("error: no cases matched", file=sys.stderr)
         return 2
 
-    try:
+    if mode == "live":
+        from eval.runner import run_live
+        scores = run_live(cases, base_url=args.url,
+                          token=_live_token(args.token),
+                          timeout=args.timeout)
+    else:
         scores = run(cases, mode=mode)
-    except NotImplementedError as e:
-        print(f"error: {e}", file=sys.stderr)
-        return 3
 
     print(render(scores))
     if not args.no_save:
