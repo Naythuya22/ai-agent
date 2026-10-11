@@ -39,11 +39,16 @@ def main(argv: list[str] | None = None) -> int:
                     help="X-Agent-Token (default: read auth_token file)")
     ap.add_argument("--timeout", type=float, default=120,
                     help="per-case timeout seconds (default 120)")
+    ap.add_argument("--runs", type=int, default=1,
+                    help="runs per case; majority verdict when >1 (default 1)")
     ap.add_argument("--no-save", action="store_true",
                     help="skip writing results JSON")
     args = ap.parse_args(argv)
 
     mode = "live" if args.live else "stub"
+    if args.runs < 1:
+        print("error: --runs must be >= 1", file=sys.stderr)
+        return 2
     try:
         cases = load_cases(category=args.category)
     except (OSError, ValueError) as e:
@@ -53,13 +58,14 @@ def main(argv: list[str] | None = None) -> int:
         print("error: no cases matched", file=sys.stderr)
         return 2
 
+    from eval.runner import run_n
     if mode == "live":
-        from eval.runner import run_live
-        scores = run_live(cases, base_url=args.url,
-                          token=_live_token(args.token),
-                          timeout=args.timeout)
+        scores = run_n(cases, mode=mode, runs=args.runs,
+                       base_url=args.url,
+                       token=_live_token(args.token),
+                       timeout=args.timeout)
     else:
-        scores = run(cases, mode=mode)
+        scores = run_n(cases, mode=mode, runs=args.runs)
 
     print(render(scores))
     if not args.no_save:

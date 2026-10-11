@@ -17,12 +17,16 @@ class Score:
     category: str
     passed: bool
     checks: list = field(default_factory=list)
+    runs_total: int = 1
+    runs_passed: int = 1
 
     def to_dict(self) -> dict:
         return {
             "case_id": self.case_id,
             "category": self.category,
             "passed": self.passed,
+            "runs_total": self.runs_total,
+            "runs_passed": self.runs_passed,
             "checks": [
                 {"name": c.name, "ok": c.ok, "detail": c.detail} for c in self.checks
             ],
@@ -77,3 +81,30 @@ def score_case(case: dict, answer: str, tools_called: list[str]) -> Score:
                             "case has no expect criteria — cannot pass"))
     passed = all(c.ok for c in checks)
     return Score(cid, cat, passed, checks)
+
+
+def aggregate_scores(run_scores: list[Score]) -> Score:
+    """Majority verdict across N runs of the SAME case.
+
+    passed = (runs_passed * 2 > runs_total)  — strict majority.
+    Checks shown are from the last run that matches the majority verdict
+    (or the last run overall if there is no majority pass).
+    """
+    if not run_scores:
+        raise ValueError("aggregate_scores: empty run_scores")
+    total = len(run_scores)
+    passed_runs = sum(1 for s in run_scores if s.passed)
+    majority = passed_runs * 2 > total
+    rep = run_scores[-1]
+    for s in reversed(run_scores):
+        if s.passed == majority:
+            rep = s
+            break
+    return Score(
+        case_id=rep.case_id,
+        category=rep.category,
+        passed=majority,
+        checks=list(rep.checks),
+        runs_total=total,
+        runs_passed=passed_runs,
+    )

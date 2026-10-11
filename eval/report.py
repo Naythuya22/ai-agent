@@ -28,10 +28,12 @@ def summarize(scores: list[Score]) -> dict:
 def render(scores: list[Score]) -> str:
     """Human-readable table for the terminal."""
     sm = summarize(scores)
-    lines = []
-    lines.append(f"Eval: {sm['passed']}/{sm['total']} pass "
-                 f"({sm['pass_rate']*100:.0f}%)")
-    lines.append("")
+    multi = any(s.runs_total > 1 for s in scores)
+    header = "Eval: %d/%d pass (%.0f%%)" % (
+        sm["passed"], sm["total"], sm["pass_rate"] * 100)
+    if multi:
+        header += "  [majority of N runs]"
+    lines = [header, ""]
     lines.append(f"{'category':<12} {'pass':>6} {'total':>6} {'rate':>7}")
     lines.append("-" * 34)
     for cat, c in sm["categories"].items():
@@ -44,5 +46,8 @@ def render(scores: list[Score]) -> str:
         for s in failures:
             bad = [c for c in s.checks if not c.ok]
             why = "; ".join(f"{c.name} ({c.detail})" for c in bad)
-            lines.append(f"  [{s.category}] {s.case_id}: {why}")
+            runs = ""
+            if s.runs_total > 1:
+                runs = f" [passed {s.runs_passed}/{s.runs_total} runs]"
+            lines.append(f"  [{s.category}] {s.case_id}: {why}{runs}")
     return "\n".join(lines)

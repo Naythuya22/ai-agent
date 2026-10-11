@@ -13,7 +13,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-from eval.scorer import Score, score_case
+from eval.scorer import Score, aggregate_scores, score_case
 
 CASES_DIR = Path(__file__).resolve().parent / "cases"
 DEFAULT_BASE_URL = "http://127.0.0.1:8080"
@@ -102,6 +102,30 @@ def run(cases: list[dict], mode: str = "stub") -> list[Score]:
     if mode == "live":
         return run_live(cases)
     raise ValueError(f"unknown mode: {mode!r} (use 'stub' or 'live')")
+
+
+def run_n(cases: list[dict], mode: str = "stub", runs: int = 3,
+          **live_kwargs) -> list[Score]:
+    """Run each case ``runs`` times; majority verdict per case.
+
+    Live kwargs (base_url, token, timeout) are forwarded to run_live.
+    Stub mode is deterministic, so runs>1 just repeats the same result —
+    kept for API symmetry. Raises ValueError for runs < 1.
+    """
+    if runs < 1:
+        raise ValueError(f"runs must be >= 1, got {runs}")
+    all_scores: list[list[Score]] = []
+    for _ in range(runs):
+        if mode == "stub":
+            all_scores.append(run_stub(cases))
+        elif mode == "live":
+            all_scores.append(run_live(cases, **live_kwargs))
+        else:
+            raise ValueError(f"unknown mode: {mode!r} (use 'stub' or 'live')")
+    out: list[Score] = []
+    for i in range(len(cases)):
+        out.append(aggregate_scores([rs[i] for rs in all_scores]))
+    return out
 
 
 def write_results(scores: list[Score], results_dir: Path | None = None) -> Path:

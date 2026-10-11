@@ -13,8 +13,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from eval.report import render, summarize
-from eval.runner import load_cases, run, run_stub, write_results
-from eval.scorer import score_case
+from eval.runner import load_cases, run, run_n, run_stub, write_results
+from eval.scorer import aggregate_scores, score_case
 
 
 def _case(**over):
@@ -68,6 +68,33 @@ class TestScorer(unittest.TestCase):
         self.assertTrue(d["passed"])
 
 
+class TestAggregate(unittest.TestCase):
+    def test_majority_pass(self):
+        s1 = score_case(_case(), "hello", [])
+        s2 = score_case(_case(), "nope", [])
+        agg = aggregate_scores([s1, s2, s1])
+        self.assertTrue(agg.passed)
+        self.assertEqual(agg.runs_total, 3)
+        self.assertEqual(agg.runs_passed, 2)
+
+    def test_majority_fail(self):
+        s1 = score_case(_case(), "nope", [])
+        s2 = score_case(_case(), "hello", [])
+        agg = aggregate_scores([s1, s1, s2])
+        self.assertFalse(agg.passed)
+        self.assertEqual(agg.runs_passed, 1)
+
+    def test_tie_is_fail(self):
+        s1 = score_case(_case(), "hello", [])
+        s2 = score_case(_case(), "nope", [])
+        agg = aggregate_scores([s1, s2])
+        self.assertFalse(agg.passed)
+
+    def test_empty_raises(self):
+        with self.assertRaises(ValueError):
+            aggregate_scores([])
+
+
 class TestRunner(unittest.TestCase):
     def test_run_stub_uses_scripted_answer(self):
         scores = run_stub([_case()])
@@ -82,6 +109,18 @@ class TestRunner(unittest.TestCase):
         self.assertEqual(len(run([_case()], mode="stub")), 1)
         with self.assertRaises(ValueError):
             run([], mode="bogus")
+
+    def test_run_n_stub_majority(self):
+        # stub is deterministic -> 3/3 pass, majority pass
+        scores = run_n([_case()], mode="stub", runs=3)
+        self.assertEqual(len(scores), 1)
+        self.assertTrue(scores[0].passed)
+        self.assertEqual(scores[0].runs_total, 3)
+        self.assertEqual(scores[0].runs_passed, 3)
+
+    def test_run_n_rejects_bad_runs(self):
+        with self.assertRaises(ValueError):
+            run_n([_case()], mode="stub", runs=0)
 
     def test_run_live_unreachable_server_scores_as_failure(self):
         # 127.0.0.1:1 refuses fast — wiring check, NO real model.
