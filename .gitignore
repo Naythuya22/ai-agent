@@ -32,3 +32,6 @@ logs/
 .DS_Store
 Thumbs.db
 prompts-test-empty/
+
+# Eval harness run artifacts (timestamped, not source)
+eval/results/
