@@ -1057,10 +1057,31 @@ def api_code_web_run_stream():
     if not task:
         return jsonify({"error": "message required"}), 400
 
-    # Project/model intercept (sync, JSON response — no SSE)
+    # Project/model intercept — the browser reads this endpoint as SSE
+    # only, so wrap the sync JSON reply as a single end frame.
     if (task.startswith("/project") or task == "/model"
             or task.startswith("/model ")):
-        return api_code_web_run()
+        r = api_code_web_run()
+        if isinstance(r, tuple):
+            r = r[0]
+        try:
+            body = r.get_json() or {}
+        except AttributeError:
+            body = {}
+        return Response(
+            sse_event({
+                "type": "end",
+                "reply": body.get("reply") or "",
+                "files": body.get("files") or [],
+                "tools": [],
+                "tokens": {},
+                "cost": None,
+                "session_id": None,
+                "elapsed": body.get("elapsed", 0.0),
+                "rc": body.get("rc", 0),
+            }),
+            mimetype="text/event-stream",
+        )
 
     missing = _require_opencode()
     if missing:
