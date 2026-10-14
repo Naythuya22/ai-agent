@@ -295,9 +295,30 @@ def run_agent(user_msg: str) -> dict:
     with agent_turn_guard():
         with inference_guard():
             mode = get_agent_mode()
-            before_len = len(mode._messages)
+            # Fix (B): mark the tail by identity, not by length. handle()
+            # calls _trim_messages() (keeps the newest 40) before returning,
+            # which shifts every index — a [before_len:] slice on a long
+            # history starts past the end of the trimmed list and silently
+            # drops this turn's tool_call/tool_result entries (verified: a
+            # 46-message session ran web_search but returned tool_trace: []).
+            # The marker is the newest pre-turn message, so the trim keeps it
+            # unless one turn appends 40+ messages; the id-set fallback below
+            # still finds the new entries in that case.
+            before_ids = {id(m) for m in mode._messages}
+            marker = mode._messages[-1] if mode._messages else None
             reply = mode.handle(user_msg)
-            new_msgs = mode._messages[before_len:]
+            msgs = mode._messages
+            start = 0
+            if marker is not None:
+                for i, m in enumerate(msgs):
+                    if m is marker:
+                        start = i + 1
+                        break
+                else:
+                    # marker trimmed away mid-turn — fall back to identity diff
+                    start = 0
+                    msgs = [m for m in msgs if id(m) not in before_ids]
+            new_msgs = msgs[start:]
             tool_trace = []
             for m in new_msgs:
                 if not isinstance(m, dict):
