@@ -1908,6 +1908,7 @@ async function doCode(task){
 var COMMANDS=[
   ['/memory','Stored memory'],
   ['/profile','Known user profile'],
+  ['/model','Switch code backend'],
   ['/clear','Clear this conversation'],
   ['/new','Start a new chat'],
   ['/summary','Compress this session'],
@@ -2005,7 +2006,7 @@ inputEl.addEventListener('keydown',function(e){
 });
 inputEl.addEventListener('blur',function(){setTimeout(function(){if(Date.now()>acHold)acHide()},150)});
 sendBtn.addEventListener('click',function(e){if(state.busy&&state.abort){e.preventDefault();try{state.abort.abort()}catch(err){}}});
-formEl.addEventListener('submit',function(e){e.preventDefault();acHide();var t=inputEl.value.trim();if(!t||state.busy)return;inputEl.value='';if(t.charAt(0)==='/'){if(t.indexOf('/code ')==0){doCode(t.slice(6).trim());return}if(t.indexOf('/project')==0){send(t);return}if(t.indexOf('/skill ')==0){runSkill(t.slice(7).trim());return}if(t.indexOf('/create-skill ')==0){runCreateSkill(t.slice(14).trim());return}runCommand(t.slice(1).trim());return}send(t)});
+formEl.addEventListener('submit',function(e){e.preventDefault();acHide();var t=inputEl.value.trim();if(!t||state.busy)return;inputEl.value='';if(t.charAt(0)==='/'){if(t.indexOf('/code ')==0){doCode(t.slice(6).trim());return}if(t.indexOf('/project')==0){send(t);return}if(t.indexOf('/model')==0){send(t);return}if(t.indexOf('/skill ')==0){runSkill(t.slice(7).trim());return}if(t.indexOf('/create-skill ')==0){runCreateSkill(t.slice(14).trim());return}runCommand(t.slice(1).trim());return}send(t)});
 inputEl.focus();
 setStatus('ready');
 syncAgentTools();
