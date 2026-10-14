@@ -19,17 +19,29 @@ import subprocess
 import time
 from pathlib import Path
 
-from flask import Blueprint, Response, jsonify, request, stream_with_context
+from flask import (
+    Blueprint,
+    Response,
+    has_request_context,
+    jsonify,
+    request,
+    stream_with_context,
+)
 
+import config
+from core import code_backends
 from core import opencode as oc
 from core import projects as projects_store
 from core.code_stream import (
     OpencodeError,
     parse_event as cs_parse,
+    run_code,
     run_opencode,
     sse_event,
+    stream_code,
     stream_opencode,
     summarize,
+    summarize_output,
 )
 from core.log import get_logger
 from routes._helpers import json_body
@@ -164,21 +176,61 @@ def _record_code_turn(task, reply):
         _code_history[:] = _code_history[-CODE_HISTORY_CAP:]
 
 
-def _require_opencode():
-    """None when opencode is usable, else a (message, status) failure."""
-    if oc.is_installed():
+def _backend_name(project=None) -> str:
+    """Which backend this request should run on.
+
+    Precedence: ?backend=<name> on the request, then the active project's
+    `backend` field, then AI_AGENT_CODE_BACKEND (config.CODE_BACKEND_DEFAULT).
+    An unknown name anywhere in that chain degrades to the default instead of
+    failing the request — a stale project record must not wedge code mode.
+    """
+    name = ""
+    if has_request_context():
+        name = (request.args.get("backend") or "").strip()
+    if not name:
+        proj = project if project is not None else projects_store.get_active()
+        name = str((proj or {}).get("backend") or "").strip()
+    if not name:
+        name = str(getattr(config, "CODE_BACKEND_DEFAULT", "") or "").strip()
+    return code_backends.resolve(name)
+
+
+def _backend(project=None):
+    """The backend module for this request: core.opencode or core.openclaude.
+
+    Callers use the same names on it either way (is_installed(), env(),
+    build_command(), doctor(), the session map) — that shared surface is what
+    makes the two backends interchangeable here.
+    """
+    return code_backends.get(_backend_name(project)) or oc
+
+
+def _require_backend(project=None):
+    """None when the active backend is usable, else a (message, status) failure."""
+    b = _backend(project)
+    if b.is_installed():
         return None
-    return oc.missing_install_message(), 500
+    return b.missing_install_message(), 500
+
+
+# The old name, kept: callers and tests that ask for "the" backend (opencode)
+# still get the resolver above, which answers with opencode unless the project
+# or the environment says otherwise.
+_require_opencode = _require_backend
 
 
 def _session_for(workdir):
-    """Session id to resume for this folder, if a previous run left one."""
-    return oc.get_session(workdir)
+    """Session id to resume for this folder, if a previous run left one.
+
+    Each backend reads its own store, so an opencode session id is never
+    handed to openclaude (and vice versa).
+    """
+    return _backend().get_session(workdir)
 
 
 def _remember_session(workdir, session_id):
     if session_id:
-        oc.remember_session(workdir, session_id)
+        _backend().remember_session(workdir, session_id)
 
 
 def _run(workdir, prompt, env=None, timeout=RUN_TIMEOUT):
@@ -193,15 +245,17 @@ def _run(workdir, prompt, env=None, timeout=RUN_TIMEOUT):
 
     Returns (returncode, output_lines).
     """
-    env = oc.env() if env is None else env
+    b = _backend()
+    name = _backend_name()
+    env = b.env() if env is None else env
     session_id = _session_for(workdir)
     rc, lines = 0, []
     for attempt in (1, 2):
-        cmd = oc.build_command(prompt, workdir, session_id=session_id)
-        rc, lines = run_opencode(cmd, workdir, env, timeout=timeout)
+        cmd = b.build_command(prompt, workdir, session_id=session_id)
+        rc, lines = run_code(cmd, workdir, env, timeout=timeout, backend=name)
         if (rc != 0 and session_id and attempt == 1
-                and oc.session_is_stale("\n".join(lines))):
-            oc.forget_session(workdir)
+                and b.session_is_stale("\n".join(lines))):
+            b.forget_session(workdir)
             session_id = None
             continue
         return rc, lines
@@ -228,15 +282,18 @@ def _stream(workdir, prompt, env):
     be told apart from a run that is merely quiet, and those frames are
     swallowed instead of shown as a dead end.
     """
+    b = _backend()
+    name = _backend_name()
     session_id = _session_for(workdir)
     for attempt in (1, 2):
-        cmd = oc.build_command(prompt, workdir, session_id=session_id,
-                               logs=True)
-        frames = stream_opencode(
+        cmd = b.build_command(prompt, workdir, session_id=session_id,
+                              logs=True)
+        frames = stream_code(
             cmd,
             workdir=workdir,
             env=env,
             lock=code_lock,
+            backend=name,
             on_session=lambda sid: _remember_session(workdir, sid),
         )
         produced = False
@@ -251,8 +308,8 @@ def _stream(workdir, prompt, env):
                     produced = True
                 elif (kind == "log" and not produced and session_id
                       and attempt == 1
-                      and oc.session_is_stale(event.get("text", ""))):
-                    oc.forget_session(workdir)
+                      and b.session_is_stale(event.get("text", ""))):
+                    b.forget_session(workdir)
                     session_id = None
                     break
                 yield line
@@ -377,6 +434,70 @@ def _project_command_reply(task):
     return {"reply": help_msg, "files": [], "commits": [], "raw": help_msg, "elapsed": 0.0, "rc": 0}
 
 
+def _model_reply(msg, rc=0):
+    """The reply payload shape every chat sub-command answers with."""
+    return {"reply": msg, "files": [], "commits": [],
+            "raw": msg, "elapsed": 0.0, "rc": rc}
+
+
+def _model_command_reply(task):
+    """Handle the /model sub-commands. Returns a reply payload dict.
+
+    /model            — every backend with its install state, and which one
+                        this project is on
+    /model <backend>  — point the active project at that backend
+    /model status     — the backend in force, its version and the project
+    """
+    parts = task.split()
+    sub = parts[1] if len(parts) > 1 else ""
+
+    if not sub or sub == "list":
+        current = _backend_name()
+        lines = ["🧠 **Code backends**", ""]
+        for name in code_backends.names():
+            ok = code_backends.installed(name)
+            lines.append(
+                f"  • {name} {'✅ installed' if ok else '❌ not installed'}"
+                + ("  ← active" if name == current else "")
+            )
+        lines.append("")
+        lines.append("Switch: /model <backend>")
+        lines.append("Detail: /model status")
+        return _model_reply("\n".join(lines))
+
+    if sub == "status":
+        b = _backend()
+        active = projects_store.get_active()
+        return _model_reply(
+            f"🧠 Backend: **{_backend_name()}**\n"
+            f"Version: {b.version() or 'unknown'}\n"
+            f"Installed: {'yes' if b.is_installed() else 'no'}\n"
+            f"Project: {active.get('name') if active else '(none)'}"
+        )
+
+    # Anything else names the backend to switch to.
+    name = sub
+    if name not in code_backends.names():
+        return _model_reply(
+            f"❌ Unknown backend: {name}\n"
+            f"Available: {', '.join(code_backends.names())}", rc=1)
+
+    active = projects_store.get_active()
+    if not active:
+        return _model_reply(
+            "❌ No active project to switch.\n"
+            "Add one first: /project add <path>", rc=1)
+    if not projects_store.set_backend(active["id"], name):
+        return _model_reply(f"❌ Could not set the backend for "
+                            f"{active.get('name') or active['id']}", rc=1)
+
+    b = code_backends.get(name)
+    msg = f"✅ Code backend: **{name}**\n📁 {active.get('path', '')}"
+    if not b.is_installed():
+        msg += "\n\n⚠️ Not installed:\n" + b.missing_install_message()
+    return _model_reply(msg)
+
+
 # ---------- /api/code (single-shot, fixed workdir) ----------
 
 @bp.route("/api/code", methods=["POST"])
@@ -412,8 +533,7 @@ def api_code():
         except OpencodeError as e:
             return jsonify({"error": str(e)}), 500
 
-        events = [e for e in (cs_parse(l) for l in lines) if e is not None]
-        summary = summarize(events)
+        summary = summarize_output(lines, backend=_backend_name())
         _remember_session(wd, summary["session_id"])
         # Only a clean run gets committed, same as the streaming path: a failed
         # run can leave a half-applied edit behind.
@@ -602,14 +722,20 @@ def api_code_web_start():
     if err:
         return jsonify({"error": err}), 500
 
+    # opencode takes the folder as a positional argument; openclaude's
+    # positional slot is the prompt, so each backend decides its own TUI
+    # argv and the working directory comes from cwd.
+    b = _backend()
+    inner = ([str(a) for a in b.tui_command(workdir)]
+             if hasattr(b, "tui_command")
+             else [str(b.BINARY), "--model", b.MODEL_REF, str(workdir)])
     cmd = ["ttyd", "-W", "-i", "127.0.0.1", "-p", "8081",
-           "--base-path", "/terminal",
-           str(oc.BINARY), "--model", oc.MODEL_REF, str(workdir)]
+           "--base-path", "/terminal"] + inner
     try:
         _ttyd_proc = subprocess.Popen(
             cmd,
             cwd=str(workdir),
-            env=oc.env(),
+            env=b.env(),
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
@@ -655,9 +781,12 @@ def api_code_web_run():
     if not task:
         return jsonify({"error": "message required"}), 400
 
-    # /project command interception (before opencode)
+    # /project and /model are handled by us, so they run before the backend
+    # is even looked at — switching backends must work when none is installed.
     if task.startswith("/project"):
         return jsonify(_project_command_reply(task))
+    if task == "/model" or task.startswith("/model "):
+        return jsonify(_model_command_reply(task))
 
     missing = _require_opencode()
     if missing:
@@ -687,8 +816,7 @@ def api_code_web_run():
         except OpencodeError as e:
             return jsonify({"error": str(e)}), 500
 
-        events = [e for e in (cs_parse(l) for l in lines) if e is not None]
-        summary = summarize(events)
+        summary = summarize_output(lines, backend=_backend_name())
         _remember_session(workdir, summary["session_id"])
 
         commits, commit_error = [], None
@@ -731,21 +859,26 @@ def api_code_web_clear():
     _code_history = []
 
     deleted = None
+    b = _backend()
     workdir, err = _resolve_workdir()
     if not err and workdir:
-        session_id = oc.forget_session(workdir)
-        if session_id and oc.is_installed():
+        session_id = b.forget_session(workdir)
+        # openclaude has no `session delete` subcommand: its command comes
+        # back as None and only the local id is forgotten, which is all this
+        # endpoint can do for it anyway.
+        cmd = b.session_delete_command(session_id) if session_id else None
+        if session_id and cmd and b.is_installed():
             try:
                 subprocess.run(
-                    oc.session_delete_command(session_id),
+                    cmd,
                     cwd=str(workdir),
                     capture_output=True,
                     timeout=20,
                 )
                 deleted = session_id
             except Exception as e:
-                log.warning("could not delete opencode session %s: %s: %s",
-                            session_id, type(e).__name__, e)
+                log.warning("could not delete %s session %s: %s: %s",
+                            b.BINARY, session_id, type(e).__name__, e)
     return jsonify({"ok": True, "cleared": n, "session_deleted": deleted})
 
 
@@ -763,20 +896,71 @@ def api_code_web_history():
 
 @bp.route("/api/code/doctor", methods=["GET"])
 def api_code_doctor():
-    """Is code mode actually runnable? Everything the UI needs to say so."""
-    info = oc.doctor()
+    """Is code mode actually runnable? Everything the UI needs to say so.
+
+    `?backend=openclaude` reports that backend instead. With no query the
+    active project and AI_AGENT_CODE_BACKEND decide, which is "opencode" on a
+    stock setup — so a plain call answers exactly as it always has.
+    """
+    b = _backend()
+    info = b.doctor()
+    info["backend"] = _backend_name()
     if not info["installed"]:
         info["ok"] = False
-        info["error"] = oc.missing_install_message()
+        info["error"] = b.missing_install_message()
     else:
         try:
-            oc.write_bridge_config()
-            info["config_exists"] = oc.config_file().exists()
+            b.write_bridge_config()
+            info["config_exists"] = b.config_file().exists()
             info["ok"] = True
         except Exception as e:
             info["ok"] = False
-            info["error"] = f"could not write {oc.config_file()}: {e}"
+            info["error"] = f"could not write {b.config_file()}: {e}"
     return jsonify(info)
+
+
+@bp.route("/api/code/backends", methods=["GET"])
+def api_code_backends():
+    """Registered backend names, in display order.
+
+    A bare JSON list: the UI asks once and renders it. Per-backend health is
+    /api/code/doctor?backend=<name>, which already reports install state,
+    version and sessions for whichever backend is asked about.
+    """
+    return jsonify(code_backends.names())
+
+
+@bp.route("/api/code/backend", methods=["POST"])
+def api_code_backend():
+    """Point the active project at a backend: {"name": "openclaude"}.
+
+    The choice hangs off the project (projects.set_backend) so it survives a
+    restart and is scoped to that folder — with no active project there is
+    nothing to hang it on, and answering 400 says so instead of dropping the
+    request on the floor.
+    """
+    body = json_body()
+    name = str(body.get("name") or "").strip()
+    if not name:
+        return jsonify({"error": "name required",
+                        "available": code_backends.names()}), 400
+    if name not in code_backends.names():
+        return jsonify({"error": f"unknown backend: {name}",
+                        "available": code_backends.names()}), 400
+
+    active = projects_store.get_active()
+    if not active:
+        return jsonify({"error": "no active project",
+                        "hint": "add one first: /project add <path>"}), 400
+    if not projects_store.set_backend(active["id"], name):
+        return jsonify({"error": "could not set backend"}), 500
+    return jsonify({
+        "ok": True,
+        "backend": name,
+        "project": active["id"],
+        "installed": code_backends.installed(name),
+        "available": code_backends.availability(),
+    })
 
 
 # ---------- project registry ----------
@@ -873,8 +1057,9 @@ def api_code_web_run_stream():
     if not task:
         return jsonify({"error": "message required"}), 400
 
-    # Project intercept (sync, JSON response — no SSE)
-    if task.startswith("/project"):
+    # Project/model intercept (sync, JSON response — no SSE)
+    if (task.startswith("/project") or task == "/model"
+            or task.startswith("/model ")):
         return api_code_web_run()
 
     missing = _require_opencode()
@@ -892,7 +1077,7 @@ def api_code_web_run_stream():
     _ensure_safe_directory(workdir)
     ensure_git_identity()
 
-    env = oc.env(PYTHONUNBUFFERED="1")
+    env = _backend().env(PYTHONUNBUFFERED="1")
     prompt = build_code_prompt(task)
 
     def generate():

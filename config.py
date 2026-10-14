@@ -185,6 +185,12 @@ AGENT_MAX_TOKENS_DEFAULT = _env_int("AI_AGENT_MAX_TOKENS", 8_192,
                                     maximum=MAX_TOKENS_CEILING)
 CHAT_MAX_TOKENS_DEFAULT = 2_048      # the OpenAI-compatible route
 CODE_MAX_TOKENS_DEFAULT = 16_384     # a code turn wants whole files back
+
+# Which Code-mode backend a fresh run starts on. A project can override it
+# (projects.backend), the UI can switch it (/model, POST /api/code/backend),
+# and code_backends.default_name() falls back to "opencode" if this names
+# something that is not registered — an env var must never break code mode.
+CODE_BACKEND_DEFAULT = os.environ.get("AI_AGENT_CODE_BACKEND", "opencode")
 # The key-validation probe: one cheap round-trip that proves a key works.
 # Not environment-overridable on purpose — this is the one number that must
 # never be inflated by accident, and 8 tokens is enough for the "ok" it asks.

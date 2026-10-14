@@ -217,15 +217,59 @@ class App:
             m.memory = self.memory
         print(f"{C_GREEN}Reloaded memory.{C_RESET}")
 
+    @staticmethod
+    def _parse_code_args(arg: str) -> tuple:
+        """Split `--backend <name>` out of a /code argument line.
+
+        Returns (workdir, backend_name_or_None). The flag may sit before or
+        after the path, and a bare `--backend` with nothing after it is
+        reported rather than quietly dropped.
+        """
+        tokens = (arg or "").split()
+        parts: list = []
+        backend = None
+        i = 0
+        while i < len(tokens):
+            tok = tokens[i]
+            if tok == "--backend":
+                if i + 1 >= len(tokens):
+                    raise ValueError("--backend needs a name")
+                backend = tokens[i + 1]
+                i += 2
+                continue
+            if tok.startswith("--backend="):
+                backend = tok.split("=", 1)[1]
+                i += 1
+                continue
+            parts.append(tok)
+            i += 1
+        return " ".join(parts), (backend or None)
+
     def _cmd_code(self, arg: str) -> None:
-        """Launch the opencode TUI in the given (or default) directory."""
+        """Launch the Code-mode TUI in the given (or default) directory."""
         import subprocess
         import urllib.request
 
-        from core import opencode as oc
+        from core import code_backends
 
-        # 1) Determine workdir
-        workdir = arg.strip() or str(Path.home() / "opencode-work")
+        # 1) Workdir and backend: /code [--backend <name>] [dir]
+        try:
+            rest, backend_arg = self._parse_code_args(arg)
+        except ValueError as e:
+            print(f"{C_RED}{e}{C_RESET}")
+            print(f"{C_DIM}Usage: /code [--backend openclaude] [dir]{C_RESET}")
+            return
+        if backend_arg and backend_arg not in code_backends.names():
+            print(f"{C_RED}Unknown backend:{C_RESET} {backend_arg}")
+            print(f"{C_DIM}Available: {', '.join(code_backends.names())}"
+                  f"{C_RESET}")
+            return
+        b = code_backends.get(backend_arg or code_backends.default_name())
+        if b is None:
+            print(f"{C_RED}Unknown backend:{C_RESET} {backend_arg}")
+            return
+
+        workdir = rest.strip() or str(Path.home() / "opencode-work")
         wd = Path(workdir).expanduser()
         if not wd.exists():
             print(f"{C_RED}Directory not found:{C_RESET} {wd}")
@@ -235,11 +279,11 @@ class App:
             print(f"{C_RED}Not a directory:{C_RESET} {wd}")
             return
 
-        # 2) opencode must be installed
-        if not oc.is_installed():
-            print(f"{C_RED}opencode not found.{C_RESET}")
-            print(f"{C_DIM}Install in Termux:{C_RESET}")
-            print("  pkg install nodejs-lts && npm install -g opencode-ai")
+        # 2) the selected backend must be installed
+        if not b.is_installed():
+            print(f"{C_RED}{b.BINARY} not found.{C_RESET}")
+            print(f"{C_DIM}Install:{C_RESET}")
+            print(f"  {b.missing_install_message()}")
             return
 
         # 3) Check Flask server
@@ -295,31 +339,36 @@ class App:
             log.warning("could not configure git identity: %s: %s",
                         type(e).__name__, e)
 
-        # 6) Launch opencode against the local bridge
+        # 6) Launch the selected backend against its own environment
         try:
-            env = oc.env()
+            env = b.env()
         except Exception as e:
-            print(f"{C_RED}Could not write opencode config:{C_RESET} {e}")
+            print(f"{C_RED}Could not prepare {b.BINARY}:{C_RESET} {e}")
             return
 
-        print(f"{C_CYAN}Launching opencode in {wd}{C_RESET}")
+        print(f"{C_CYAN}Launching {b.BINARY} in {wd}{C_RESET}")
         print(f"{C_DIM}Ctrl+C twice, then 'exit', to return.{C_RESET}\n")
 
+        # opencode takes the folder as a positional; openclaude's positional
+        # slot is the prompt, so the cwd above is what scopes it.
+        argv = ([str(a) for a in b.tui_command(wd)]
+                if hasattr(b, "tui_command")
+                else [str(b.BINARY), "--model", b.MODEL_REF])
         try:
             rc = subprocess.call(
-                [oc.BINARY, "--model", oc.MODEL_REF],
+                argv,
                 cwd=str(wd),
                 env=env,
             )
         except FileNotFoundError:
-            print(f"{C_RED}opencode not found.{C_RESET}")
-            print("  pkg install nodejs-lts && npm install -g opencode-ai")
+            print(f"{C_RED}{b.BINARY} not found.{C_RESET}")
+            print(f"  {b.missing_install_message()}")
             return
         except KeyboardInterrupt:
-            print(f"\n{C_DIM}(opencode interrupted){C_RESET}")
+            print(f"\n{C_DIM}({b.BINARY} interrupted){C_RESET}")
             rc = -1
 
-        print(f"\n{C_GREEN}Returned from opencode{C_RESET} (rc={rc})")
+        print(f"\n{C_GREEN}Returned from {b.BINARY}{C_RESET} (rc={rc})")
         print(f"{C_DIM}Engine will reload on next LLM use.{C_RESET}")
 
     def _ctx_info(self) -> tuple:

@@ -32,6 +32,12 @@ def load() -> dict:
         data["projects"] = []
     data.setdefault("active", None)
     data.setdefault("version", 1)
+    # `backend` arrived with the second Code-mode backend; a store written
+    # before it existed must still answer with a complete project, so the
+    # routes never have to guard for a missing key.
+    for p in data["projects"]:
+        if isinstance(p, dict):
+            p.setdefault("backend", None)
     return data
 
 
@@ -84,6 +90,8 @@ def add(name: str, path: str) -> dict:
         "id": uuid.uuid4().hex[:8],
         "name": (name or p.name or "project").strip()[:40],
         "path": str(p),
+        # None = follow AI_AGENT_CODE_BACKEND (opencode unless told otherwise).
+        "backend": None,
         "created": _now(),
         "last_used": _now(),
     }
@@ -112,6 +120,24 @@ def set_active(pid: str) -> bool:
         if p.get("id") == pid:
             data["active"] = pid
             p["last_used"] = _now()
+            _save(data)
+            return True
+    return False
+
+
+def set_backend(pid: str, backend: str | None) -> bool:
+    """Set the Code-mode backend for one project. False when it is unknown.
+
+    An empty name clears the field rather than storing "", so the project
+    goes back to following the default (AI_AGENT_CODE_BACKEND). The name is
+    not checked against the registry here — this store is about persistence;
+    routes/code.py validates before it calls.
+    """
+    name = str(backend or "").strip() or None
+    data = load()
+    for p in data["projects"]:
+        if p.get("id") == pid:
+            p["backend"] = name
             _save(data)
             return True
     return False

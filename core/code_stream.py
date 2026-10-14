@@ -355,3 +355,102 @@ def _terminate(proc) -> None:
     except Exception as e:
         log.debug("could not terminate the child process: %s: %s",
                   type(e).__name__, e)
+
+
+# ── backend dispatch ──────────────────────────────────────────────────────
+#
+# Everything above this line speaks opencode only, and must stay that way:
+# those functions are the reference implementation the existing tests pin
+# down. openclaude joined as a second Code-mode backend, so these wrappers
+# pick the dialect and hand back the same shapes — one entry point for the
+# routes instead of `if backend == ...` scattered through them.
+
+def _validate_backend(backend) -> str:
+    """A registered backend name, else OpencodeError.
+
+    The registry is the single source of truth for which names exist, so
+    adding a third backend does not mean editing this file again.
+    """
+    from core import code_backends
+
+    name = str(backend or "").strip() or "opencode"
+    if name not in code_backends.names():
+        raise OpencodeError(f"unknown code backend: {backend!r}")
+    return name
+
+
+def _openclaude():
+    # Imported per call: the opencode-only path must not pay for loading the
+    # Claude parser (and core.openclaude imports the key manager).
+    from core import openclaude_stream
+    return openclaude_stream
+
+
+def stream_code(cmd, workdir, env, lock, backend="opencode",
+                on_session=None, on_event=None):
+    """Generator — stream one run as SSE frames, for the named backend.
+
+    Delegates to stream_opencode() for "opencode" and to the openclaude
+    parser otherwise; both yield already-formatted SSE strings, so callers
+    cannot tell them apart. Raises OpencodeError for an unregistered name.
+    """
+    name = _validate_backend(backend)
+    if name == "openclaude":
+        return _openclaude().stream_openclaude(
+            cmd, workdir, env, lock, on_session=on_session, on_event=on_event)
+    return stream_opencode(cmd, workdir, env, lock,
+                           on_session=on_session, on_event=on_event)
+
+
+def run_code(cmd, workdir, env, timeout=None, backend="opencode"):
+    """Run the named backend to completion: (returncode, stdout_lines).
+
+    opencode keeps its own path so its timeout message and stderr handling
+    stay exactly as they were; the generic path merges stderr into stdout as
+    it is produced, so a warning lands where it happened in the stream.
+    """
+    name = _validate_backend(backend)
+    if name == "opencode":
+        return run_opencode(cmd, workdir, env, timeout=timeout)
+    try:
+        proc = subprocess.run(
+            cmd,
+            cwd=str(workdir),
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            timeout=timeout,
+        )
+    except FileNotFoundError as e:
+        raise OpencodeError(str(e)) from e
+    except subprocess.TimeoutExpired:
+        raise OpencodeError(f"{name} timed out after {timeout}s") from None
+    return proc.returncode, (proc.stdout or "").splitlines(keepends=True)
+
+
+def parse_lines(lines, backend="opencode"):
+    """Raw output lines → the named backend's event list."""
+    name = _validate_backend(backend)
+    if isinstance(lines, str):
+        lines = lines.splitlines(keepends=True)
+    if name == "openclaude":
+        return _openclaude().parse_lines(lines)
+    return [ev for ev in (parse_event(l) for l in (lines or []))
+            if ev is not None]
+
+
+def summarize_output(lines, backend="opencode"):
+    """Raw output lines → the folded summary the API returns.
+
+    parse + summarize in one call, in the backend's own dialect: the two
+    speak different event formats, so pairing them by hand at every call site
+    is exactly the mistake this exists to prevent.
+    """
+    name = _validate_backend(backend)
+    if name == "openclaude":
+        oc_stream = _openclaude()
+        return oc_stream.summarize(oc_stream.parse_lines(lines))
+    if isinstance(lines, str):
+        lines = lines.splitlines(keepends=True)
+    return summarize(parse_lines(lines))
