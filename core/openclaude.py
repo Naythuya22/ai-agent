@@ -43,7 +43,7 @@ PROVIDER = "anthropic"
 BRIDGE_BASE = ""
 # openclaude takes Claude aliases/full names, not `provider/model`.
 MODEL_ID = "sonnet"
-MODEL_REF = MODEL_ID
+MODEL_REF = "openrouter/free"
 
 
 def config_file() -> Path:
