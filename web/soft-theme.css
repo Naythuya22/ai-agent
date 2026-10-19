@@ -1,0 +1,33 @@
+/* Soft Dark Syntax Highlighting */
+:root {
+  --syntax-bg: #1e1e24;
+  --syntax-keyword: #C4A7E7;
+  --syntax-string: #A8CFA8;
+  --syntax-function: #E5C58A;
+  --syntax-number: #D9A57A;
+  --syntax-comment: #929AA5;
+}
+.msg.assistant pre, .code-frame-content pre {
+  background: var(--syntax-bg) !important;
+  border: 1px solid #2b2d35 !important;
+  border-radius: 8px;
+  padding: 12px;
+  overflow-x: auto;
+}
+.msg.assistant code, .code-frame-content code {
+  font-family: 'Fira Code', 'Monaco', 'Menlo', monospace;
+  font-size: 13px;
+  line-height: 1.5;
+}
+.token.comment { color: var(--syntax-comment) !important; font-style: italic; }
+.token.keyword { color: var(--syntax-keyword) !important; font-weight: 600; }
+.token.string { color: var(--syntax-string) !important; }
+.token.function { color: var(--syntax-function) !important; }
+.token.number { color: var(--syntax-number) !important; }
+
+/* Agent Tool Colors (Soft Green - မျက်စိအေးစေရန်) */
+.msg.tool { 
+  background: #1e2233 !important; 
+  border-left: 3px solid #3b4266 !important; 
+  color: #a9b1d6 !important; 
+}

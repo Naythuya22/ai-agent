@@ -251,6 +251,21 @@ footer{position:relative;padding:12px 12px 16px;background:var(--bg);border-top:
   .pb-label { display: none; }
 }
 </style>
+  <link rel="stylesheet" href="soft-theme.css">
+
+<style id="force-tool-colors">
+  :root {
+    --tool-bg: #1e2233 !important;
+    --tool-border: #3b4266 !important;
+    --tool-text: #a9b1d6 !important;
+  }
+  .msg.tool {
+    background: #1e2233 !important;
+    border-left: 3px solid #3b4266 !important;
+    color: #a9b1d6 !important;
+  }
+</style>
+
 </head>
 <body>
 <div id="update-banner" role="alert">
@@ -2580,5 +2595,6 @@ async function saveSettings(){
   });
 })();
 </script>
+  <script src="highlighter.js"></script>
 </body>
 </html>
