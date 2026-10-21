@@ -26,6 +26,7 @@ from pathlib import Path
 
 from core.auth import configured_token
 from core.log import get_logger
+from core.store_paths import shared_store_dir
 
 log = get_logger("openclaude")
 
@@ -54,7 +55,7 @@ def config_file() -> Path:
 def session_file() -> Path:
     # Separate store: opencode's code_sessions.json must stay untouched and
     # must never be handed a Claude session uuid.
-    return Path("/sdcard/.ai-agent") / "code_sessions_openclaude.json"
+    return shared_store_dir() / "code_sessions_openclaude.json"
 
 
 DEFAULT_TIMEOUT = 300

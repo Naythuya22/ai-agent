@@ -101,8 +101,14 @@ class TestConfigPaths(unittest.TestCase):
                          Path.home() / ".openclaude" / ".openclaude.json")
 
     def test_session_store_is_separate_from_opencode(self):
-        self.assertEqual(ocl.session_file(),
-                         Path("/sdcard/.ai-agent/code_sessions_openclaude.json"))
+        # The store lives in the shared store dir (core/store_paths):
+        # /sdcard/.ai-agent on Android, ~/.ai-agent where /sdcard cannot
+        # be created. What this test pins is the SEPARATION of the two
+        # stores, not the machine-specific absolute path.
+        self.assertEqual(ocl.session_file().name,
+                         "code_sessions_openclaude.json")
+        self.assertEqual(ocl.session_file().parent,
+                         oc.session_file().parent)
         self.assertNotEqual(ocl.session_file(), oc.session_file())
         self.assertTrue(str(oc.session_file()).endswith("code_sessions.json"))
 

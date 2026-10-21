@@ -11,6 +11,7 @@ import shlex
 from pathlib import Path
 
 from core.auth import configured_token
+from core.store_paths import shared_store_dir
 from core.log import get_logger
 
 log = get_logger("opencode")
@@ -30,12 +31,13 @@ MODEL_REF = f"{PROVIDER}/{MODEL_ID}"
 
 
 def config_file() -> Path:
-    # Use /sdcard/ so both Termux and Ubuntu can access it
-    return Path("/sdcard/.ai-agent") / "opencode.json"
+    # Shared with the proot Ubuntu via /sdcard where possible
+    # (see core/store_paths for the fallback).
+    return shared_store_dir() / "opencode.json"
 
 
 def session_file() -> Path:
-    return Path("/sdcard/.ai-agent") / "code_sessions.json"
+    return shared_store_dir() / "code_sessions.json"
 
 DEFAULT_TIMEOUT = 300
 
