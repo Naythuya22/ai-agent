@@ -1101,6 +1101,13 @@ class LocalNameTests(unittest.TestCase):
         import json as _json
         import config
         old = getattr(config, "MODEL_PATH", None)
+        # This test rewrites the shared config.json: keep its original bytes
+        # and put them back. Leaving {"model_path": ""} behind poisons every
+        # suite that runs after this one in the same process — their engine
+        # loads then find no configured model and (off the phone, where
+        # auto-discovery finds the real download) fail with "model unset".
+        old_file_text = (config.CONFIG_FILE.read_text(encoding="utf-8")
+                         if config.CONFIG_FILE.exists() else None)
         try:
             if hasattr(config, "MODEL_PATH"):
                 del config.MODEL_PATH
@@ -1119,3 +1126,7 @@ class LocalNameTests(unittest.TestCase):
                     pass
             else:
                 config.MODEL_PATH = old
+            if old_file_text is None:
+                config.CONFIG_FILE.unlink(missing_ok=True)
+            else:
+                config.CONFIG_FILE.write_text(old_file_text, encoding="utf-8")

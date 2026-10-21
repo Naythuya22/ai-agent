@@ -65,26 +65,39 @@ def agent_turn_guard():
         yield
 
 
-def get_llm():
-    """Return the process-wide LLM, loading the engine on first use."""
+def get_llm(load: bool = True):
+    """Return the process-wide LLM, loading the engine on first use.
+
+    With ``load=False`` the LLM is only constructed: every engine entry
+    point (``ask``, ``ChatSession`` sends, the agent local branch) loads
+    lazily and raises ``LLMError`` with the missing-model message when no
+    model file exists, so construction is safe on a cloud-only device.
+    """
     global _llm
     if _llm is None:
         with init_lock:
             if _llm is None:  # re-check: another thread may have won the race
                 cfg = Config.load()
                 _llm = LLM(cfg)
-                _llm.load()
+                if load:
+                    _llm.load()
     return _llm
 
 
 def ensure_modes() -> None:
-    """Build memory + chat/agent modes on first use. No-op afterwards."""
+    """Build memory + chat/agent modes on first use. No-op afterwards.
+
+    The modes are built around an *unloaded* LLM: building them must not
+    require a local model, or a device with only cloud keys could not
+    serve the UI, Settings or the agent's cloud path at all. The engine
+    loads on the first turn that actually needs it.
+    """
     global _chat_mode, _agent_mode, _memory
     if _chat_mode is None:
         with init_lock:
             if _chat_mode is None:
                 _memory = Memory.load()
-                llm = get_llm()
+                llm = get_llm(load=False)
                 _chat_mode = ChatMode(llm, _memory)
                 _agent_mode = AgentMode(llm, _memory)
 

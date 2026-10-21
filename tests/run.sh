@@ -1,7 +1,7 @@
 #!/bin/sh
 # Run the whole test suite. No LiteRT-LM, no model weights, no network needed.
 #
-#   sh tests/run.sh            # everything
+#   sh tests/run.sh            # everything (node UI suites too, when node exists)
 #   sh tests/run.sh -k config  # one module: sh tests/run.sh -p "test_config.py"
 set -eu
 
@@ -25,4 +25,21 @@ if ! "$PY" -c "import flask" 2>/dev/null; then
     exit 1
 fi
 
-exec "$PY" -u -m unittest discover -s tests -t tests -v "$@"
+status=0
+
+# UI suites are node scripts with their own tiny servers; they used to be
+# a separate manual step, which made "run the tests" locally mean only
+# half the tests. Run them here when node is available; skip cleanly
+# (CI has a dedicated UI job) when it is not.
+if command -v node >/dev/null 2>&1; then
+    for f in tests/ui_*.js; do
+        echo "== $f"
+        node "$f" || status=1
+    done
+else
+    echo "note: node not found — skipping UI suites (tests/ui_*.js)"
+fi
+
+"$PY" -u -m unittest discover -s tests -t tests -v "$@" || status=1
+
+exit $status

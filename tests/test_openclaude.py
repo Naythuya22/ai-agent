@@ -53,9 +53,9 @@ class TestBuildCommand(unittest.TestCase):
         cmd = ocl.build_command(PROMPT, "/w", auto=False)
         self.assertNotIn("--permission-mode", cmd)
 
-    def test_model_defaults_to_sonnet(self):
+    def test_model_defaults_to_openrouter_free(self):
         cmd = ocl.build_command(PROMPT, "/w")
-        self.assertEqual(cmd[cmd.index("--model") + 1], "sonnet")
+        self.assertEqual(cmd[cmd.index("--model") + 1], "openrouter/free")
 
     def test_model_can_be_named(self):
         cmd = ocl.build_command(PROMPT, "/w", model="opus")

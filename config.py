@@ -509,7 +509,23 @@ class Config:
 
         discovered = find_model_file()
         if discovered is None:
-            return configured
+            if not configured:
+                return ""
+            # The configured path is stale and nothing can be discovered to
+            # replace it. Report "unset" instead of pointing the loader at a
+            # file that is not there (the missing-model message then lists
+            # the searched dirs instead of blaming a moved file), and with
+            # `persist` clear it on disk so the dead path stops shadowing
+            # auto-discovery on every later load.
+            if persist:
+                self.model_path = ""
+                try:
+                    self.save()
+                except OSError as e:
+                    log.warning(
+                        "could not persist the cleared model path: %s: %s",
+                        type(e).__name__, e)
+            return ""
 
         resolved = str(discovered)
         if persist and resolved != configured:

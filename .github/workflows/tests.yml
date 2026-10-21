@@ -1,0 +1,42 @@
+name: tests
+
+# The suite is the project's safety net — run it on every push and PR.
+# Two Python versions on purpose: the phone runs 3.14 (Termux), desktops
+# and this CI image may run older; the suite must be green on both (it
+# once silently depended on 3.14-only behaviour — see test_cloud_only
+# and the lock_held helper in test_agent_stream_cloud).
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  python:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.14"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Backend suite (no model, no network needed)
+        run: sh tests/run.sh
+
+  ui:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: UI suites
+        run: |
+          for f in tests/ui_*.js; do
+            echo "== $f"
+            node "$f"
+          done

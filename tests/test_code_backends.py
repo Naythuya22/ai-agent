@@ -246,10 +246,17 @@ class TestBackendEndpoints(unittest.TestCase):
         self.assertIn("not installed", body["reply"])
 
     def test_a_model_like_word_is_not_a_command(self):
-        status, body = self._chat("/models")
-        self.assertEqual(status, 200, body)
-        # not intercepted: it is a normal prompt (and needs the binary)
-        self.assertTrue(status in (200, 500))
+        # "/models" is not the /model command: it falls through to a normal
+        # run, which needs the binary. Pin "not installed" (the house style
+        # in this file) so the fall-through contract — an install-hint error,
+        # never a /model command reply — is identical on every machine,
+        # whether or not a binary happens to be present.
+        with patch.object(oc, "is_installed", return_value=False):
+            with patch.object(ocl, "is_installed", return_value=False):
+                status, body = self._chat("/models")
+        self.assertEqual(status, 500, body)
+        self.assertIn("not installed", body["error"])
+        self.assertNotIn("reply", body)
 
 
 if __name__ == "__main__":

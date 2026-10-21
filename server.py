@@ -21,6 +21,7 @@ from werkzeug.exceptions import HTTPException
 
 from config import Config, model_missing_message
 from core import auth
+from core.llm import LLMError
 from core.log import get_logger
 from routes import register
 from routes._state import get_llm
@@ -42,6 +43,16 @@ def create_app() -> Flask:
         __name__, static_folder=str(web_dir), static_url_path="/static"
     )
     register(application)
+
+    # A missing local model is an expected state on a cloud-only device,
+    # not a server fault: hand the caller the actionable message (how to
+    # add a model) with a 503 instead of a bare 500.
+    @application.errorhandler(LLMError)
+    def _llm_unavailable(exc):
+        path = request.path or ""
+        if path.startswith("/api/") or path.startswith("/v1/"):
+            return jsonify({"error": str(exc)}), 503
+        return str(exc), 503
 
     # Anything no route caught still has to leave a trace. The handler is keyed
     # on the base Exception class, so Flask routes HTTPExceptions (404/405/…)
@@ -86,21 +97,32 @@ def main() -> None:
 
     cfg = Config.load()
     model_path = cfg.resolve_model_path()
-    if not model_path or not Path(model_path).is_file():
-        print(model_missing_message(model_path), flush=True)
-        return 1
+    have_model = bool(model_path) and Path(model_path).is_file()
     print("=" * 60, flush=True)
     print("  LiteRT OpenAI Bridge", flush=True)
     print("=" * 60, flush=True)
-    print(f"  Model:   {Path(model_path).name}", flush=True)
-    print(f"  From:    {Path(model_path).parent}", flush=True)
-    print(f"  Context: {cfg.context_size} ({cfg.context_size // 1024}K)", flush=True)
-    print(f"  Backend: {cfg.backend}", flush=True)
-    print("\nPre-loading engine...", flush=True)
+    if have_model:
+        print(f"  Model:   {Path(model_path).name}", flush=True)
+        print(f"  From:    {Path(model_path).parent}", flush=True)
+        print(f"  Context: {cfg.context_size} ({cfg.context_size // 1024}K)",
+              flush=True)
+        print(f"  Backend: {cfg.backend}", flush=True)
+        print("\nPre-loading engine...", flush=True)
 
-    t0 = time.time()
-    get_llm()
-    print(f"  ✅ Loaded in {time.time() - t0:.2f}s", flush=True)
+        t0 = time.time()
+        get_llm()
+        print(f"  ✅ Loaded in {time.time() - t0:.2f}s", flush=True)
+    else:
+        # Cloud-only start: refusing to boot here would also lock the user
+        # out of the Settings page where provider keys are entered — the
+        # exact thing a model-less device needs. Serve everything, and let
+        # local turns report the model as unavailable (503, LLMError).
+        print("  Model:   (none found)", flush=True)
+        print(model_missing_message(model_path), flush=True)
+        print("  Starting WITHOUT the local model — the UI, Settings, Code "
+              "mode and\n  cloud-backed Agent turns work. Local Chat turns "
+              "will report the model as\n  unavailable until a .litertlm "
+              "file is added.", flush=True)
 
     # Q2: enforcement is opt-in — without a token the API is open exactly as
     # before (that is what keeps the test suite honest). main() guarantees a

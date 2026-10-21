@@ -7,6 +7,7 @@ import time
 from flask import Blueprint, Response, jsonify, request
 
 import config
+from core.llm import LLMError
 from core.log import get_logger
 from routes._helpers import extract_messages
 from routes._state import get_llm, inference_guard
@@ -73,6 +74,10 @@ def chat_completions():
                     log.debug("could not close the bridge conversation: %s: %s",
                               type(e).__name__, e)
             reply = resp["content"][0]["text"]
+    except LLMError as e:
+        # No local model on this device (cloud-only state): an actionable
+        # state for the caller, not a server fault — 503, clean message.
+        return jsonify({"error": {"message": str(e)}}), 503
     except Exception as e:
         return jsonify({
             "error": {"message": f"{type(e).__name__}: {e}"}

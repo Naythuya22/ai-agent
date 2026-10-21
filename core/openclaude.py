@@ -42,7 +42,7 @@ PROVIDER = "anthropic"
 # URL for the UI to show. Empty string keeps the doctor payload's shape.
 BRIDGE_BASE = ""
 # openclaude takes Claude aliases/full names, not `provider/model`.
-MODEL_ID = "sonnet"
+# The default ref is what build_command passes (free-tier OpenRouter).
 MODEL_REF = "openrouter/free"
 
 

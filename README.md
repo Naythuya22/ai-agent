@@ -7,6 +7,8 @@ the cloud cannot answer. What sets it apart: Burmese-native output, a context
 window chosen from the model that answers, tier-aware prompts, and an
 offline-first setup that upgrades to the cloud once you add keys.
 
+> မြန်မာလို အမြန် စတင်ရန်: [docs/QUICKSTART.my.md](docs/QUICKSTART.my.md)
+
 ## Features
 
 - **Local + cloud** — 5 providers (OpenAI, Gemini, Anthropic, OpenRouter,
@@ -66,6 +68,9 @@ retried once at the corrected size before the turn may fail.
     pkg install python python-pip git
     pip install -r requirements.txt
     python settings.py     # optional: local engine KV-cache size
+
+# Or let the installer run the setup steps for you (Termux or desktop;
+# add --with-code for the Code-mode dependencies):  sh install.sh
 
 # Local model: copy a *.litertlm into models/ — auto-discovered (legacy
 # Download/gemmamodel dirs and nearby *model* folders are searched too).

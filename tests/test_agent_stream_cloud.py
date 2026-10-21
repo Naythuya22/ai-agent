@@ -15,6 +15,7 @@ from __future__ import annotations
 import contextlib
 import json
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 
@@ -48,6 +49,31 @@ def verification_off():
         yield
     finally:
         config.AGENT_VERIFY_ENABLED = saved
+
+
+def lock_held(lock) -> bool:
+    """True while some thread holds ``lock`` — on every Python version.
+
+    ``threading.RLock`` only grew a ``locked()`` method in 3.14; the suite
+    also runs on older interpreters, where the same question is answered by
+    probing from a helper thread (an RLock held by anyone refuses a
+    non-blocking acquire from a different thread).
+    """
+    locked = getattr(lock, "locked", None)
+    if locked is not None:
+        return bool(locked())
+    outcome = {}
+
+    def probe():
+        got = lock.acquire(blocking=False)
+        outcome["held"] = not got
+        if got:
+            lock.release()
+
+    t = threading.Thread(target=probe)
+    t.start()
+    t.join()
+    return outcome["held"]
 
 
 def frames(resp) -> list:
@@ -169,7 +195,7 @@ class TestStreamUsesCloud(_StreamCase):
 
         self.configure(mode="auto")
         self.stream({"message": "hello"})
-        self.assertFalse(st.inference_lock.locked(),
+        self.assertFalse(lock_held(st.inference_lock),
                          "the cloud step still holds the engine lock")
 
 
