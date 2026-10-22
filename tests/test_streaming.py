@@ -494,6 +494,97 @@ class StreamLocalEngineTests(unittest.TestCase):
         self.assertIsNone(mode._conv)
 
 
+class _RecordingHTTP:
+    """Non-stream transport that records: a verify pass would land here."""
+
+    def __init__(self):
+        self.calls = []
+
+    def __call__(self, url, payload, headers, timeout=30):
+        self.calls.append((url, payload, headers))
+        return {"choices": [{"message": {"content": "REVIEWER_OK"}}],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1}}
+
+
+def _tool_stream_body(directory: str) -> list:
+    """One streamed round: a PARTIAL text delta, then a list_files call."""
+    return _openai_body(
+        {"choices": [{"delta": {"content": "PARTIAL"}}]},
+        {"choices": [{"delta": {"tool_calls": [
+            {"index": 0, "function": {
+                "name": "list_files",
+                "arguments": json.dumps({"directory": directory})}}]}}]},
+    )
+
+
+class StreamBudgetNoticeTests(unittest.TestCase):
+    """Release 15: the streaming loop must not go silent at the budget edge.
+
+    Drives ``_handle_cloud_stream`` under its documented call contract
+    (the route opens the turn and appends the user message first) with a
+    provider whose every round asks for another tool call. The end frame
+    must carry the generated Burmese budget notice, the partial round
+    text must ride inside it, and the verify pass must stay off — the
+    notice is generated text, not a model answer.
+    """
+
+    def test_exhausted_stream_ends_with_the_budget_notice(self):
+        import tempfile
+        from pathlib import Path
+
+        km = _fresh_keys({"openai": [ALPHA]})
+        recording = _RecordingHTTP()
+        be = _backend(km, http=recording)
+        mode = AgentMode(StreamLocalEngineTests._LocalSpy(), None)
+        mode._store = None
+        mode._tools = []
+        mode._messages = []
+        mode._backend = be
+
+        tmp = Path(tempfile.mkdtemp(prefix="stream-budget-gen-"))
+        dirs = []
+        for i in range(8):
+            d = tmp / ("d%d" % i)
+            d.mkdir()
+            dirs.append(str(d))
+        stub = _ScriptedStream([_tool_stream_body(d) for d in dirs])
+
+        saved = config.AGENT_MAX_ITER_DEFAULT
+        config.AGENT_MAX_ITER_DEFAULT = 3
+        real = AB._http_stream
+        AB._http_stream = stub
+        try:
+            # The route's side of the contract, in the route's order.
+            mode.begin_turn()
+            mode._clear_turn_cache()
+            mode._messages.append({"role": "user",
+                                   "text": "list my files"})
+            frames = list(mode._handle_cloud_stream())
+        finally:
+            AB._http_stream = real
+            config.AGENT_MAX_ITER_DEFAULT = saved
+
+        kinds = [k for k, _ in frames]
+        self.assertEqual(kinds.count("end"), 1, kinds)
+        notice = frames[-1][1]
+        self.assertIn("⏱️", notice)
+        self.assertIn("list_files", notice)
+        self.assertIn("ဆက်လုပ်ပါ", notice)
+        self.assertIn("PARTIAL", notice,
+                      "the last round's partial text was dropped")
+        self.assertEqual(kinds.count("tool"), 3,
+                         "executed rounds missing from the stream")
+        # First pump plus one refresh per round; the non-stream transport
+        # stays untouched, so the reviewer never ran on the notice.
+        self.assertEqual(len(stub.calls), 4)
+        self.assertEqual(recording.calls, [],
+                         "verify ran on a budget notice")
+        # The notice is the committed assistant turn.
+        self.assertEqual(mode._messages[-1]["role"], "assistant")
+        self.assertEqual(mode._messages[-1]["text"], notice)
+        self.assertIsNone(mode._conv, "the local conversation was created")
+
+
 # ──────────────── Step 3 — POST /api/agent/stream/v2 ────────────────
 
 

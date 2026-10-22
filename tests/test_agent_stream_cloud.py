@@ -384,5 +384,101 @@ class TestStreamCloudTools(_StreamCase):
         self.assertEqual(j["last_backend"], "cloud")
 
 
+@contextlib.contextmanager
+def small_budget(n):
+    """Pin the tool-loop iteration cap for one test (Release 15).
+
+    The loops read config.agent_max_iter() per turn, which reads this
+    module attribute — the same override test_limits.py pins.
+    """
+    saved = config.AGENT_MAX_ITER_DEFAULT
+    config.AGENT_MAX_ITER_DEFAULT = n
+    try:
+        yield
+    finally:
+        config.AGENT_MAX_ITER_DEFAULT = saved
+
+
+class AlwaysToolTransport:
+    """A provider that never stops asking for the same tool (Release 15).
+
+    Every reply carries one list_files call; the directory rotates so the
+    dedup guard lets every round really execute. The message content
+    carries PARTIAL so the round text is observable too.
+    """
+
+    PARTIAL = "PARTIAL_WORDS"
+
+    def __init__(self, dirs):
+        self.dirs = list(dirs)
+        self.calls = []
+
+    def __call__(self, url, body, headers, timeout=30):
+        self.calls.append((url, body, headers))
+        d = self.dirs[min(len(self.calls) - 1, len(self.dirs) - 1)]
+        return {"choices": [{"message": {
+            "content": self.PARTIAL,
+            "tool_calls": [{"id": "call_%d" % len(self.calls),
+                            "type": "function",
+                            "function": {"name": "list_files",
+                                         "arguments": json.dumps(
+                                             {"directory": d})}}],
+        }}], "usage": {"prompt_tokens": 4, "completion_tokens": 2}}
+
+
+class TestStreamBudgetNotice(_StreamCase):
+    """Release 15: a streamed turn the step budget cuts short must end
+    with the Burmese budget notice — not the last round's bare text —
+    and the generated notice must not go through the verify pass.
+
+    This endpoint's cloud attempt is the non-streaming _handle_cloud
+    (v1 replays the finished turn as SSE frames and sanitises the text
+    on the way out — the same filter_scripts allowlist that strips the
+    🔒/☁️ leads of the older generated replies also strips the ⏱️ here,
+    so the assertions target the Burmese body). The streaming generator
+    itself is covered directly in tests/test_streaming.py.
+    """
+
+    def test_budget_exhaustion_ends_the_stream_with_the_notice(self):
+        from tools import ALL_TOOLS
+
+        self.configure(mode="auto")
+        old_tools = self.agent_mode._tools
+        self.addCleanup(setattr, self.agent_mode, "_tools", old_tools)
+        self.agent_mode._tools = [FunctionTool(fn) for fn in ALL_TOOLS]
+
+        tmp = Path(tempfile.mkdtemp(prefix="stream-budget-"))
+        dirs = []
+        for i in range(8):
+            d = tmp / ("d%d" % i)
+            d.mkdir()
+            (d / "seen.txt").write_text("x", "utf-8")
+            dirs.append(str(d))
+        tr = AlwaysToolTransport(dirs)
+        self.agent_mode._backend._http = tr
+
+        with small_budget(3):
+            fr = self.stream({"message": "list my files"})
+        end = fr[-1]
+        self.assertEqual(end["type"], "end")
+        self.assertEqual(end["last_backend"], "cloud")
+        text = end["text"]
+        self.assertTrue(text, "an exhausted stream ended with empty text")
+        self.assertIn("အဆင့် (step) ကန့်သတ်", text)
+        self.assertIn("list_files", text)
+        self.assertIn("ဆက်လုပ်ပါ", text)
+        self.assertIn(AlwaysToolTransport.PARTIAL, text)
+        # First pump plus one refresh per round = 4 provider calls. The
+        # reviewer would be a fifth — the notice is generated text, not a
+        # model answer, so verification stays off for it even though it
+        # is enabled globally.
+        self.assertEqual(len(tr.calls), 4,
+                         "verify ran on a budget notice (or the loop "
+                         "consumed a different number of steps)")
+        # The notice is the committed assistant turn, as in handle().
+        self.assertEqual(self.agent_mode._messages[-1]["role"], "assistant")
+        self.assertEqual(self.agent_mode._messages[-1]["text"], text)
+
+
 if __name__ == "__main__":
     unittest.main()

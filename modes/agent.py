@@ -1183,6 +1183,46 @@ class AgentMode:
         record_usage("")
         return text
 
+    def _budget_notice(self, max_iter: int, partial_text: str = "") -> str:
+        """Burmese notice for a turn the step budget cut short (Release 15).
+
+        Deterministic — built only from this turn's transcript, never from
+        a provider call, so it costs nothing and cannot itself fail. Which
+        tools ran (and how often) is read back from the tool_call entries
+        appended since the user's message, in first-use order; whatever
+        text the model produced alongside its last, unanswered tool
+        request rides along so no finished work is hidden.
+        """
+        counts = {}
+        order = []
+        for m in reversed(self._messages):
+            role = m.get("role")
+            if role == "user":
+                break
+            if role == "tool_call":
+                name = m.get("tool") or ""
+                if not name:
+                    continue
+                if name not in counts:
+                    counts[name] = 0
+                    order.append(name)
+                counts[name] += 1
+        order.reverse()   # scanned newest-first; present in first-use order
+        lines = ["⏱️ အဆင့် (step) ကန့်သတ် %d ဆင့် ပြည့်သွားလို့ "
+                 "ဒီအလှည့်ကို ဒီတင် ရပ်လိုက်ပါတယ်။" % max_iter]
+        if order:
+            used = "၊ ".join("%s %d ကြိမ်" % (name, counts[name])
+                              for name in order)
+            lines.append("ဒီအလှည့်မှာ သုံးခဲ့တဲ့ tool တွေ — " + used + "။")
+        partial = (partial_text or "").strip()
+        if partial:
+            lines.append("မရပ်ခင် model နောက်ဆုံး ပြောထားတာ:\n" + partial)
+        lines.append("ဆက်လုပ်စေချင်ရင် \"ဆက်လုပ်ပါ\" လို့ ပြန်ပြောပါ — "
+                     "ကျန်နေတဲ့ အလုပ်ကို ဆက်လုပ်ပေးပါမယ်။")
+        log.info("step budget exhausted: %d iterations, tools=%s",
+                 max_iter, order)
+        return "\n".join(lines)
+
     def _handle_cloud(self, user_input: str, be, system: str = "") -> str:
         """Mirror of the local tool loop, but every step goes to the provider."""
         import json as _json
@@ -1266,12 +1306,23 @@ class AgentMode:
                     self._messages.append({"role": "tool_result", "tool": name,
                                            "text": result})
             step = _step()
-        if not final_text:
+        # Release 15: the loop only falls through with tool calls still
+        # pending when the step budget ran out mid-work — the refreshed
+        # step's request was never executed. Say so, with what did get
+        # done, instead of returning its bare text (normally "").
+        exhausted = bool(step.tool_calls)
+        if exhausted:
+            final_text = self._budget_notice(max_iter, step.text or "")
+        elif not final_text:
             final_text = step.text or ""
 
         # One reviewer pass, cloud only (Decision 4) — and only when a tool
         # actually produced evidence this turn.
-        if self._should_skip_verify():
+        if exhausted:
+            # The notice is generated text, not a model answer — there is
+            # no candidate for the reviewer to check.
+            log.info("verify skipped: step budget exhausted (notice turn)")
+        elif self._should_skip_verify():
             # Batch 4.2i: nudge-fired turns are tool-grounded.
             log.info("verify skipped: capability nudge turn (tool-grounded)")
         else:
@@ -1461,6 +1512,10 @@ class AgentMode:
         # it back as reasoning_content — without it the NEXT turn's first
         # DeepSeek thinking request dies with a 400.
         self._stream_reasoning = ""
+        # Release 15: read back by _handle_cloud_stream at commit time,
+        # the same way _stream_reasoning is — True when the end frame
+        # carries the budget notice instead of a model answer.
+        self._stream_budget_exhausted = False
         final_text = ""
 
         def _pump_round():
@@ -1581,10 +1636,20 @@ class AgentMode:
                 # tool round came back empty; there _step() raises and
                 # _try_cloud rolls back (L648), so nothing commits here either
                 return
-            # mirrors _handle_cloud at L737 — keep in sync on any change.
-            # The last pumped round's text stands, tool_calls or not —
-            # exactly what `final_text = step.text or ""` does there
-            final_text = round_text
+            if info.get("tool_calls"):
+                # Release 15: the budget ran out with work still pending —
+                # the end frame carries the budget notice instead of the
+                # last round's bare text (the client replaces its buffer
+                # with the end text, so the partial round text rides
+                # inside the notice), and the flag tells
+                # _handle_cloud_stream to skip the verify pass.
+                self._stream_budget_exhausted = True
+                final_text = self._budget_notice(max_iter, round_text)
+            else:
+                # mirrors _handle_cloud at L737 — keep in sync on any change.
+                # The last pumped round's text stands — exactly what
+                # `final_text = step.text or ""` does there
+                final_text = round_text
         yield ("end", final_text)
 
     def _handle_cloud_stream(self):
@@ -1644,7 +1709,12 @@ class AgentMode:
                 # mirrors _handle_cloud at L742 — keep in sync on any change.
                 # One reviewer pass, running on the unmodified
                 # _verify_cloud/_reviewer_reply
-                if self._should_skip_verify():
+                if getattr(self, "_stream_budget_exhausted", False):
+                    # Release 15: the end text is the generated budget
+                    # notice, not a model answer — nothing to verify.
+                    log.info("verify skipped: step budget exhausted "
+                             "(notice turn)")
+                elif self._should_skip_verify():
                     # Batch 4.2i: nudge-fired turns are tool-grounded.
                     log.info("verify skipped: capability nudge turn (tool-grounded)")
                 else:
@@ -1744,6 +1814,7 @@ class AgentMode:
         max_iter = config.agent_max_iter(self.name)
         final_text = ""
         _seen_calls = set()  # A8c: dedup guard
+        _finished = False   # Release 15: the loop saw a tool-free response
         for _ in range(max_iter):
             tool_calls = None
             if isinstance(resp, dict):
@@ -1754,6 +1825,7 @@ class AgentMode:
                     final_text = resp["content"][0]["text"]
                 except (KeyError, IndexError, TypeError):
                     final_text = str(resp)
+                _finished = True
                 break
 
             # Save tool call to _messages
@@ -1802,6 +1874,29 @@ class AgentMode:
                     "name": name,
                     "content": result,
                 })
+
+        if not _finished:
+            # Release 15: the budget ran out before the loop could look at
+            # the last response. If it still asks for tools, the turn was
+            # cut short mid-work — say so, with what did get done. If it
+            # carries the final text instead, the model finished exactly
+            # on the last allowed round: recover the text the same way the
+            # break branch above does (the cloud loop's step.text fallback
+            # does the same).
+            pending = (resp.get("tool_calls")
+                       if isinstance(resp, dict) else None)
+            if pending:
+                partial = ""
+                try:
+                    partial = resp["content"][0]["text"] or ""
+                except (KeyError, IndexError, TypeError):
+                    partial = ""
+                final_text = self._budget_notice(max_iter, partial)
+            else:
+                try:
+                    final_text = resp["content"][0]["text"]
+                except (KeyError, IndexError, TypeError):
+                    final_text = str(resp)
 
         self._messages.append({"role": "assistant", "text": final_text})
         self._trim_messages()   # F2: cap history

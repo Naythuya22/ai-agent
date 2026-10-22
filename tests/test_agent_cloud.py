@@ -402,5 +402,194 @@ class CloudToolLoopCase(AgentCloudBase):
         self.assertIn("unknown tool", results[-1]["text"])
 
 
+@contextlib.contextmanager
+def small_budget(n):
+    """Pin the tool-loop iteration cap for one test (Release 15).
+
+    The loops read config.agent_max_iter() per turn, which reads this
+    module attribute — the same override test_limits.py pins.
+    """
+    saved = config.AGENT_MAX_ITER_DEFAULT
+    config.AGENT_MAX_ITER_DEFAULT = n
+    try:
+        yield
+    finally:
+        config.AGENT_MAX_ITER_DEFAULT = saved
+
+
+class AlwaysToolTransport:
+    """A provider that never stops asking for the same tool (Release 15).
+
+    Every reply carries one list_files call; the directory rotates so the
+    dedup guard lets every round really execute. The message content
+    carries PARTIAL so the step's partial text is observable too.
+    """
+
+    PARTIAL = "PARTIAL_WORDS"
+
+    def __init__(self, dirs):
+        self.dirs = list(dirs)
+        self.calls = []
+
+    def __call__(self, url, body, headers, timeout=30):
+        self.calls.append((url, body, headers))
+        d = self.dirs[min(len(self.calls) - 1, len(self.dirs) - 1)]
+        return {"choices": [{"message": {
+            "content": self.PARTIAL,
+            "tool_calls": [{"id": "call_%d" % len(self.calls),
+                            "type": "function",
+                            "function": {"name": "list_files",
+                                         "arguments": json.dumps(
+                                             {"directory": d})}}],
+        }}], "usage": {"prompt_tokens": 4, "completion_tokens": 2}}
+
+
+class CloudBudgetNoticeCase(AgentCloudBase):
+    """Release 15: a cloud turn the step budget cuts short must say so —
+    what the limit was, what work did get done, and how to continue —
+    instead of returning the last step's bare (usually empty) text."""
+
+    def setUp(self):
+        super().setUp()
+        self.mode._tools = [FunctionTool(fn) for fn in ALL_TOOLS]
+        self.tmp = Path(tempfile.mkdtemp(prefix="agent-budget-"))
+        self.dirs = []
+        for i in range(8):
+            d = self.tmp / ("d%d" % i)
+            d.mkdir()
+            (d / "seen.txt").write_text("x", "utf-8")
+            self.dirs.append(str(d))
+
+    def test_exhausted_cloud_turn_answers_with_the_budget_notice(self):
+        tr = AlwaysToolTransport(self.dirs)
+        self.prep(mode="cloud", http=tr)
+        with small_budget(3):
+            out = self.mode.handle("list my files")
+        self.assertTrue(out, "an exhausted turn answered with empty text")
+        self.assertIn("⏱️", out)
+        self.assertIn("3", out)
+        self.assertIn("list_files", out)
+        self.assertIn("ဆက်လုပ်ပါ", out)
+        # The model's partial text rides along instead of being dropped.
+        self.assertIn(AlwaysToolTransport.PARTIAL, out)
+        # Four provider steps: the first plus one refresh per round. The
+        # reviewer would be a fifth call — the notice is generated text,
+        # not a model answer, so verification stays off for it even
+        # though it is enabled globally.
+        self.assertEqual(len(tr.calls), 4,
+                         "verify ran on a budget notice (or the loop "
+                         "consumed a different number of steps)")
+        # Transcript shape: the notice is the committed assistant turn,
+        # and the executed rounds are still in the transcript.
+        self.assertEqual(self.mode._messages[-1]["role"], "assistant")
+        self.assertEqual(self.mode._messages[-1]["text"], out)
+        results = [m for m in self.mode._messages
+                   if m.get("role") == "tool_result"]
+        self.assertEqual(len(results), 3, "executed rounds were lost")
+
+    def test_cloud_turn_that_finishes_inside_the_budget_is_unchanged(self):
+        tr = ToolCallTransport("list_files", {"directory": str(self.tmp)},
+                               reply="FINISHED_WITHIN_BUDGET")
+        self.prep(mode="cloud", http=tr)
+        with small_budget(3), verification_off():
+            out = self.mode.handle("list my files")
+        self.assertEqual(out, "FINISHED_WITHIN_BUDGET")
+        self.assertNotIn("⏱️", out)
+
+
+def _tool_response(directory):
+    return {"content": [{"text": ""}],
+            "tool_calls": [{"function": {
+                "name": "list_files",
+                "arguments": {"directory": directory}}}]}
+
+
+class ScriptedConversation:
+    """Local-model stub replaying a fixed list of responses.
+
+    The last response repeats if the loop asks again — an under-scripted
+    test then fails on its assertions, not on an IndexError in the loop.
+    """
+
+    def __init__(self, responses):
+        self.responses = list(responses)
+        self.sent = 0
+
+    def send_message(self, msg):
+        r = self.responses[min(self.sent, len(self.responses) - 1)]
+        self.sent += 1
+        return r
+
+
+class ScriptedEngine:
+    def __init__(self, conv):
+        self._conv = conv
+
+    def create_conversation(self, **kw):
+        return self._conv
+
+
+class ScriptedLLM:
+    """FakeLocalLLM's surface — load() plus _engine — with a script."""
+
+    def __init__(self, conv):
+        self._conv = conv
+        self._engine = None
+        self.loaded = False
+
+    def load(self):
+        self.loaded = True
+        self._engine = ScriptedEngine(self._conv)
+
+
+class LocalBudgetNoticeCase(AgentCloudBase):
+    """Release 15: the local loop must not go silent at the budget edge."""
+
+    def setUp(self):
+        super().setUp()
+        self.mode._tools = [FunctionTool(fn) for fn in ALL_TOOLS]
+        self.tmp = Path(tempfile.mkdtemp(prefix="agent-budget-local-"))
+        self.dirs = []
+        for i in range(8):
+            d = self.tmp / ("d%d" % i)
+            d.mkdir()
+            self.dirs.append(str(d))
+        self.prep(mode="local")
+
+    def drive(self, responses):
+        self.mode.llm = ScriptedLLM(ScriptedConversation(responses))
+        self.mode._conv = None
+        return self.mode.handle("list my files")
+
+    def test_exhausted_local_turn_answers_with_the_budget_notice(self):
+        with small_budget(3):
+            out = self.drive([_tool_response(d) for d in self.dirs])
+        self.assertTrue(out, "an exhausted local turn answered empty")
+        self.assertIn("⏱️", out)
+        self.assertIn("list_files", out)
+        self.assertIn("ဆက်လုပ်ပါ", out)
+        self.assertEqual(self.mode._messages[-1]["role"], "assistant")
+        self.assertEqual(self.mode._messages[-1]["text"], out)
+
+    def test_local_answer_on_the_last_allowed_round_is_recovered(self):
+        # Three tool rounds (the whole budget), then the answer: the loop
+        # never gets a fourth look, but the text must not be lost — the
+        # cloud loop's step.text fallback has always recovered it there.
+        responses = [_tool_response(d) for d in self.dirs[:3]]
+        responses.append({"content": [{"text": "BOUNDARY_DONE"}]})
+        with small_budget(3):
+            out = self.drive(responses)
+        self.assertEqual(out, "BOUNDARY_DONE")
+        self.assertNotIn("⏱️", out)
+
+    def test_local_turn_that_finishes_inside_the_budget_is_unchanged(self):
+        responses = [_tool_response(self.dirs[0]),
+                     {"content": [{"text": "LOCAL_DONE"}]}]
+        with small_budget(3):
+            out = self.drive(responses)
+        self.assertEqual(out, "LOCAL_DONE")
+        self.assertNotIn("⏱️", out)
+
+
 if __name__ == "__main__":
     unittest.main()
