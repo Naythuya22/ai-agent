@@ -611,6 +611,11 @@ def api_agent_stream():
                         except Exception as e:
                             result = "Error: %s: %s" % (type(e).__name__, e)
                         agent_mode._messages.append({"role": "tool_result", "tool": name, "text": result})
+                        # Release 19: this route hand-drives its own local
+                        # loop, so it files the mid-turn checkpoint itself —
+                        # a disconnect or crash mid-turn resumes on next load
+                        # instead of losing the tool work above.
+                        agent_mode._save_checkpoint()
                         yield _sse({"type": "tool_result", "tool": name, "result": result[:500], "result_len": len(result)})
                         current_input = {"role": "tool", "name": name, "content": result}
 
@@ -633,6 +638,9 @@ def api_agent_stream():
                         # line the whole tool trace would vanish silently.
                         log.error("could not save agent session %s: %s: %s",
                                   agent_mode.session_id, type(e).__name__, e)
+                    else:
+                        # Release 19: turn durably saved — checkpoint done.
+                        agent_mode._clear_checkpoint()
 
                 new_msgs = agent_mode._messages[before_len:]
                 _, tool_trace = _tool_events(new_msgs)

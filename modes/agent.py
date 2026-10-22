@@ -389,6 +389,10 @@ class AgentMode:
                     self.session_id = self._store.create_session("agent")
                 self._messages = self._store.get_mode("agent")
                 self.turns = len(self._messages) // 2
+                # Release 19: a checkpoint left by a process that died
+                # mid-turn resumes here — its transcript replaces the
+                # last completed turn's (see _restore_checkpoint).
+                self._restore_checkpoint()
             except Exception as e:
                 log.error("could not load agent history: %s: %s", type(e).__name__, e)
                 self._messages = []
@@ -1297,6 +1301,117 @@ class AgentMode:
         except Exception as e:
             log.error("could not save agent turn (session %s): %s: %s",
                       getattr(self, "session_id", None), type(e).__name__, e)
+            return
+        # Release 19: the turn is durably saved, so its mid-turn
+        # checkpoint has done its job — a completed turn must never
+        # be "resumed". Only on success: when the save failed, the
+        # checkpoint is the only durable copy of the turn left.
+        self._clear_checkpoint()
+
+    # ── mid-turn checkpoints (Release 19) ──────────────────────────
+    #
+    # _save_turn persists at turn END only. While a turn runs, every
+    # tool loop snapshots the working transcript to
+    # core/checkpoint_store after each tool_result lands in it; if the
+    # process dies, the next load of the session restores the snapshot
+    # (with an interruption note) instead of losing the turn — and its
+    # already-executed side effects — without a trace. Every helper
+    # here is guarded end to end: the store functions never raise,
+    # and these wrappers add a second net, because a checkpoint
+    # problem must never affect the turn it only describes.
+
+    def _save_checkpoint(self) -> None:
+        """Snapshot the in-flight turn (loops call this per result)."""
+        sid = getattr(self, "session_id", None)
+        if not sid or getattr(self, "_store", None) is None:
+            return
+        # The in-flight request and the steps spent on it, read back
+        # off the transcript itself — every loop (including the v1 SSE
+        # route's hand-driven one, which keeps no counters of ours)
+        # produces the same shape here.
+        user_text = ""
+        steps = 0
+        for m in reversed(self._messages):
+            if m.get("role") == "user":
+                user_text = m.get("text", "") or ""
+                break
+            if m.get("role") == "tool_call":
+                steps += 1
+        try:
+            from core import checkpoint_store
+            checkpoint_store.save_checkpoint(
+                sid, user_text, list(self._messages), steps)
+        except Exception as e:
+            log.warning("checkpoint save failed (session %s): %s: %s",
+                        sid, type(e).__name__, e)
+
+    def _clear_checkpoint(self, sid: str | None = None) -> None:
+        """Drop a session's checkpoint (its turn completed)."""
+        try:
+            from core import checkpoint_store
+            checkpoint_store.clear_checkpoint(
+                sid or getattr(self, "session_id", None) or "")
+        except Exception as e:
+            log.warning("checkpoint clear failed: %s: %s",
+                        type(e).__name__, e)
+
+    @staticmethod
+    def _interrupted_note(steps: int) -> str:
+        """Burmese transcript note closing a resumed turn (Release 19).
+
+        Appended as an ordinary assistant entry, so it is visible to
+        the user reading the history AND to the model answering the
+        next turn: the turn was cut off mid-work, what it had done is
+        still here, and continuing is one word away — the same
+        closing line the Release 15 budget notice uses.
+        """
+        lines = ["⚠️ အရင် အလှည့်က ကြားဖြတ် ရပ်သွားခဲ့ပါတယ်"
+                 " (server ပိတ်သွားတာ ဖြစ်နိုင်ပါတယ်)။"]
+        if steps:
+            lines[0] = ("⚠️ အရင် အလှည့်က အဆင့် (step) %d ဆင့် "
+                        "လုပ်ပြီးချိန်မှာ ကြားဖြတ် ရပ်သွားခဲ့ပါတယ်"
+                        " (server ပိတ်သွားတာ ဖြစ်နိုင်ပါတယ်)။" % steps)
+        lines.append("လုပ်ပြီးသမျှ အလုပ်တွေ — tool ရလဒ်တွေ အပါအဝင် — "
+                     "ဒီ မှတ်တမ်းမှာ အဲဒီ အတိုင်း ကျန်နေပါတယ်၊ "
+                     "အစက ပြန်လုပ်စရာ မလိုပါဘူး။")
+        lines.append("ဆက်လုပ်စေချင်ရင် \"ဆက်လုပ်ပါ\" လို့ ပြန်ပြောပါ — "
+                     "ကျန်နေတဲ့ အလုပ်ကို ဆက်လုပ်ပေးပါမယ်။")
+        return "\n".join(lines)
+
+    def _restore_checkpoint(self) -> bool:
+        """Resume an interrupted turn left by a previous process.
+
+        Runs at session load (``__init__`` / ``reload_session``),
+        after ``self._messages`` holds the last completed turn. A
+        waiting checkpoint's transcript replaces it, closed by the
+        interruption note, and is saved straight back through
+        _save_turn so the restored state is itself durable and a
+        second load finds nothing to restore (take consumes the
+        checkpoint). Malformed or foreign checkpoints are ignored by
+        the store. Returns True when a turn was resumed.
+        """
+        sid = getattr(self, "session_id", None)
+        if not sid or getattr(self, "_store", None) is None:
+            return False
+        try:
+            from core import checkpoint_store
+            entry = checkpoint_store.take_checkpoint(sid)
+        except Exception as e:
+            log.warning("checkpoint restore failed (session %s): %s: %s",
+                        sid, type(e).__name__, e)
+            return False
+        if not entry:
+            return False
+        msgs = [dict(m) for m in entry["messages"]]
+        steps = entry.get("steps") or 0
+        msgs.append({"role": "assistant",
+                     "text": self._interrupted_note(steps)})
+        self._messages = msgs
+        self.turns = len(msgs) // 2
+        self._save_turn()
+        log.info("resumed interrupted turn for session %s "
+                 "(%d steps had completed)", sid, steps)
+        return True
 
     # Why a locked (pinned) provider could not answer — Burmese,
     # user-facing. The codes are core.agent_backend.failure_reason's
@@ -1451,6 +1566,7 @@ class AgentMode:
                     self._turn_iter += 1
                     self._messages.append({"role": "tool_result", "tool": name,
                                            "text": r["result"]})
+                    self._save_checkpoint()   # Release 19: result is durable
             else:
                 for tc in step.tool_calls:
                     fn_info = tc.get("function", {}) if isinstance(tc, dict) else {}
@@ -1468,6 +1584,7 @@ class AgentMode:
                                 f"(skipped: {name} already called with "
                                 f"identical args this turn)"),
                         })
+                        self._save_checkpoint()   # Release 19
                         continue
                     _seen_calls.add(_key)
                     # `reasoning` rides along so the next provider step
@@ -1480,6 +1597,7 @@ class AgentMode:
                     self._turn_iter += 1   # budget: one more loop iteration spent
                     self._messages.append({"role": "tool_result", "tool": name,
                                            "text": result})
+                    self._save_checkpoint()   # Release 19: result is durable
             step = _step()
         # Release 15: the loop only falls through with tool calls still
         # pending when the step budget ran out mid-work — the refreshed
@@ -1771,6 +1889,7 @@ class AgentMode:
                     self._turn_iter += 1
                     self._messages.append({"role": "tool_result", "tool": name,
                                            "text": r["result"]})
+                    self._save_checkpoint()   # Release 19: before the yield
                     yield ("tool", {"name": name, "args": args,
                                     "result": r["result"]})
             else:
@@ -1794,6 +1913,7 @@ class AgentMode:
                                 f"(skipped: {name} already called with "
                                 f"identical args this turn)"),
                         })
+                        self._save_checkpoint()   # Release 19
                         continue
                     _seen_calls.add(_key)
                     # mirrors _handle_cloud at L729 — keep in sync on any change.
@@ -1806,6 +1926,7 @@ class AgentMode:
                     self._turn_iter += 1   # budget: one more loop iteration spent
                     self._messages.append({"role": "tool_result", "tool": name,
                                            "text": result})   # mirrors _handle_cloud at L734 — keep in sync on any change
+                    self._save_checkpoint()   # Release 19: before the yield
                     yield ("tool", {"name": name, "args": args,
                                     "result": result})
             # mirrors _handle_cloud at L736 — step = _step() for the next round
@@ -2036,6 +2157,7 @@ class AgentMode:
                         "tool": name,
                         "text": _skip,
                     })
+                    self._save_checkpoint()   # Release 19
                     resp = self._conv.send_message({
                         "role": "tool",
                         "name": name,
@@ -2056,6 +2178,7 @@ class AgentMode:
                     "tool": name,
                     "text": result,
                 })
+                self._save_checkpoint()   # Release 19: result is durable
                 # Send result back to LLM
                 resp = self._conv.send_message({
                     "role": "tool",
@@ -2100,6 +2223,10 @@ class AgentMode:
                 # here would be invisible, so it goes to the log.
                 log.error("could not save agent turn (session %s): %s: %s",
                           self.session_id, type(e).__name__, e)
+            else:
+                # Release 19: same rule as _save_turn — the turn is
+                # durably saved, so its checkpoint is done.
+                self._clear_checkpoint()
         self._finish_turn(user_input, final_text)
         return final_text
 
@@ -2124,6 +2251,9 @@ class AgentMode:
             self._messages = msgs
             self.session_id = sid
             self.turns = len(msgs) // 2
+            # Release 19: switching to a session whose last turn was
+            # interrupted resumes that turn here, same as at startup.
+            self._restore_checkpoint()
             return True
         except Exception as e:
             log.error("could not switch to agent session %s: %s: %s",
@@ -2208,6 +2338,9 @@ class AgentMode:
         }
 
     def reset(self) -> None:
+        # getattr: test stubs build AgentMode via __new__ (no __init__),
+        # the same reason _save_turn reads session_id defensively.
+        old_sid = getattr(self, "session_id", None)
         self._clear_turn_cache()
         if self._conv is not None:
             try:
@@ -2224,6 +2357,11 @@ class AgentMode:
                 self.session_id = self._store.get_active_id("agent")
             except Exception as e:
                 log.error("could not clear agent session: %s: %s", type(e).__name__, e)
+        # Release 19: reset abandons the old session — its in-flight
+        # checkpoint goes with it, or a later switch back to that
+        # session would resurrect a turn the user threw away.
+        if old_sid and old_sid != getattr(self, "session_id", None):
+            self._clear_checkpoint(old_sid)
 
     def close(self) -> None:
         self.reset()
