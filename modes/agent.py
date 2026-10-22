@@ -675,7 +675,10 @@ class AgentMode:
 
         The banner goes on first so the warning names the markers the source
         really contained; redaction runs last so a secret can never end up
-        inside the banner text.
+        inside the banner text. Two redaction passes run, in order: the
+        shape-based one in core.safety (no key list needed), then a
+        known-key pass so the user's own registered keys are stripped
+        whatever shape they have.
         """
         text = str(result)
         if config.AGENT_INJECTION_GUARD:
@@ -685,7 +688,31 @@ class AgentMode:
                             tool_name, ", ".join(markers))
                 text = (safety.INJECTION_BANNER_OPEN + "\n"
                         + text + "\n" + safety.INJECTION_BANNER_CLOSE)
-        return safety.redact_secrets(text)
+        return self._redact_known_keys(safety.redact_secrets(text))
+
+    def _redact_known_keys(self, text: str) -> str:
+        """Mask every registered provider key still present in ``text``.
+
+        safety.redact_secrets works on shapes; it cannot know a key whose
+        shape is not in its list (a Gemini ``AQ.…`` key, say). The key
+        manager can: each registered key is replaced by its mask, exactly
+        as error bodies are already treated in _try_cloud. Best-effort by
+        construction — no backend, no keys, or any failure leaves
+        ``text`` untouched, and a bare test instance without __init__
+        (no ``_backend`` attribute) lands in the except branch too.
+        """
+        try:
+            be = self._backend_obj()
+            if be is None:
+                return text
+            keys = be.keys.all_keys()
+            if not keys:
+                return text
+            from core.key_manager import redact
+            return redact(text, keys)
+        except Exception as e:
+            log.debug("known-key redaction skipped: %s", e)
+            return text
 
     def _execute_tool(self, tool_name: str, tool_args) -> str:
         """Execute a tool by name; return string result (Bug #3 manual loop).
