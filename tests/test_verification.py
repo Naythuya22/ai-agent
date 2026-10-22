@@ -279,10 +279,16 @@ class CloudTurnCallCountTests(unittest.TestCase):
 
         saved = config.AGENT_VERIFY_ENABLED
         config.AGENT_VERIFY_ENABLED = True
+        # Release 16: the file tools are jailed to config.PROJECT_ROOT
+        # when no project is active — point the root resolver at the
+        # transport's tmp tree so list_files really lists it.
+        saved_root = config.PROJECT_ROOT
+        config.PROJECT_ROOT = Path(tr.tmp)
         try:
             out = mode.handle("list my files")
         finally:
             config.AGENT_VERIFY_ENABLED = saved
+            config.PROJECT_ROOT = saved_root
 
         self.assertEqual(out, "THE ANSWER")
         self.assertEqual(len(tr.calls), 3,

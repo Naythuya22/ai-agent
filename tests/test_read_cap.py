@@ -81,8 +81,15 @@ class ReadFileTruncationTests(_CtxCase):
         self.tmp = Path.home() / ".ai-agent-test-big.txt"
         self.tmp.write_text("\n".join(f"line {i}" for i in range(1, 2001)),
                             encoding="utf-8")
+        # Release 16: read_file is jailed to config.PROJECT_ROOT when no
+        # project is active, and this case's fixture lives under HOME —
+        # point the root resolver at HOME for the case (tools/file.py
+        # reads config.PROJECT_ROOT per call, so the patch is the seam).
+        self._saved_root = config.PROJECT_ROOT
+        config.PROJECT_ROOT = Path.home()
 
     def tearDown(self):
+        config.PROJECT_ROOT = self._saved_root
         self.tmp.unlink(missing_ok=True)
         file_mod.set_read_context()
 

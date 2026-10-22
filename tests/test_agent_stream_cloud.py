@@ -350,6 +350,12 @@ class TestStreamCloudTools(_StreamCase):
 
         tmp = Path(tempfile.mkdtemp(prefix="stream-tools-"))
         (tmp / "seen-by-the-tool.txt").write_text("hello", "utf-8")
+        # Release 16: the file tools are jailed to config.PROJECT_ROOT
+        # when no project is active — point the root resolver at the tmp
+        # tree so the tool really lists it (read per call by tools/file.py).
+        saved_root = config.PROJECT_ROOT
+        config.PROJECT_ROOT = tmp
+        self.addCleanup(setattr, config, "PROJECT_ROOT", saved_root)
         tr = ToolCallTransport("list_files", {"directory": str(tmp)})
         self.agent_mode._backend._http = tr
 

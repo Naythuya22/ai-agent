@@ -330,6 +330,13 @@ AGENT_TURN_CACHE = _env_bool("AI_AGENT_CACHE", True)
 # Task 4 — scan tool output for instruction-shaped text and mark it untrusted.
 AGENT_INJECTION_GUARD = _env_bool("AI_AGENT_INJECTION", True)
 
+# ── file-tool path jail (Release 16) ─────────────────────────────
+# The file tools (list_files / read_file / write_file) are confined to the
+# active Code-mode project, or to PROJECT_ROOT when no project is selected:
+# Agent Mode without a project must not be able to wander the whole phone.
+# Revert with AI_AGENT_FILE_JAIL=0 (power users / recovery only).
+FILE_JAIL_ENABLED = _env_bool("AI_AGENT_FILE_JAIL", True)
+
 # Dev only — /sw.js re-reads web/index.html on every request instead of
 # serving the hash computed at startup, so a frontend edit reaches the
 # browser without a server restart (Lesson #3). Off by default.

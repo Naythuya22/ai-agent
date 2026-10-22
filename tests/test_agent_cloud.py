@@ -339,6 +339,13 @@ class CloudToolLoopCase(AgentCloudBase):
         self.mode._tools = [FunctionTool(fn) for fn in ALL_TOOLS]
         self.tmp = Path(tempfile.mkdtemp(prefix="agent-tools-"))
         (self.tmp / "seen-by-the-tool.txt").write_text("hello", "utf-8")
+        # Release 16: the file tools are jailed to config.PROJECT_ROOT
+        # when no project is active — point the root resolver at this
+        # case's tmp tree so the tool really lists it (tools/file.py
+        # reads the root per call).
+        self._saved_root = config.PROJECT_ROOT
+        config.PROJECT_ROOT = self.tmp
+        self.addCleanup(setattr, config, "PROJECT_ROOT", self._saved_root)
 
     def transport_tool_call(self, name="list_files", reply="TOOL_TURN_DONE"):
         return ToolCallTransport(name, {"directory": str(self.tmp)}, reply)

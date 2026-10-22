@@ -23,6 +23,7 @@ MODEL = bootstrap()
 app = get_app()
 client = app.test_client()
 
+import config  # noqa: E402
 from core import projects as ps  # noqa: E402
 from tools import _fs_guard as fg  # noqa: E402
 from tools import file as file_mod  # noqa: E402
@@ -161,8 +162,9 @@ class FileToolsJailTests(_ProjectStoreCase):
         self.outside = self.write(self.tmp / "outside.txt", "outside-data")
 
     def test_traversal_is_refused_even_with_no_project(self):
-        # No active project → no root to compare against, but a raw `..`
-        # segment is refused on its own: it is never a real file path here.
+        # No active project → the jail root falls back to the repo root
+        # (Release 16), but a raw `..` segment is refused before the root
+        # comparison either way: it is never a real file path here.
         for out in (file_mod.read_file("../../etc/passwd"),
                     file_mod.list_files("../.."),
                     file_mod.write_file("../escape.txt", "x")):
@@ -181,7 +183,8 @@ class FileToolsJailTests(_ProjectStoreCase):
         ps.set_active(proj["id"])
         out = file_mod.read_file(str(self.outside))
         self.assertTrue(out.startswith("Error: unsafe path"), out)
-        self.assertIn("outside project root", out)
+        self.assertIn("outside allowed root", out)
+        self.assertIn(str(self.root.resolve()), out)
         listed = file_mod.list_files(str(self.tmp))
         self.assertTrue(listed.startswith("Error: unsafe path"), listed)
 
@@ -202,9 +205,99 @@ class FileToolsJailTests(_ProjectStoreCase):
         self.assertEqual(target.read_text(encoding="utf-8"), "made")
 
 
+# ── the always-on jail (Release 16) ─────────────────────────────────────
+
+class AlwaysOnJailTests(_ProjectStoreCase):
+    """No project selected: the jail root falls back to the repo root.
+
+    Before Release 16 an empty project selection meant no jail at all —
+    Agent Mode could list/read/write anywhere the process could reach.
+    These cases run against the case's empty project store, so
+    _jail_root() must be answering config.PROJECT_ROOT.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.repo_root = Path(config.PROJECT_ROOT)
+        self.outside = self.write(self.tmp / "outside.txt", "outside-data")
+
+    def inside_tmp(self):
+        """A throwaway dir inside the repo root, cleaned up with the case."""
+        d = Path(tempfile.mkdtemp(prefix="jail-inside-", dir=str(self.repo_root)))
+        self.addCleanup(shutil.rmtree, str(d), True)
+        return d
+
+    def test_no_project_root_is_the_repo_root(self):
+        self.assertEqual(file_mod._jail_root(), str(self.repo_root))
+
+    def test_no_project_write_outside_is_refused_and_names_the_root(self):
+        target = self.tmp / "planted.txt"
+        out = file_mod.write_file(str(target), "evil")
+        self.assertTrue(out.startswith("Error: unsafe path"), out)
+        self.assertIn("outside allowed root", out)
+        self.assertIn(str(self.repo_root), out)
+        self.assertFalse(target.exists())
+
+    def test_no_project_read_and_list_outside_are_refused(self):
+        out = file_mod.read_file(str(self.outside))
+        self.assertTrue(out.startswith("Error: unsafe path"), out)
+        self.assertIn(str(self.repo_root), out)
+        listed = file_mod.list_files(str(self.tmp))
+        self.assertTrue(listed.startswith("Error: unsafe path"), listed)
+
+    def test_no_project_paths_inside_the_repo_root_work(self):
+        d = self.inside_tmp()
+        target = d / "note.txt"
+        out = file_mod.write_file(str(target), "inside-repo")
+        self.assertTrue(out.startswith("Wrote "), out)
+        self.assertIn("inside-repo", file_mod.read_file(str(target)))
+        self.assertIn("note.txt", file_mod.list_files(str(d)))
+
+    def test_no_project_symlink_escape_is_refused(self):
+        d = self.inside_tmp()
+        link = d / "link.txt"
+        try:
+            link.symlink_to(self.outside)
+        except (OSError, NotImplementedError):
+            self.skipTest("symlinks unavailable here")
+        # The link text sits inside the root; resolve() follows it out.
+        out = file_mod.read_file(str(link))
+        self.assertTrue(out.startswith("Error: unsafe path"), out)
+
+    def test_opt_out_reopens_outside_paths(self):
+        # AI_AGENT_FILE_JAIL=off lands in config.FILE_JAIL_ENABLED; the
+        # tools read it per call (the seam test_flag_off_returns_floor
+        # uses for AGENT_ADAPTIVE_READ in test_read_cap.py).
+        saved = config.FILE_JAIL_ENABLED
+        config.FILE_JAIL_ENABLED = False
+        self.addCleanup(setattr, config, "FILE_JAIL_ENABLED", saved)
+        target = self.tmp / "opted-out.txt"
+        out = file_mod.write_file(str(target), "free")
+        self.assertTrue(out.startswith("Wrote "), out)
+        self.assertIn("outside-data", file_mod.read_file(str(self.outside)))
+
+    def test_opt_out_still_refuses_traversal(self):
+        # The `..` refusal is a separate standing rule, not part of the
+        # jail the opt-out switches off.
+        saved = config.FILE_JAIL_ENABLED
+        config.FILE_JAIL_ENABLED = False
+        self.addCleanup(setattr, config, "FILE_JAIL_ENABLED", saved)
+        out = file_mod.write_file("../escape.txt", "x")
+        self.assertTrue(out.startswith("Error: unsafe path"), out)
+
+
 # ── the backup line in write_file ───────────────────────────────────────
 
 class WriteBackupTests(_ProjectStoreCase):
+    def setUp(self):
+        super().setUp()
+        # Release 16: the file tools are jailed even with no project
+        # (root = this repo), so this case names its tmp tree as the
+        # active project — the same standing choice a user makes in
+        # Code mode — instead of relying on the old open door.
+        proj = ps.add("proj", str(self.root))
+        ps.set_active(proj["id"])
+
     def test_overwriting_takes_a_backup_of_the_old_contents(self):
         target = self.write(self.root / "cfg.txt", "old-contents")
         out = file_mod.write_file(str(target), "new-contents")

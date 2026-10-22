@@ -1,4 +1,15 @@
-"""File tools for agent mode."""
+"""File tools for agent mode.
+
+The three tools here are path-jailed (tools/_fs_guard.py): every path
+must resolve inside the jail root — the active Code-mode project when one
+is selected, otherwise this repo's own root (config.PROJECT_ROOT).
+Selecting a project in Code mode is how the user widens where the agent
+may work; there is no separate UI for the jail.
+
+The jail is on by default. AI_AGENT_FILE_JAIL=off
+(config.FILE_JAIL_ENABLED) disables it entirely — a power-user /
+recovery escape hatch, not a mode anyone should run in by default.
+"""
 from __future__ import annotations
 
 import os
@@ -13,13 +24,16 @@ from tools._fs_guard import create_backup, is_safe_path
 _read_ctx = {"model": "", "base_url": "", "used_tokens": 0}
 
 
-# ── path jail (P0) ──────────────────────────────────────────────
+# ── path jail (P0; always on since Release 16) ──────────────────
 # Every path the file tools touch goes through _guard() first: a traversal
-# segment is refused outright, and with a project selected the path must
-# resolve inside that project. The check runs before stat/open/write, so an
+# segment is refused outright, and the path must resolve inside the jail
+# root. The root is the active Code-mode project when one is selected —
+# selecting a project is the user's standing choice of where the agent may
+# work — and this repo's own root otherwise, so Agent Mode with no project
+# selected is still confined. The check runs before stat/open/write, so an
 # escape attempt never reaches the call it is aiming at.
 
-def _jail_root() -> str:
+def _active_project_root() -> str:
     """Active project folder, or '' when no project is selected.
 
     Read fresh on every call: the Code-mode dropdown can change the
@@ -35,14 +49,32 @@ def _jail_root() -> str:
     return str(proj.get("path") or "")
 
 
+def _jail_root() -> str:
+    """Where the file tools may work: the active project, else the repo root.
+
+    config.PROJECT_ROOT is read per call, not cached at import — the same
+    reason _fs_guard._backup_dir re-reads config.CONFIG_DIR: a test (or a
+    re-pointed harness) can move the root, and a stale import-time path
+    would jail the tools into the wrong tree.
+    """
+    return _active_project_root() or str(config.PROJECT_ROOT)
+
+
+def _jail_enabled() -> bool:
+    """The AI_AGENT_FILE_JAIL opt-out, read per call like the root."""
+    return bool(getattr(config, "FILE_JAIL_ENABLED", True))
+
+
 def _guard(raw_path: str) -> str:
     """Error string for a path argument; '' means the path is allowed."""
     p = Path(raw_path).expanduser()
     if ".." in p.parts:
         return f"Error: unsafe path (path traversal): {raw_path}"
+    if not _jail_enabled():
+        return ""
     root = _jail_root()
-    if root and not is_safe_path(str(p), root):
-        return f"Error: unsafe path (outside project root): {raw_path}"
+    if not is_safe_path(str(p), root):
+        return f"Error: unsafe path (outside allowed root {root}): {raw_path}"
     return ""
 
 
