@@ -398,6 +398,13 @@ footer{position:relative;padding:12px 12px 16px;background:var(--bg);border-top:
 </div>
 
 <div class="set-row">
+<span class="set-label">Model switch</span>
+<label class="set-check"><input type="checkbox" id="set-auto-switch"> Auto switch — provider ကျရင် နောက် model ကို အလိုအလျောက် ပြောင်း</label>
+<div class="set-hint" id="set-pin-state"></div>
+<div class="set-line"><button id="set-pin-clear" type="button" class="set-btn" style="display:none">Lock ဖြုတ်ရန်</button></div>
+</div>
+
+<div class="set-row">
 <span class="set-label">Prompt Tier</span>
 <div class="set-modes" id="set-prompt-tier">
 <label><input type="radio" name="prompt-tier-mode" id="set-tier-auto" value="auto"> Auto</label>
@@ -799,6 +806,18 @@ function setStatus(t){statusTextEl.textContent=t||''}
   // every key dead reads differently from every key merely cooling down.
   function mpKeyBlockReason(ks){
     for(var i=0;i<ks.length;i++){ if((ks[i].status||'ok')!=='dead')return '⏳ cooling'; }
+    return mpDeadReason(ks);
+  }
+  // All keys dead — name the cause from the provider's last error, so
+  // "no balance" and "model gone" do not hide behind 'key invalid'.
+  // (Release 9; mirrors keyDeadReason in the Settings section.)
+  function mpDeadReason(ks){
+    for(var i=0;i<ks.length;i++){
+      var le=String((ks[i]&&ks[i].last_error)||'').toLowerCase();
+      if(!le)continue;
+      if(le.indexOf('402')>=0||le.indexOf('insufficient')>=0||le.indexOf('credit')>=0||le.indexOf('balance')>=0)return 'no balance';
+      if(le.indexOf('404')>=0||le.indexOf('not found')>=0||le.indexOf('no endpoints')>=0)return 'model n/a';
+    }
     return 'key invalid';
   }
   function mpUsable(cfg,p){
@@ -824,33 +843,65 @@ function setStatus(t){statusTextEl.textContent=t||''}
     var inner=cfg.config||{};
     var labels=cfg.provider_labels||{};
     var order=cfg.fallback_order||[];
+    // Release 9 — two modes. Auto (default): tapping reorders the
+    // chain, ✓ next marks the provider that will answer first. Locked
+    // (auto_switch off): tapping PINS one provider (● + 🔒 locked);
+    // it alone may answer, and a failure stops the turn with its
+    // reason instead of quietly switching.
+    var locked=inner.auto_switch===false;
+    var pin=inner.pinned_provider||'';
     var next='';
     var i,p,why;
-    for(i=0;i<order.length;i++){ if(!mpUsable(inner,order[i])){ next=order[i]; break; } }
+    if(!locked){ for(i=0;i<order.length;i++){ if(!mpUsable(inner,order[i])){ next=order[i]; break; } } }
     for(i=0;i<order.length;i++){
       p=order[i]; why=mpUsable(inner,p);
       (function(p,why){
         var row=document.createElement('button');
         row.type='button';
         row.className='mp-row'+(why?' off':'');
-        var nm=document.createElement('span'); nm.className='mp-name'; nm.textContent=labels[p]||p;
+        var nm=document.createElement('span'); nm.className='mp-name'; nm.textContent=(locked&&p===pin?'● ':'')+(labels[p]||p);
         var md=document.createElement('span'); md.className='mp-model'; md.textContent=((inner.providers||{})[p]||{}).model||'';
         row.appendChild(nm); row.appendChild(md);
-        if(p===next||why){
+        var tagText='';
+        if(locked&&p===pin)tagText='🔒 locked';
+        else if(p===next)tagText='✓ next';
+        else if(why)tagText=why;
+        if(tagText){
           var tag=document.createElement('span'); tag.className='fb-tag';
-          tag.textContent=(p===next)?'✓ next':why;
+          tag.textContent=tagText;
           row.appendChild(tag);
         }
-        if(!why&&p!==next&&inner.backend_mode!=='local'){
-          row.addEventListener('click',function(){ pickProvider(cfg,p); });
+        if(inner.backend_mode!=='local'){
+          if(locked){
+            if(!why&&p!==pin)row.addEventListener('click',function(){ pickPin(cfg,p); });
+          }else if(!why&&p!==next){
+            row.addEventListener('click',function(){ pickProvider(cfg,p); });
+          }
         }
         mpListEl.appendChild(row);
       })(p,why);
     }
     if(mpNoteEl){
-      mpNoteEl.textContent=(inner.backend_mode==='local')
-        ? 'Local Only မို့လို့ cloud provider မသုံးပါ — ပြောင်းချင်ရင် Settings → Backend မှာ ပြင်ပါ'
-        : 'နှိပ်လိုက်ရင် နောက် အလှည့်က စပြီး အဲဒီ provider ကို အရင် သုံးပါမယ်။ Model နာမည် ပြောင်းချင်ရင် Settings မှာ ပြင်ပါ';
+      if(inner.backend_mode==='local'){
+        mpNoteEl.textContent='Local Only မို့လို့ cloud provider မသုံးပါ — ပြောင်းချင်ရင် Settings → Backend မှာ ပြင်ပါ';
+      }else if(locked){
+        mpNoteEl.textContent=pin
+          ? 'Auto switch ပိတ်ထားတယ် — ● ပြထားတဲ့ provider တစ်ခုတည်းပဲ သုံးမယ်။ နောက်တစ်ခု နှိပ်ရင် lock ပြောင်းမယ်။'
+          : 'Auto switch ပိတ်ထားတယ် — နှိပ်တဲ့ provider ကို lock ချပြီး အဲဒီ တစ်ခုတည်းပဲ သုံးမယ်။';
+      }else{
+        mpNoteEl.textContent='နှိပ်လိုက်ရင် နောက် အလှည့်က စပြီး အဲဒီ provider ကို အရင် သုံးပါမယ်။ Model နာမည် ပြောင်းချင်ရင် Settings မှာ ပြင်ပါ';
+      }
+    }
+  }
+  async function pickPin(cfg,p){
+    try{
+      var r=await fetch('/api/settings/agent',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({pinned_provider:p})});
+      var j=await r.json();
+      if(!j||!j.ok)throw new Error('save failed');
+      mpClose();
+      if(typeof setStatus==='function')setStatus('Locked: '+(((cfg.provider_labels||{})[p])||p));
+    }catch(e){
+      if(mpNoteEl)mpNoteEl.textContent='Lock ချမရပါ — Settings မှာ စမ်းကြည့်ပါ';
     }
   }
   async function pickProvider(cfg,p){
@@ -2352,6 +2403,24 @@ function renderSettings(){
   var hint=setq('backend-mode-hint'); if(hint)hint.textContent=modeHint(mode);
   var note=setq('set-local-note');
   if(note)note.textContent=localNoteText(mode);
+  // Release 9 — switching policy: the toggle, the pin state line and
+  // the clear-pin button all read from the same config the picker uses.
+  var asw=setq('set-auto-switch');
+  if(asw)asw.checked=cfg.auto_switch!==false;
+  var pin=cfg.pinned_provider||'';
+  var pinState=setq('set-pin-state');
+  if(pinState){
+    var plabels=j.provider_labels||{};
+    if(cfg.auto_switch===false){
+      pinState.textContent=pin
+        ? ('🔒 Lock: '+(plabels[pin]||pin)+' — ဒီ provider တစ်ခုတည်းပဲ သုံးမယ်။ ကျရင် အကြောင်းရင်း ပြပြီး ရပ်မယ်။')
+        : 'Auto switch ပိတ်ထားတယ် — lock ချဖို့ chat မှာ model chip ကို နှိပ်ပြီး provider ရွေးပါ။';
+    }else{
+      pinState.textContent='Auto switch ဖွင့်ထားတယ် — provider ကျရင် နောက်တစ်ခုကို အလိုအလျောက် ပြောင်းသုံးမယ်။';
+    }
+  }
+  var pinClear=setq('set-pin-clear');
+  if(pinClear)pinClear.style.display=pin?'':'none';
   var b=j.backend||{};
   var net=setq('set-net');
   if(net){
@@ -2503,6 +2572,18 @@ function keyUsable(k){
 // every key dead reads differently from every key merely cooling down.
 function keyBlockReason(ks){
   for(var i=0;i<ks.length;i++){ if((ks[i].status||'ok')!=='dead')return '⏳ cooling'; }
+  return keyDeadReason(ks);
+}
+// All keys dead — say why, from what the provider last told us: a dead
+// key from missing credit is a different problem (and a different fix)
+// from a dead key the provider rejected outright. (Release 9.)
+function keyDeadReason(ks){
+  for(var i=0;i<ks.length;i++){
+    var le=String((ks[i]&&ks[i].last_error)||'').toLowerCase();
+    if(!le)continue;
+    if(le.indexOf('402')>=0||le.indexOf('insufficient')>=0||le.indexOf('credit')>=0||le.indexOf('balance')>=0)return 'no balance';
+    if(le.indexOf('404')>=0||le.indexOf('not found')>=0||le.indexOf('no endpoints')>=0)return 'model n/a';
+  }
   return 'key invalid';
 }
 
@@ -2672,6 +2753,7 @@ async function saveSettings(){
     backend_mode:mode,
     cost_ack:(mode!=='local'),
     prompt_tier_mode:tierMode,
+    auto_switch:(setq('set-auto-switch')?setq('set-auto-switch').checked:true),
     fallback:(settingsState.fallback||[]).slice(0),
     providers:{}
   };
@@ -2695,6 +2777,17 @@ async function saveSettings(){
     // otherwise the bar keeps the old model's total until the next turn.
     try{refreshCtx()}catch(_cx){}
   }catch(e){setSettingsMsg('Save failed: '+e.message,true)}
+}
+
+async function clearPin(){
+  try{
+    var r=await fetch('/api/settings/agent',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({pinned_provider:null})});
+    var j=await settingsJson(r);
+    if(j.error){setSettingsMsg(j.error,true);return;}
+    setSettingsMsg('Lock ဖြုတ်ပြီး ✓');
+    await loadSettings();
+    try{updateModelInfo()}catch(_mi){}
+  }catch(e){setSettingsMsg('Failed: '+e.message,true)}
 }
 
 async function runDoctor(){
@@ -2813,6 +2906,7 @@ async function resetSettings(){
   var cancel=setq('set-cancel'); if(cancel)cancel.addEventListener('click',closeSettings);
   var save=setq('set-save'); if(save)save.addEventListener('click',saveSettings);
   var doc=setq('set-doctor'); if(doc)doc.addEventListener('click',runDoctor);
+  var pcl=setq('set-pin-clear'); if(pcl)pcl.addEventListener('click',clearPin);
   var mv=setq('set-mem-view'); if(mv)mv.addEventListener('click',viewMemory);
   var ma=setq('set-mem-add'); if(ma)ma.addEventListener('click',addFact);
   var mf=setq('set-mem-forget'); if(mf)mf.addEventListener('click',forgetMemory);

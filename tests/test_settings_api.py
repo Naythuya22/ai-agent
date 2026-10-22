@@ -194,6 +194,30 @@ class PostSettingsTests(SettingsApiCase):
                                          net_state=lambda: "online",
                                          http=lambda *a, **k: {}).should_use_cloud())
 
+    def test_release9_switching_policy_defaults(self):
+        _, j = call("get", "/api/settings/agent", expect=200)
+        self.assertTrue(j["config"]["auto_switch"])
+        self.assertIsNone(j["config"]["pinned_provider"])
+
+    def test_release9_pin_roundtrip(self):
+        _, j = call("post", "/api/settings/agent",
+                    {"auto_switch": False, "pinned_provider": "gemini"},
+                    expect=200)
+        self.assertFalse(j["config"]["auto_switch"])
+        self.assertEqual(j["config"]["pinned_provider"], "gemini")
+        _, j = call("get", "/api/settings/agent", expect=200)
+        self.assertFalse(j["config"]["auto_switch"])
+        self.assertEqual(j["config"]["pinned_provider"], "gemini")
+        # Clearing the pin is a null, not an empty provider name.
+        _, j = call("post", "/api/settings/agent",
+                    {"pinned_provider": None}, expect=200)
+        self.assertIsNone(j["config"]["pinned_provider"])
+
+    def test_release9_unknown_pin_is_rejected(self):
+        _, j = call("post", "/api/settings/agent",
+                    {"pinned_provider": "nope"}, expect=400)
+        self.assertIn("error", j)
+
 
 class KeyEndpointsTests(SettingsApiCase):
     def test_add_key_returns_masked_entry(self):

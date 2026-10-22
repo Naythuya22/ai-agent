@@ -157,6 +157,23 @@ def api_settings_post():
         cfg["prompt_tier_mode"] = mode
         changed.append("prompt_tier_mode")
 
+    # Release 9 — switching policy: the Settings Auto-switch toggle and
+    # the picker's pin both land here. The pin is a provider name or
+    # null (cleared); anything else is a client bug, not a setting.
+    if "auto_switch" in body:
+        cfg["auto_switch"] = bool(body["auto_switch"])
+        changed.append("auto_switch")
+
+    if "pinned_provider" in body:
+        pin = body["pinned_provider"]
+        if pin in ("", None):
+            cfg["pinned_provider"] = None
+        elif isinstance(pin, str) and pin in PROVIDERS:
+            cfg["pinned_provider"] = pin
+        else:
+            return _err("pinned_provider must be a provider name or null")
+        changed.append("pinned_provider")
+
     if "fallback" in body:
         fb = body["fallback"]
         if not isinstance(fb, list) or not all(isinstance(p, str) for p in fb):

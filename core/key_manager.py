@@ -82,6 +82,14 @@ DEFAULT_CONFIG: dict = {
                  "groq", "siliconflow", "custom"],
     # The UI must show the price once before a cloud model is used.
     "cost_ack": False,
+    # Release 9 — provider switching policy. auto_switch True is the
+    # historical behaviour: step() walks the fallback order and a failed
+    # provider silently hands the turn to the next one. False is the
+    # locked mode the user asked for: only `pinned_provider` may answer,
+    # and when it cannot, the turn stops with the reason instead of
+    # quietly switching models behind the user's back.
+    "auto_switch": True,
+    "pinned_provider": None,
     # prompt_tier_mode (auto | cloud_strong | cloud_fast | local) is deliberately
     # NOT in the defaults: an absent key has to stay absent, or the "auto"
     # default would look like a Settings choice and the
@@ -494,6 +502,8 @@ class KeyManager:
             "prefer_cloud": bool(cfg.get("prefer_cloud", True)),
             "fallback": list(cfg.get("fallback") or []),
             "cost_ack": bool(cfg.get("cost_ack", False)),
+            "auto_switch": bool(cfg.get("auto_switch", True)),
+            "pinned_provider": cfg.get("pinned_provider") or None,
             # Report the stored value only. The environment fallback belongs to
             # config.prompt_tier_mode(), which routes/settings_api.py calls to
             # work out what this turn will actually use.

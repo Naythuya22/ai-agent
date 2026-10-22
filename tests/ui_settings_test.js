@@ -793,6 +793,37 @@ function click(id, ev) { const e = registry[id]; if (e) e.fire(ev || 'click'); }
   sandbox.showSettingsTab('backend');
   eq(registry['set-pane-backend'].style.display, '', 'tab: backend pane back');
 
+  // ---- Release 9: Auto switch toggle + pin state ----
+  sandbox.settingsState.data.config.auto_switch = false;
+  sandbox.settingsState.data.config.pinned_provider = 'gemini';
+  sandbox.renderSettings();
+  eq(registry['set-auto-switch'].checked, false,
+     'R9: the toggle reflects auto_switch off');
+  ok(registry['set-pin-state'].textContent.includes('Lock'),
+     'R9: the pin state line names the lock');
+  ok(registry['set-pin-state'].textContent.includes('Gemini'),
+     'R9: the pin state line names the pinned provider');
+  eq(registry['set-pin-clear'].style.display, '',
+     'R9: clear-pin shows while a pin is set');
+  registry['set-auto-switch'].checked = true;
+  const callsBeforeSave9 = calls.length;
+  registry['set-save'].fire('click');
+  await new Promise(r => setImmediate(r));
+  await new Promise(r => setImmediate(r));
+  const save9 = calls.slice(callsBeforeSave9)
+    .find(c => c.url === '/api/settings/agent' && c.method === 'POST');
+  ok(!!save9, 'R9: Save posts the settings');
+  eq(save9 && save9.body.auto_switch, true, 'R9: Save carries the toggle state');
+  const callsBeforeClear = calls.length;
+  registry['set-pin-clear'].fire('click');
+  await new Promise(r => setImmediate(r));
+  await new Promise(r => setImmediate(r));
+  const clearCall = calls.slice(callsBeforeClear)
+    .find(c => c.url === '/api/settings/agent' && c.method === 'POST');
+  ok(!!clearCall, 'R9: clear-pin posts');
+  eq(clearCall && clearCall.body.pinned_provider, null,
+     'R9: clear-pin posts a null pin');
+
   // every endpoint used must belong to routes/settings_api.py or
   // routes/memory_api.py (the Memory panel)
   const allowed = ['/api/settings/agent', '/api/settings/agent/keys',

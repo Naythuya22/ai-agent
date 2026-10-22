@@ -1030,12 +1030,25 @@ class AgentMode:
             if mode == "cloud":
                 return self._cloud_only_reply(user_input, "backend_unavailable")
             return None
+        if not want and reason == "no_usable_key":
+            # Locked mode (Release 9): the global gate only knows that
+            # SOME provider is unusable. With a pin set, step() must get
+            # its chance to name the pinned provider's exact problem
+            # instead of the turn silently dropping to the local model.
+            try:
+                if be.locked_pin():
+                    want = True
+            except Exception:
+                pass
         if not want:
             if mode == "cloud":
                 return self._cloud_only_reply(user_input, reason)
             return None
         before = len(self._messages)
         reason, detail = "exhausted", ""
+        locked_reason = None
+        locked_provider = ""
+        locked_detail = ""
         try:
             return self._handle_cloud(user_input, be, system=system)
         except Exception as e:
@@ -1051,6 +1064,15 @@ class AgentMode:
                     detail = redact(msg, be.keys.all_keys())[:220]
                 except Exception:
                     detail = msg[:220]
+                if getattr(e, "locked_reason", None):
+                    locked_reason = e.locked_reason
+                    locked_provider = getattr(e, "locked_provider", "") or ""
+                    try:
+                        locked_detail = redact(
+                            getattr(e, "locked_detail", "") or "",
+                            be.keys.all_keys())[:220]
+                    except Exception:
+                        locked_detail = ""
             else:
                 log.error("cloud step failed (%s: %s)", type(e).__name__, e)
                 detail = "%s: %s" % (type(e).__name__, e)
@@ -1060,6 +1082,9 @@ class AgentMode:
                 except Exception:
                     detail = detail[:220]
         del self._messages[before:]
+        if locked_reason:
+            return self._locked_reply(user_input, locked_provider,
+                                      locked_reason, locked_detail)
         if mode == "cloud":
             return self._cloud_only_reply(user_input, reason, detail)
         return None
@@ -1072,6 +1097,45 @@ class AgentMode:
         except Exception as e:
             log.error("could not save agent turn (session %s): %s: %s",
                       getattr(self, "session_id", None), type(e).__name__, e)
+
+    # Why a locked (pinned) provider could not answer — Burmese,
+    # user-facing. The codes are core.agent_backend.failure_reason's
+    # vocabulary plus the pin_block_reason set (off / no_keys / cooling).
+    LOCKED_REASONS = {
+        "key_invalid": "API key က အလုပ်မလုပ်တော့ဘူး (key invalid)",
+        "no_balance": "အကောင့်မှာ ဘေ/credit မရှိတော့ဘူး",
+        "rate_limited": "Limit ပြည့်သွားပြီ (429) — ခဏစောင့်ပြီး ပြန်စမ်းပါ",
+        "model_unavailable": "အဲဒီ model ကို အခု မရနိုင်ဘူး",
+        "cooling": "Key တွေ အကုန် cooldown ထဲမှာ ရှိတယ် — ခဏစောင့်ပါ",
+        "no_keys": "အဲဒီ provider မှာ key မရှိဘူး",
+        "off": "အဲဒီ provider ကို ပိတ်ထားတယ်",
+        "network": "Network မရှိလို့ ချိတ်မရဘူး",
+        "server_error": "Provider ဘက်က ပြဿနာ ရှိနေတယ်",
+    }
+
+    def _locked_reply(self, user_input: str, provider: str,
+                      reason: str, detail: str = "") -> str:
+        """Locked mode (Release 9): the pinned provider failed and auto
+        switch is off, so the turn stops here with the reason — the user
+        pinned that model on purpose and asked to decide themselves,
+        not to be switched quietly."""
+        from core.key_manager import PROVIDER_LABELS
+        label = PROVIDER_LABELS.get(provider, provider or "provider")
+        why = self.LOCKED_REASONS.get(reason, reason or "server_error")
+        if detail:
+            why = why + " — " + detail
+        text = ("🔒 Lock ချထားတဲ့ " + label + " က မဖြေနိုင်ဘူး: " + why +
+                "\nAuto switch ပိတ်ထားလို့ တခြား model ကို အလိုအလျောက် "
+                "မပြောင်းဘူး။ ပြောင်းသုံးချင်ရင် model chip ကို နှိပ်ပြီး "
+                "ရွေးပါ၊ ဒါမှမဟုတ် Settings → Backend မှာ Auto switch "
+                "ပြန်ဖွင့်ပါ။")
+        self._messages.append({"role": "user", "text": user_input})
+        self._messages.append({"role": "assistant", "text": text})
+        self._trim_messages()
+        self._save_turn()
+        # Nothing ran — same bookkeeping as _cloud_only_reply.
+        record_usage("")
+        return text
 
     def _cloud_only_reply(self, user_input: str, reason: str,
                           detail: str = "") -> str:

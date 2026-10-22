@@ -24,6 +24,7 @@ from core.agent_backend import (  # noqa: E402
     _apply_reasoning_policy,
     _is_thinking_model,
     cost_per_1k,
+    failure_reason,
     friendly_local_name,
     normalize,
     tool_schema,
@@ -284,6 +285,124 @@ class StepTests(BackendCase):
         joined = " ".join(stored)
         self.assertNotIn(ALPHA, joined)
         self.assertNotIn(BETA, joined)
+
+
+class Release9LockedTests(BackendCase):
+    """Release 9 — locked mode: auto_switch off + a pinned provider.
+
+    The pin alone may answer; its failure stops the turn with the
+    classified reason instead of falling through the chain the user
+    turned off.
+    """
+
+    def lock(self, pin):
+        self.set_cfg(auto_switch=False, pinned_provider=pin)
+
+    def test_auto_mode_is_the_default(self):
+        be = self.backend()
+        self.assertIsNone(be.locked_pin())
+        self.assertEqual(be.route_providers(), be.usable())
+
+    def test_locked_pin_routes_only_to_the_pin(self):
+        self.lock("gemini")
+
+        def http(url, body, headers, timeout=30):
+            return {"candidates": [{"content": {"parts": [{"text": "gem"}]}}],
+                    "usageMetadata": {"promptTokenCount": 3}}
+
+        be = self.backend(http=http)
+        self.assertEqual(be.locked_pin(), "gemini")
+        self.assertEqual(be.route_providers(), ["gemini"])
+        step = be.step(system="s", messages=[], tools=[], max_tokens=8)
+        self.assertEqual(step.provider, "gemini")
+        self.assertEqual(step.text, "gem")
+
+    def test_locked_failure_does_not_fall_through(self):
+        self.lock("openai")
+        urls = []
+
+        def http(url, body, headers, timeout=30):
+            urls.append(url)
+            raise CloudError("auth", "invalid api key", 401)
+
+        be = self.backend(http=http)
+        with self.assertRaises(BackendExhausted) as cm:
+            be.step(system="s", messages=[], tools=[], max_tokens=8)
+        exc = cm.exception
+        self.assertEqual(exc.locked_provider, "openai")
+        self.assertEqual(exc.locked_reason, "key_invalid")
+        self.assertTrue(urls, "the pinned provider was attempted")
+        self.assertTrue(all("openai.com" in u for u in urls),
+                        "no other provider may be attempted while locked")
+
+    def test_locked_rate_limit_reason(self):
+        self.lock("openai")
+
+        def http(url, body, headers, timeout=30):
+            raise CloudError("rate_limit", "too many requests", 429, 30.0)
+
+        be = self.backend(http=http)
+        with self.assertRaises(BackendExhausted) as cm:
+            be.step(system="s", messages=[], tools=[], max_tokens=8)
+        self.assertEqual(cm.exception.locked_reason, "rate_limited")
+
+    def test_locked_no_balance_reason(self):
+        self.lock("openai")
+
+        def http(url, body, headers, timeout=30):
+            raise CloudError("server", "insufficient credits", 402)
+
+        be = self.backend(http=http)
+        with self.assertRaises(BackendExhausted) as cm:
+            be.step(system="s", messages=[], tools=[], max_tokens=8)
+        self.assertEqual(cm.exception.locked_reason, "no_balance")
+
+    def test_locked_cooling_pin_reports_cooling(self):
+        for e in self.km.entries("openai"):
+            self.km.mark_rate_limited("openai", e["id"], 300.0)
+        self.lock("openai")
+        be = self.backend()
+        with self.assertRaises(BackendExhausted) as cm:
+            be.step(system="s", messages=[], tools=[], max_tokens=8)
+        self.assertEqual(cm.exception.locked_reason, "cooling")
+
+    def test_locked_pin_without_keys_reports_no_keys(self):
+        self.lock("deepseek")
+        be = self.backend()
+        with self.assertRaises(BackendExhausted) as cm:
+            be.step(system="s", messages=[], tools=[], max_tokens=8)
+        self.assertEqual(cm.exception.locked_reason, "no_keys")
+
+    def test_turning_auto_back_on_restores_the_chain(self):
+        self.lock("gemini")
+        self.set_cfg(auto_switch=True)
+        be = self.backend()
+        self.assertIsNone(be.locked_pin())
+        step = be.step(system="s", messages=[], tools=[], max_tokens=8)
+        self.assertEqual(step.provider, "openai")
+
+
+class FailureReasonTests(unittest.TestCase):
+    """failure_reason — the locked mode's user-facing vocabulary."""
+
+    def test_classification(self):
+        self.assertEqual(failure_reason(CloudError("auth", "x", 401)),
+                         "key_invalid")
+        self.assertEqual(failure_reason(CloudError("server", "nope", 403)),
+                         "key_invalid")
+        self.assertEqual(
+            failure_reason(CloudError("server", "insufficient credits", 402)),
+            "no_balance")
+        self.assertEqual(failure_reason(CloudError("rate_limit", "x", 429)),
+                         "rate_limited")
+        self.assertEqual(
+            failure_reason(CloudError("server", "model not found", 404)),
+            "model_unavailable")
+        self.assertEqual(failure_reason(CloudError("network", "x", 0)),
+                         "network")
+        self.assertEqual(failure_reason(CloudError("server", "boom", 500)),
+                         "server_error")
+        self.assertEqual(failure_reason(None), "server_error")
 
 
 class AdapterTests(BackendCase):

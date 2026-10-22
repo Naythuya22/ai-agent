@@ -156,6 +156,39 @@ class BackendExhausted(Exception):
     """Every provider ran out of usable keys — the caller drops to local."""
 
 
+def failure_reason(err) -> str:
+    """One short code for why a provider attempt failed — the vocabulary
+    the locked mode (Release 9) reports to the user instead of silently
+    switching models, derived from the normalised CloudError the
+    adapters already produce so every provider speaks the same words.
+
+    Codes: key_invalid | no_balance | rate_limited | model_unavailable |
+    network | server_error.
+    """
+    if err is None:
+        return "server_error"
+    kind = getattr(err, "kind", "") or ""
+    try:
+        status = int(getattr(err, "status", 0) or 0)
+    except (TypeError, ValueError):
+        status = 0
+    msg = (getattr(err, "message", "") or "").lower()
+    if kind == "network":
+        return "network"
+    if kind == "auth" or status in (401, 403):
+        return "key_invalid"
+    if status == 402:
+        return "no_balance"
+    if kind == "rate_limit" or status == 429:
+        return "rate_limited"
+    if "insufficient" in msg or "balance" in msg or "billing" in msg:
+        return "no_balance"
+    if status == 404 or "no endpoints" in msg or "not found" in msg \
+            or "invalid model" in msg:
+        return "model_unavailable"
+    return "server_error"
+
+
 class Step:
     """One model turn, in the shape the agent loop already understands."""
 
@@ -1367,6 +1400,69 @@ class AgentBackend:
                 out.append(p)
         return out
 
+    def locked_pin(self) -> str | None:
+        """The pinned provider when locked mode is on, else None.
+
+        Locked mode (Release 9): auto_switch False + a pinned provider.
+        Only that provider may answer a turn; when it cannot, the turn
+        stops with the reason (see _locked_exhausted) instead of falling
+        through the chain the user explicitly turned off.
+        """
+        self.refresh()
+        cfg = self.keys.load()
+        if cfg.get("auto_switch", True):
+            return None
+        pin = cfg.get("pinned_provider") or None
+        return pin if pin in ADAPTERS else None
+
+    def route_providers(self) -> list:
+        """Providers step() may try this turn, in order.
+
+        Auto mode: the whole usable chain. Locked mode: the pin alone —
+        and only when it is actually usable right now.
+        """
+        pin = self.locked_pin()
+        if pin is None:
+            return self.usable()
+        return [pin] if pin in self.usable() else []
+
+    def pin_block_reason(self, pin: str) -> str:
+        """Why the pinned provider cannot take a turn right now:
+        off | no_keys | key_invalid | cooling ("" when it actually can —
+        the mirror of the picker's key-health rule, backend side)."""
+        self.refresh()
+        cfg = self.keys.load()
+        prov = (cfg.get("providers") or {}).get(pin) or {}
+        if prov.get("enabled") is False:
+            return "off"
+        entries = (cfg.get("keys") or {}).get(pin) or []
+        if not entries:
+            return "no_keys"
+        now = time.time()
+        cooling = False
+        for e in entries:
+            if e.get("status") == "dead":
+                continue
+            if float(e.get("cooldown_until") or 0) > now:
+                cooling = True
+                continue
+            return ""
+        return "cooling" if cooling else "key_invalid"
+
+    def _locked_exhausted(self, pin: str, reason: str,
+                          detail: str = "") -> BackendExhausted:
+        """The locked-mode stop: a BackendExhausted that carries the pin
+        and the reason as attributes, so the caller can show the user
+        exactly which provider failed and why (Release 9) instead of
+        dropping to the local model as if nothing was pinned."""
+        exc = BackendExhausted(
+            "locked provider %s unavailable: %s%s" % (
+                pin, reason, (" — " + detail) if detail else ""))
+        exc.locked_provider = pin
+        exc.locked_reason = reason
+        exc.locked_detail = detail
+        return exc
+
     @property
     def mode(self) -> str:
         """auto | local | cloud — see core.key_manager.MODES."""
@@ -1413,6 +1509,11 @@ class AgentBackend:
                 log.debug("fallback_order() failed while planning context: %s",
                           e)
                 providers = []
+        # Locked mode (Release 9): the meter must predict the pinned
+        # provider's window — it is the only model a turn may use.
+        pin = self.locked_pin()
+        if pin is not None:
+            providers = [pin]
         cfg = self.keys.load()
         for provider in providers:
             pc = (cfg.get("providers") or {}).get(provider) or {}
@@ -1459,7 +1560,13 @@ class AgentBackend:
         tools = _tool_schemas(tools)
         last: CloudError | None = None
         tried = []
-        for provider in self.usable():
+        pin = self.locked_pin()
+        providers = self.route_providers()
+        if pin is not None and not providers:
+            # Locked, and the one allowed provider cannot take a turn at
+            # all (off / no keys / dead / cooling) — say which, and why.
+            raise self._locked_exhausted(pin, self.pin_block_reason(pin))
+        for provider in providers:
             adapter = ADAPTERS[provider]()
             prov_cfg = (self.keys.load().get("providers") or {}).get(provider) or {}
             model = prov_cfg.get("model") or ""
@@ -1563,12 +1670,23 @@ class AgentBackend:
                     if e.kind in ("network",):
                         # No point walking the remaining providers — none of
                         # them can be reached either.
+                        if pin is not None:
+                            raise self._locked_exhausted(
+                                pin, "network",
+                                _sanitize(e.message or "", 200))
                         raise BackendExhausted("network")
         detail = ""
         if last is not None:
             detail = "%s%s: %s" % (
                 last.kind, ("/%s" % last.status) if last.status else "",
                 _sanitize(last.message or "", 200))
+        if pin is not None:
+            # Locked mode never falls through: the pinned provider had
+            # its attempts and failed — report the classified reason.
+            raise self._locked_exhausted(
+                pin, failure_reason(last),
+                _sanitize(last.message or "", 200) if last is not None
+                else "")
         raise BackendExhausted("providers exhausted: %s%s" % (
             ", ".join(tried) or "no keys",
             (" — " + detail) if detail else ""))
@@ -1606,7 +1724,15 @@ class AgentBackend:
         last: CloudError | None = None
         tried = []
 
-        for provider in self.usable():              # mirrors step() L1441
+        pin = self.locked_pin()
+        providers = self.route_providers()
+        if pin is not None and not providers:
+            # Locked (Release 9): the silent empty-stream contract would
+            # hide the one thing the user asked to see — why the pinned
+            # provider cannot answer. Raise instead; the route surfaces
+            # it as an error event.
+            raise self._locked_exhausted(pin, self.pin_block_reason(pin))
+        for provider in providers:                   # mirrors step()
             adapter = ADAPTERS[provider]()
             prov_cfg = (self.keys.load().get("providers") or {}).get(provider) or {}
             model = prov_cfg.get("model") or ""
@@ -1755,6 +1881,12 @@ class AgentBackend:
                         # mirrors step() L1542, minus the raise: no other
                         # provider is reachable either, so end silently and
                         # let the caller decide about the local fallback.
+                        # Locked mode raises instead (Release 9) — a silent
+                        # local answer would break the lock's promise.
+                        if pin is not None:
+                            raise self._locked_exhausted(
+                                pin, "network",
+                                _sanitize(e.message or "", 200))
                         return
         # mirrors step() L1546 — every provider ran out of attempts
         detail = ""
@@ -1765,6 +1897,11 @@ class AgentBackend:
         log.warning("cloud stream providers exhausted: %s%s",
                     ", ".join(tried) or "no keys",
                     (" — " + detail) if detail else "")
+        if pin is not None:
+            raise self._locked_exhausted(
+                pin, failure_reason(last),
+                _sanitize(last.message or "", 200) if last is not None
+                else "")
         # mirrors step() L1551's BackendExhausted message — logged, never
         # raised: an empty stream is what tells the caller to go local.
         return

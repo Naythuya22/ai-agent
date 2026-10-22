@@ -267,6 +267,36 @@ vm.runInContext(block, sandbox, { filename: 'indicator-block.js' });
   eq(postLog[1].fallback, ['gemini', 'openai', 'deepseek'],
      'expired-cooldown pick moves it to the front');
   eq(picker.hidden, true, 'picker closes after the 8.1 pick');
+
+  // ---- Release 9: locked picker (auto_switch off + a pin) ----
+  settingsReply.config.auto_switch = false;
+  settingsReply.config.pinned_provider = 'gemini';
+  settingsReply.config.keys.openai = [{ id: 'k1', status: 'ok' }];
+  settingsReply.config.keys.gemini = [{ id: 'k2', status: 'ok' }];
+  settingsReply.config.keys.deepseek = [{ id: 'k3', status: 'dead', last_error: 'HTTP 402: insufficient credits' }];
+  await sandbox.openModelPicker();
+  eq(mpList.children[1].children[0].textContent, '● Gemini',
+     'locked: the pinned row carries the dot');
+  eq(mpList.children[1].children[2].textContent, '🔒 locked',
+     'locked: the pinned row is tagged locked');
+  eq(mpList.children[0].children.length, 2, 'locked: no ✓ next is offered');
+  eq(mpList.children[2].children[2].textContent, 'no balance',
+     'a key killed by a 402 says no balance, not key invalid');
+  ok(!(mpList.children[1].listeners.click || []).length,
+     'the pinned row itself is inert');
+  ok(regEl('mp-note').textContent.includes('●'),
+     'the locked note explains the dot');
+  const postsBeforePin = postLog.length;
+  mpList.children[0].fire('click');
+  await new Promise(r => setImmediate(r));
+  await new Promise(r => setImmediate(r));
+  eq(postLog.length, postsBeforePin + 1, 'tapping another provider posts the pin move');
+  eq(postLog[postLog.length - 1].pinned_provider, 'openai',
+     'the tap posts pinned_provider');
+  eq(postLog[postLog.length - 1].fallback, undefined,
+     'a pin move never reorders the fallback chain');
+  eq(picker.hidden, true, 'picker closes after pinning');
+
   sandbox.state.mode = 'chat';
   const callsBefore = calls.length;
   await sandbox.openModelPicker();
