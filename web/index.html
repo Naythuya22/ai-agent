@@ -785,33 +785,34 @@ function setStatus(t){statusTextEl.textContent=t||''}
       cfg=await r.json();
     }catch(e){ if(mpNoteEl)mpNoteEl.textContent='Settings ဖတ်မရပါ — Settings မှာ စစ်ကြည့်ပါ'; return; }
     if(!cfg||cfg.error){ if(mpNoteEl)mpNoteEl.textContent='Settings ဖတ်မရပါ'; return; }
+    var inner=cfg.config||{};
     var labels=cfg.provider_labels||{};
     var order=cfg.fallback_order||[];
     var next='';
     var i,p,why;
-    for(i=0;i<order.length;i++){ if(!mpUsable(cfg,order[i])){ next=order[i]; break; } }
+    for(i=0;i<order.length;i++){ if(!mpUsable(inner,order[i])){ next=order[i]; break; } }
     for(i=0;i<order.length;i++){
-      p=order[i]; why=mpUsable(cfg,p);
+      p=order[i]; why=mpUsable(inner,p);
       (function(p,why){
         var row=document.createElement('button');
         row.type='button';
         row.className='mp-row'+(why?' off':'');
         var nm=document.createElement('span'); nm.className='mp-name'; nm.textContent=labels[p]||p;
-        var md=document.createElement('span'); md.className='mp-model'; md.textContent=((cfg.providers||{})[p]||{}).model||'';
+        var md=document.createElement('span'); md.className='mp-model'; md.textContent=((inner.providers||{})[p]||{}).model||'';
         row.appendChild(nm); row.appendChild(md);
         if(p===next||why){
           var tag=document.createElement('span'); tag.className='fb-tag';
           tag.textContent=(p===next)?'✓ next':why;
           row.appendChild(tag);
         }
-        if(!why&&p!==next&&cfg.backend_mode!=='local'){
+        if(!why&&p!==next&&inner.backend_mode!=='local'){
           row.addEventListener('click',function(){ pickProvider(cfg,p); });
         }
         mpListEl.appendChild(row);
       })(p,why);
     }
     if(mpNoteEl){
-      mpNoteEl.textContent=(cfg.backend_mode==='local')
+      mpNoteEl.textContent=(inner.backend_mode==='local')
         ? 'Local Only မို့လို့ cloud provider မသုံးပါ — ပြောင်းချင်ရင် Settings → Backend မှာ ပြင်ပါ'
         : 'နှိပ်လိုက်ရင် နောက် အလှည့်က စပြီး အဲဒီ provider ကို အရင် သုံးပါမယ်။ Model နာမည် ပြောင်းချင်ရင် Settings မှာ ပြင်ပါ';
     }

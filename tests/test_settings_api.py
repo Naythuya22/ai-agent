@@ -544,5 +544,31 @@ class Release6Tests(SettingsApiCase):
         self.assertTrue((Path.home() / j["file"]).exists())
 
 
+class Release71Tests(SettingsApiCase):
+    """The quick provider picker (web UI) reads the GET response shape:
+    per-provider config + keys under `config`, ids/labels/order at the top
+    level. Pin that contract — the picker's first build read the top level
+    and showed 'no keys' for every provider on a real device."""
+
+    def test_get_shape_picker_contract(self):
+        call("post", "/api/settings/agent/keys",
+             {"provider": "deepseek", "key": RAW_DEEPSEEK,
+              "label": "ds"}, expect=200)
+        _, j = call("get", "/api/settings/agent", expect=200)
+        cfg = j["config"]
+        self.assertIsInstance(cfg["providers"], dict)
+        for p, pc in cfg["providers"].items():
+            self.assertIn("model", pc, p)
+            self.assertIn("enabled", pc, p)
+        self.assertIsInstance(cfg["keys"], dict)
+        ds = cfg["keys"]["deepseek"]
+        self.assertEqual(len(ds), 1)
+        self.assertEqual(ds[0]["status"], "ok")
+        self.assertIsInstance(j["providers"], list)
+        self.assertIn("deepseek", j["providers"])
+        self.assertIn("deepseek", j["fallback_order"])
+        self.assertEqual(j["provider_labels"]["deepseek"], "DeepSeek")
+
+
 if __name__ == "__main__":
     unittest.main()

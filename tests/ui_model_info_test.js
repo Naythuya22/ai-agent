@@ -193,20 +193,29 @@ vm.runInContext(block, sandbox, { filename: 'indicator-block.js' });
   // ── quick provider picker (Release 7) ──
   failMode = null;
   reply = { ok: true, label: '', last_backend: '', provider: '' };
+  // Mirrors the REAL GET /api/settings/agent shape (routes/settings_api.py):
+  // per-provider config + keys live under `config`; the top level carries
+  // the provider id list, labels and the effective fallback order. (The
+  // first picker build read the top level directly and showed "no keys"
+  // for everyone on a real device — this fixture pins the contract.)
   settingsReply = {
-    ok: true, backend_mode: 'cloud',
-    fallback_order: ['openai', 'gemini', 'deepseek'],
-    providers: {
-      openai: { model: 'gpt-4o-mini', enabled: true },
-      gemini: { model: 'gemini-2.5-flash', enabled: true },
-      deepseek: { model: 'deepseek-chat', enabled: true },
+    ok: true,
+    config: {
+      backend_mode: 'cloud',
+      providers: {
+        openai: { model: 'gpt-4o-mini', enabled: true },
+        gemini: { model: 'gemini-2.5-flash', enabled: true },
+        deepseek: { model: 'deepseek-chat', enabled: true },
+      },
+      keys: {
+        openai: [{ id: 'k1', status: 'ok' }],
+        gemini: [{ id: 'k2', status: 'ok' }],
+        deepseek: [],
+      },
     },
-    keys: {
-      openai: [{ id: 'k1', status: 'ok' }],
-      gemini: [{ id: 'k2', status: 'ok' }],
-      deepseek: [],
-    },
+    providers: ['openai', 'gemini', 'deepseek'],
     provider_labels: { openai: 'OpenAI', gemini: 'Gemini', deepseek: 'DeepSeek' },
+    fallback_order: ['openai', 'gemini', 'deepseek'],
   };
   const picker = regEl('model-picker'), mpList = regEl('mp-list');
   chip.fire('click');
@@ -215,6 +224,7 @@ vm.runInContext(block, sandbox, { filename: 'indicator-block.js' });
   eq(picker.hidden, false, 'tapping the chip opens the picker');
   eq(mpList.children.length, 3, 'picker lists every provider in fallback order');
   eq(mpList.children[0].children[0].textContent, 'OpenAI', 'row 1 is the first provider');
+  eq(mpList.children[0].children[1].textContent, 'gpt-4o-mini', 'row 1 shows its configured model');
   eq(mpList.children[0].children[2].textContent, '✓ next', 'first usable provider is marked next');
   eq(mpList.children[2].children[2].textContent, 'no keys', 'keyless provider explains itself');
   ok(!(mpList.children[2].listeners.click || []).length, 'unusable row cannot be picked');
