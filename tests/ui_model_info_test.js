@@ -36,6 +36,9 @@ ok(/<span id="model-info"/.test(html), '#model-info chip exists');
 ok(/id="status"[^>]*>[\s\S]*?id="model-info"/.test(html), 'chip lives inside the status bar');
 ok(html.includes('.model-info{'), '.model-info CSS rule present');
 ok(html.includes('.model-info.cloud{'), 'cloud tint CSS rule present');
+ok(html.includes('id="model-picker"'), 'quick provider picker sheet exists');
+ok(html.includes('id="mp-list"'), 'picker list element exists');
+ok(html.includes('.mp-row{'), 'picker row CSS present');
 ok(html.includes('id="status-text"'), 'status text survived the edit');
 
 console.log('--- hooks ---');
@@ -73,22 +76,44 @@ ok(code.includes("async function updateModelInfo()"), 'block defines updateModel
 console.log('--- behaviour ---');
 
 function makeEl(id) {
-  return {
-    id: id, textContent: '', className: 'model-info', title: '',
-    style: {},
+  const el = {
+    id: id || '', textContent: '', className: 'model-info', title: '',
+    style: {}, children: [], listeners: {}, hidden: false, type: '', _html: '',
+    appendChild(c) { this.children.push(c); return c; },
+    addEventListener(ev, fn) { (this.listeners[ev] = this.listeners[ev] || []).push(fn); },
+    fire(ev) { (this.listeners[ev] || []).slice().forEach(fn => fn.call(this, { preventDefault() {} })); },
   };
+  Object.defineProperty(el, 'innerHTML', {
+    get() { return this._html; },
+    set(v) { this._html = v; if (v === '') this.children.length = 0; },
+  });
+  return el;
 }
 
-const chip = makeEl('model-info');
+const reg = {};
+function regEl(id) { return reg[id] || (reg[id] = makeEl(id)); }
+const chip = regEl('model-info');
 let reply = { label: 'Model: deepseek-flash (Cloud)', backend: 'cloud', provider: 'deepseek' };
 let failMode = null;           // 'throw' | 'html' | null
+let settingsReply = null;      // fixture for GET /api/settings/agent
+const postLog = [];            // bodies POSTed to /api/settings/agent
 const calls = [];
 
 const sandbox = {
-  document: { getElementById(id) { return id === 'model-info' ? chip : makeEl(id); } },
+  document: {
+    getElementById(id) { return regEl(id); },
+    createElement() { return makeEl(''); },
+  },
   state: { mode: 'agent' },
-  fetch: async function (url) {
+  fetch: async function (url, opts) {
     calls.push(url);
+    if (url === '/api/settings/agent') {
+      if (opts && opts.method === 'POST') {
+        postLog.push(JSON.parse(opts.body));
+        return { status: 200, json: async () => ({ ok: true }) };
+      }
+      return { status: 200, json: async () => settingsReply };
+    }
     if (failMode === 'throw') throw new Error('Network down');
     if (failMode === 'html') {
       return { status: 404, json: async () => { throw new SyntaxError('Unexpected token T'); } };
@@ -164,6 +189,47 @@ vm.runInContext(block, sandbox, { filename: 'indicator-block.js' });
   threw = null;
   try { await sandbox.updateModelInfo(); } catch (e) { threw = e; }
   ok(threw === null, 'a non-JSON body does not escape the function');
+
+  // ── quick provider picker (Release 7) ──
+  failMode = null;
+  reply = { ok: true, label: '', last_backend: '', provider: '' };
+  settingsReply = {
+    ok: true, backend_mode: 'cloud',
+    fallback_order: ['openai', 'gemini', 'deepseek'],
+    providers: {
+      openai: { model: 'gpt-4o-mini', enabled: true },
+      gemini: { model: 'gemini-2.5-flash', enabled: true },
+      deepseek: { model: 'deepseek-chat', enabled: true },
+    },
+    keys: {
+      openai: [{ id: 'k1', status: 'ok' }],
+      gemini: [{ id: 'k2', status: 'ok' }],
+      deepseek: [],
+    },
+    provider_labels: { openai: 'OpenAI', gemini: 'Gemini', deepseek: 'DeepSeek' },
+  };
+  const picker = regEl('model-picker'), mpList = regEl('mp-list');
+  chip.fire('click');
+  await new Promise(r => setImmediate(r));
+  await new Promise(r => setImmediate(r));
+  eq(picker.hidden, false, 'tapping the chip opens the picker');
+  eq(mpList.children.length, 3, 'picker lists every provider in fallback order');
+  eq(mpList.children[0].children[0].textContent, 'OpenAI', 'row 1 is the first provider');
+  eq(mpList.children[0].children[2].textContent, '✓ next', 'first usable provider is marked next');
+  eq(mpList.children[2].children[2].textContent, 'no keys', 'keyless provider explains itself');
+  ok(!(mpList.children[2].listeners.click || []).length, 'unusable row cannot be picked');
+  mpList.children[1].fire('click');
+  await new Promise(r => setImmediate(r));
+  await new Promise(r => setImmediate(r));
+  eq(postLog.length, 1, 'picking posts exactly once');
+  eq(postLog[0].fallback, ['gemini', 'openai', 'deepseek'],
+     'pick moves the provider to the front, order otherwise kept');
+  eq(picker.hidden, true, 'picker closes after a pick');
+  sandbox.state.mode = 'chat';
+  const callsBefore = calls.length;
+  await sandbox.openModelPicker();
+  eq(calls.length, callsBefore, 'picker never opens in Chat Mode');
+  sandbox.state.mode = 'agent';
 
   console.log(failures ? `\n${failures} FAILURES` : '\nALL PASS');
   process.exit(failures ? 1 : 0);

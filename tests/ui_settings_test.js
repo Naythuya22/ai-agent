@@ -713,6 +713,17 @@ function click(id, ev) { const e = registry[id]; if (e) e.fire(ev || 'click'); }
      'reset POSTs the reset endpoint');
   ok(texts(registry['set-msg']).includes('reset'), 'reset confirms in the panel');
 
+  console.log('--- settings tabs (Release 7) ---');
+  sandbox.showSettingsTab('provider');
+  eq(registry['set-pane-backend'].style.display, 'none', 'tab: backend pane hides');
+  eq(registry['set-pane-provider'].style.display, '', 'tab: provider pane shows');
+  eq(registry['set-pane-system'].style.display, 'none', 'tab: system pane hides');
+  sandbox.showSettingsTab('system');
+  eq(registry['set-pane-system'].style.display, '', 'tab: system pane shows');
+  eq(registry['set-pane-provider'].style.display, 'none', 'tab: provider pane hides again');
+  sandbox.showSettingsTab('backend');
+  eq(registry['set-pane-backend'].style.display, '', 'tab: backend pane back');
+
   // every endpoint used must belong to routes/settings_api.py
   const allowed = ['/api/settings/agent', '/api/settings/agent/keys',
                    '/api/settings/agent/keys/test',

@@ -250,6 +250,18 @@ footer{position:relative;padding:12px 12px 16px;background:var(--bg);border-top:
 .set-btn{background:var(--accent);color:var(--accent-on);border:0;border-radius:4px;padding:6px 14px;font-size:12px;cursor:pointer;font-family:inherit}
 .set-btn.ghost{background:transparent;color:var(--text-2);border:1px solid var(--border)}
 .set-btn.danger{background:transparent;color:#dc2626;border:1px solid #dc262655}
+.set-tab{flex:1;background:var(--bg-4);border:1px solid var(--border-2);color:var(--text-chip);padding:7px 4px;border-radius:8px;cursor:pointer;font-family:inherit;font-size:12.5px}
+.set-tab.active{background:var(--accent);border-color:var(--accent);color:var(--accent-on);font-weight:600}
+.model-info{cursor:pointer}
+.mp{position:fixed;left:0;right:0;bottom:0;z-index:120;background:var(--bg-5);border-top:1px solid var(--border);border-radius:14px 14px 0 0;padding:10px 14px;box-shadow:0 -8px 30px rgba(0,0,0,.35)}
+.mp[hidden]{display:none}
+.mp-head{display:flex;justify-content:space-between;align-items:center;color:var(--text-panel);font-size:13px;font-weight:600;margin-bottom:4px}
+.mp-x{background:transparent;border:0;color:var(--text-2);font-size:19px;cursor:pointer}
+.mp-row{display:flex;align-items:center;gap:8px;width:100%;text-align:left;background:var(--bg-4);border:1px solid var(--border-2);color:var(--text-panel);border-radius:9px;padding:9px 10px;margin-top:6px;cursor:pointer;font-family:inherit;font-size:13px}
+.mp-row.off{opacity:.55;cursor:default}
+.mp-name{font-weight:600;flex-shrink:0}
+.mp-model{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text-2);font-size:12px}
+.mp-note{font-size:11.5px;color:var(--text-3);margin-top:8px}
 @media (max-width: 480px) {
   .pb-label { display: none; }
 }
@@ -302,6 +314,11 @@ footer{position:relative;padding:12px 12px 16px;background:var(--bg);border-top:
          line-height:38px;padding:0;cursor:pointer;
          box-shadow:0 2px 8px rgba(0,0,0,0.55)">✕</button>
 <div class="ctx-bar"><div id="ctx-fill" class="ctx-fill"></div></div><div id="ctx-info" class="ctx-info"><span id="ctx-text">ctx: -</span><span id="ctx-warn" class="ctx-warn"></span><span id="ctx-pct">-</span></div><div id="status" class="status"><span id="activity" class="activity" hidden><span class="act-spin"></span><span id="act-label" class="act-label"></span></span><span id="status-text">ready</span><span id="model-info" class="model-info" title="model in use"></span><span id="key-info" class="key-info" title="active API key"></span></div>
+<div id="model-picker" class="mp" hidden>
+<div class="mp-head"><span>Provider အမြန် ပြောင်းရန်</span><button id="mp-close" type="button" class="mp-x">&times;</button></div>
+<div id="mp-list"></div>
+<div class="mp-note" id="mp-note"></div>
+</div>
 <footer>
 <div id="ac-menu" class="ac-menu" hidden></div>
 <div id="attach-chip" class="attach-chip" hidden>
@@ -364,7 +381,12 @@ footer{position:relative;padding:12px 12px 16px;background:var(--bg);border-top:
 <button id="settings-close" type="button" style="background:transparent;border:0;color:var(--text-2);font-size:20px;cursor:pointer">&times;</button>
 </div>
 <div id="settings-body" style="overflow-y:auto;flex:1;padding:12px 16px;max-height:66vh">
-
+<div id="set-tabs" style="display:flex;gap:6px;margin-bottom:12px">
+<button type="button" class="set-tab active" data-tab="backend">Backend</button>
+<button type="button" class="set-tab" data-tab="provider">Provider &amp; Keys</button>
+<button type="button" class="set-tab" data-tab="system">System</button>
+</div>
+<div id="set-pane-backend">
 <div class="set-row">
 <span class="set-label">Backend Mode</span>
 <div class="set-modes" id="set-modes">
@@ -392,7 +414,8 @@ footer{position:relative;padding:12px 12px 16px;background:var(--bg);border-top:
 <span class="set-label">Network / Local model</span>
 <div id="set-net" class="set-hint">&hellip;</div>
 </div>
-
+</div>
+<div id="set-pane-provider" style="display:none">
 <div class="set-row">
 <span class="set-label" for="set-provider">Provider</span>
 <div class="set-line">
@@ -426,7 +449,8 @@ footer{position:relative;padding:12px 12px 16px;background:var(--bg);border-top:
 </div>
 <div class="set-msg" id="set-msg"></div>
 </div>
-
+</div>
+<div id="set-pane-system" style="display:none">
 <div class="set-row">
 <span class="set-label">System</span>
 <div class="set-line">
@@ -437,7 +461,7 @@ footer{position:relative;padding:12px 12px 16px;background:var(--bg);border-top:
 <div class="set-hint">Reset က setting တွေကိုပဲ မူလ အတိုင်း ပြန်ထားတာပါ — API key တွေ မပျက်ပါဘူး။ Backup ထဲမှာ key တွေ ပါတာမို့ ဖိုင်ကို သီးသန့် သိမ်းထားပါ။</div>
 <div id="set-doctor-out" class="set-hint" style="white-space:pre-line"></div>
 </div>
-
+</div>
 </div>
 <div style="padding:12px 16px;border-top:1px solid var(--border);display:flex;gap:8px;justify-content:space-between;align-items:center">
 <span class="set-hint" id="set-local-note"></span>
@@ -731,6 +755,88 @@ function setStatus(t){statusTextEl.textContent=t||''}
       // no chance of the meter showing the previous mode's window.
       try{updateCtx(j.ctx)}catch(_cx){}
     }catch(e){/* cosmetic only — never break the page over an indicator */}
+  }
+  // Quick provider switch: tapping the chip opens a sheet listing the
+  // configured providers; picking one only reorders the fallback chain
+  // through the settings endpoint (the same state Settings edits) — the
+  // routing rules stay in the backend. Unusable rows (off / no keys / no
+  // healthy key) are shown for information and cannot be picked.
+  var mpEl=document.getElementById('model-picker');
+  var mpListEl=document.getElementById('mp-list');
+  var mpNoteEl=document.getElementById('mp-note');
+  function mpClose(){ if(mpEl)mpEl.hidden=true; }
+  function mpUsable(cfg,p){
+    var pc=(cfg.providers||{})[p]||{};
+    if(pc.enabled===false)return 'off';
+    var ks=(cfg.keys||{})[p]||[];
+    if(!ks.length)return 'no keys';
+    for(var i=0;i<ks.length;i++){ if(ks[i].status==='ok')return ''; }
+    return 'no healthy key';
+  }
+  async function openModelPicker(){
+    if(!mpEl||!mpListEl)return;
+    if(!state||state.mode!=='agent')return;
+    mpEl.hidden=false;
+    mpListEl.innerHTML='';
+    if(mpNoteEl)mpNoteEl.textContent='Loading…';
+    var cfg=null;
+    try{
+      var r=await fetch('/api/settings/agent');
+      cfg=await r.json();
+    }catch(e){ if(mpNoteEl)mpNoteEl.textContent='Settings ဖတ်မရပါ — Settings မှာ စစ်ကြည့်ပါ'; return; }
+    if(!cfg||cfg.error){ if(mpNoteEl)mpNoteEl.textContent='Settings ဖတ်မရပါ'; return; }
+    var labels=cfg.provider_labels||{};
+    var order=cfg.fallback_order||[];
+    var next='';
+    var i,p,why;
+    for(i=0;i<order.length;i++){ if(!mpUsable(cfg,order[i])){ next=order[i]; break; } }
+    for(i=0;i<order.length;i++){
+      p=order[i]; why=mpUsable(cfg,p);
+      (function(p,why){
+        var row=document.createElement('button');
+        row.type='button';
+        row.className='mp-row'+(why?' off':'');
+        var nm=document.createElement('span'); nm.className='mp-name'; nm.textContent=labels[p]||p;
+        var md=document.createElement('span'); md.className='mp-model'; md.textContent=((cfg.providers||{})[p]||{}).model||'';
+        row.appendChild(nm); row.appendChild(md);
+        if(p===next||why){
+          var tag=document.createElement('span'); tag.className='fb-tag';
+          tag.textContent=(p===next)?'✓ next':why;
+          row.appendChild(tag);
+        }
+        if(!why&&p!==next&&cfg.backend_mode!=='local'){
+          row.addEventListener('click',function(){ pickProvider(cfg,p); });
+        }
+        mpListEl.appendChild(row);
+      })(p,why);
+    }
+    if(mpNoteEl){
+      mpNoteEl.textContent=(cfg.backend_mode==='local')
+        ? 'Local Only မို့လို့ cloud provider မသုံးပါ — ပြောင်းချင်ရင် Settings → Backend မှာ ပြင်ပါ'
+        : 'နှိပ်လိုက်ရင် နောက် အလှည့်က စပြီး အဲဒီ provider ကို အရင် သုံးပါမယ်။ Model နာမည် ပြောင်းချင်ရင် Settings မှာ ပြင်ပါ';
+    }
+  }
+  async function pickProvider(cfg,p){
+    var order=(cfg.fallback_order||[]).slice();
+    var rest=[];
+    for(var i=0;i<order.length;i++){ if(order[i]!==p)rest.push(order[i]); }
+    try{
+      var r=await fetch('/api/settings/agent',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({fallback:[p].concat(rest)})});
+      var j=await r.json();
+      if(!j||!j.ok)throw new Error('save failed');
+      mpClose();
+      if(typeof setStatus==='function')setStatus('Next provider: '+(((cfg.provider_labels||{})[p])||p));
+      try{updateModelInfo()}catch(_mi){}
+    }catch(e){
+      if(mpNoteEl)mpNoteEl.textContent='ပြောင်းမရပါ — Settings မှာ စမ်းကြည့်ပါ';
+    }
+  }
+  if(modelInfoEl&&modelInfoEl.addEventListener){
+    modelInfoEl.addEventListener('click',function(){ try{openModelPicker()}catch(e){} });
+  }
+  var mpCloseBtn=document.getElementById('mp-close');
+  if(mpCloseBtn&&mpCloseBtn.addEventListener){
+    mpCloseBtn.addEventListener('click',function(){ mpClose(); });
   }
   // ── end model indicator ──
   if(typeof window!=='undefined')window.addEventListener('load', function(){try{updateModelInfo()}catch(_mi){}});
@@ -2142,9 +2248,20 @@ function renderPromptTierPending(mode){
   if(warn){warn.style.display='none';warn.textContent='';}
 }
 
+function showSettingsTab(name){
+  var panes={backend:setq('set-pane-backend'),provider:setq('set-pane-provider'),system:setq('set-pane-system')};
+  for(var k in panes){if(panes[k])panes[k].style.display=(k===name)?'':'none';}
+  var tabs=document.querySelectorAll('.set-tab');
+  for(var i=0;i<tabs.length;i++){
+    var on=tabs[i].getAttribute&&tabs[i].getAttribute('data-tab')===name;
+    tabs[i].className='set-tab'+(on?' active':'');
+  }
+}
+
 function openSettings(){
   if(!settingsModal)return;
   settingsModal.style.display='flex';
+  showSettingsTab('backend');
   loadSettings();
 }
 
@@ -2579,6 +2696,10 @@ async function resetSettings(){
 
 (function bindSettings(){
   if(!settingsModal)return;
+  var tabs=document.querySelectorAll('.set-tab');
+  for(var ti=0;ti<tabs.length;ti++)(function(btn){
+    btn.addEventListener('click',function(){showSettingsTab(btn.getAttribute('data-tab'));});
+  })(tabs[ti]);
   var close=setq('settings-close'); if(close)close.addEventListener('click',closeSettings);
   var cancel=setq('set-cancel'); if(cancel)cancel.addEventListener('click',closeSettings);
   var save=setq('set-save'); if(save)save.addEventListener('click',saveSettings);
