@@ -514,13 +514,15 @@ footer{position:relative;padding:12px 12px 16px;background:var(--bg);border-top:
 <div id="file-tree" class="file-tree"><div class="ft-empty">Open the ☰ menu after picking a Code-mode project.</div></div>
 <h3>Settings</h3>
 <button class="cmd" id="settings-btn" data-cmd="settings">&#9881;&#65039; Settings</button>
-<h3>Commands</h3>
+<h3 id="cmd-toggle" style="cursor:pointer">Commands <span id="cmd-arrow">▸</span></h3>
+<div id="cmd-list" style="display:none">
 <button class="cmd" data-cmd="memory">/memory</button><button class="cmd" data-cmd="skills">/skills</button>
 <button class="cmd" data-cmd="profile">/profile</button>
 <button class="cmd" data-cmd="mode">/mode</button>
 <button class="cmd" data-cmd="clear">/clear</button>
 <button class="cmd" data-cmd="history">/history</button><button class="cmd" data-cmd="summary">/summary</button><button class="cmd" data-cmd="ctx">/ctx</button>
 <button class="cmd" data-cmd="code">/code</button>
+</div>
 <button class="cmd" data-cmd="close">Close menu</button>
 </div>
 </div>
@@ -960,6 +962,26 @@ menuBtn.addEventListener('click',function(){drawer.classList.add('open');loadSes
 drawer.addEventListener('click',function(e){if(e.target===drawer)drawer.classList.remove('open')});
 document.querySelectorAll('.ctx-btn').forEach(function(btn){btn.addEventListener('click',function(){setContextSize(parseInt(btn.dataset.size,10))})});
 document.querySelectorAll('.cmd').forEach(function(btn){btn.addEventListener('click',function(){drawer.classList.remove('open');var c=btn.dataset.cmd;if(c==='close')return;if(c==='settings'){openSettings();return}runCommand(c)})});
+// Release 9.1 — the Commands section is collapsed by default, so the
+// drawer stays short for the everyday entries (Sessions, Files,
+// Settings); the nine shortcut buttons live one tap away under the
+// "Commands" heading, and the same commands exist in the "/"
+// autocomplete anyway. The open state is remembered per device.
+(function(){
+  var head=document.getElementById('cmd-toggle');
+  var list=document.getElementById('cmd-list');
+  var arrow=document.getElementById('cmd-arrow');
+  if(!head||!list)return;
+  function show(open){
+    list.style.display=open?'':'none';
+    if(arrow)arrow.textContent=open?'▾':'▸';
+    try{localStorage.setItem('ai-agent-cmd-open',open?'1':'')}catch(e){}
+  }
+  var was=false;
+  try{was=!!localStorage.getItem('ai-agent-cmd-open')}catch(e){}
+  show(was);
+  head.addEventListener('click',function(){show(list.style.display==='none')});
+})();
 document.getElementById('sel-all').addEventListener('click',selectAll);
 document.getElementById('sel-del').addEventListener('click',function(){deleteSelected()});
 document.getElementById('sel-cancel').addEventListener('click',cancelSel);

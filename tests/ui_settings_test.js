@@ -33,6 +33,13 @@ function has(needle, msg) { ok(html.includes(needle), msg); }
 console.log('--- markup ---');
 ok(html.includes('id="settings-btn"') && html.includes('data-cmd="settings"'),
    'sidebar has a ⚙️ Settings button wired to data-cmd');
+// Release 9.1 — the drawer's Commands shortcuts are collapsed by
+// default under a toggle heading; Close menu stays outside the fold.
+has('id="cmd-toggle"', 'R9.1: Commands heading is the toggle');
+has('id="cmd-list" style="display:none"', 'R9.1: command list starts hidden');
+ok(html.indexOf('data-cmd="memory"') > html.indexOf('id="cmd-list"') &&
+   html.indexOf('data-cmd="memory"') < html.indexOf('data-cmd="close"'),
+   'R9.1: the shortcut buttons live inside the fold, Close menu outside');
 has('id="settings-modal"', 'settings modal exists');
 ['set-mode-auto', 'set-mode-local', 'set-mode-cloud', 'set-provider', 'set-enabled',
  'set-model', 'set-model-custom', 'set-base-url', 'set-cost', 'set-fallback',
@@ -823,6 +830,32 @@ function click(id, ev) { const e = registry[id]; if (e) e.fire(ev || 'click'); }
   ok(!!clearCall, 'R9: clear-pin posts');
   eq(clearCall && clearCall.body.pinned_provider, null,
      'R9: clear-pin posts a null pin');
+
+  // ---- Release 9.1: the fold actually toggles (IIFE on a stub DOM) ----
+  const iifeStart = html.indexOf("var head=document.getElementById('cmd-toggle')");
+  ok(iifeStart > 0, 'R9.1: toggle wiring exists in the script');
+  const iifeEnd = html.indexOf('})();', iifeStart);
+  const iifeSrc = '(function(){' + html.slice(iifeStart, iifeEnd) + '})();';
+  const foldEls = {
+    'cmd-toggle': makeEl('h3'), 'cmd-list': makeEl('div'),
+    'cmd-arrow': makeEl('span'),
+  };
+  foldEls['cmd-list'].style.display = 'none';
+  const foldCtx = vm.createContext({
+    document: { getElementById: id => foldEls[id] || null },
+    localStorage: {
+      _m: {},
+      getItem(k) { return this._m[k] || null; },
+      setItem(k, v) { this._m[k] = v; },
+    },
+  });
+  vm.runInContext(iifeSrc, foldCtx);
+  eq(foldEls['cmd-list'].style.display, 'none', 'R9.1: the fold starts closed');
+  foldEls['cmd-toggle'].fire('click');
+  eq(foldEls['cmd-list'].style.display, '', 'R9.1: tapping the heading opens the fold');
+  eq(foldEls['cmd-arrow'].textContent, '▾', 'R9.1: the arrow follows the fold');
+  foldEls['cmd-toggle'].fire('click');
+  eq(foldEls['cmd-list'].style.display, 'none', 'R9.1: tapping again closes the fold');
 
   // every endpoint used must belong to routes/settings_api.py or
   // routes/memory_api.py (the Memory panel)
