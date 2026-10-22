@@ -50,7 +50,8 @@ STATUS_DEAD = "dead"
 STATUS_LIMITED = "rate_limited"
 STATUS_OK = "ok"
 
-PROVIDERS = ("openai", "gemini", "openrouter", "anthropic", "deepseek")
+PROVIDERS = ("openai", "gemini", "openrouter", "anthropic", "deepseek",
+             "groq", "siliconflow", "custom")
 
 # What the Settings dropdown shows. The value stays the provider id so every
 # endpoint, config field and adapter key keeps the short name.
@@ -60,6 +61,9 @@ PROVIDER_LABELS = {
     "openrouter": "OpenRouter",
     "anthropic": "Anthropic",
     "deepseek": "DeepSeek",
+    "groq": "Groq",
+    "siliconflow": "SiliconFlow",
+    "custom": "Custom (OpenAI-compatible)",
 }
 
 # How a turn is routed: auto = cloud when possible, local = never cloud,
@@ -74,7 +78,8 @@ DEFAULT_CONFIG: dict = {
     "backend_mode": DEFAULT_MODE,
     "prefer_cloud": True,
     # Provider order tried after each provider runs out of usable keys.
-    "fallback": ["openai", "gemini", "openrouter", "anthropic", "deepseek"],
+    "fallback": ["openai", "gemini", "openrouter", "anthropic", "deepseek",
+                 "groq", "siliconflow", "custom"],
     # The UI must show the price once before a cloud model is used.
     "cost_ack": False,
     # prompt_tier_mode (auto | cloud_strong | cloud_fast | local) is deliberately
@@ -108,9 +113,28 @@ DEFAULT_CONFIG: dict = {
             "base_url": "https://api.anthropic.com/v1",
             "enabled": True,
         },
+        # OpenAI-compatible services (Release 8). They ride the plain
+        # OpenAI adapter; base_url + model are user-editable in Settings,
+        # so this one `custom` slot can front any other compatible API.
+        "groq": {
+            "model": "llama-3.3-70b-versatile",
+            "base_url": "https://api.groq.com/openai/v1",
+            "enabled": True,
+        },
+        "siliconflow": {
+            "model": "Qwen/Qwen2.5-7B-Instruct",
+            "base_url": "https://api.siliconflow.com/v1",
+            "enabled": True,
+        },
+        "custom": {
+            "model": "",
+            "base_url": "",
+            "enabled": False,
+        },
     },
     "keys": {"openai": [], "gemini": [], "openrouter": [],
-             "anthropic": [], "deepseek": []},
+             "anthropic": [], "deepseek": [], "groq": [],
+             "siliconflow": [], "custom": []},
 }
 
 

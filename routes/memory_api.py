@@ -25,6 +25,15 @@ def api_remember():
     return jsonify({"ok": False, "reason": reason})
 
 
+@bp.route("/api/memory/forget", methods=["POST"])
+def api_memory_forget():
+    keyword = (json_body().get("keyword") or "").strip()
+    if not keyword:
+        return jsonify({"error": "keyword required"}), 400
+    removed = get_memory().forget(keyword)
+    return jsonify({"ok": True, "removed": removed})
+
+
 @bp.route("/api/profile", methods=["GET"])
 def api_profile_get():
     return jsonify({"profile": get_memory().get_profile()})

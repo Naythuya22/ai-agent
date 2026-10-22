@@ -461,6 +461,19 @@ footer{position:relative;padding:12px 12px 16px;background:var(--bg);border-top:
 <div class="set-hint">Reset က setting တွေကိုပဲ မူလ အတိုင်း ပြန်ထားတာပါ — API key တွေ မပျက်ပါဘူး။ Backup ထဲမှာ key တွေ ပါတာမို့ ဖိုင်ကို သီးသန့် သိမ်းထားပါ။</div>
 <div id="set-doctor-out" class="set-hint" style="white-space:pre-line"></div>
 </div>
+<div class="set-row">
+<span class="set-label">Memory</span>
+<div class="set-line">
+<button id="set-mem-view" type="button" class="set-btn">View memory</button>
+</div>
+<div class="set-line" style="margin-top:6px">
+<input id="set-mem-input" class="set-input" type="text" placeholder="မှတ်ထားစေချင်တာ / ဖျက်ချင်တဲ့ စကားလုံး" autocomplete="off" style="flex:1">
+<button id="set-mem-add" type="button" class="set-btn">Add</button>
+<button id="set-mem-forget" type="button" class="set-btn danger">Forget</button>
+</div>
+<div class="set-hint">Add = ရိုက်ထည့်တဲ့ စာသားကို အချက်အသစ် အနေနဲ့ မှတ်ထားမယ်။ Forget = အဲဒီ စကားလုံး ပါဝင်တဲ့ အချက်တွေကို ဖျက်မယ် (ဖျက်ပြီးရင် ပြန်ယူလို့ မရပါ)။</div>
+<div id="set-mem-out" class="set-hint" style="white-space:pre-line"></div>
+</div>
 </div>
 </div>
 <div style="padding:12px 16px;border-top:1px solid var(--border);display:flex;gap:8px;justify-content:space-between;align-items:center">
@@ -2664,9 +2677,58 @@ async function runDoctor(){
     if(typeof j.disk_free_bytes==='number'){
       lines.push('• Storage free: '+(j.disk_free_bytes/1073741824).toFixed(1)+' GB');
     }
+    if(j.storage&&j.storage.length){
+      var sz=[];
+      for(var si=0;si<j.storage.length;si++){
+        var it=j.storage[si];
+        sz.push(it.label+' '+(it.bytes>=1048576?(it.bytes/1048576).toFixed(1)+' MB':(it.bytes/1024).toFixed(0)+' KB'));
+      }
+      lines.push('• Usage: '+sz.join(' · '));
+    }
     lines.push((j.config_exists?'✓':'✗')+' Config file: '+(j.config_path||''));
+    if(j.log_tail&&j.log_tail.length){
+      lines.push('— Recent log —');
+      for(var li=0;li<j.log_tail.length;li++)lines.push(j.log_tail[li]);
+    }
     out.textContent=lines.join('\n');
   }catch(e){out.textContent='✗ စစ်ဆေးလို့ မရပါ: '+e.message;}
+}
+
+async function viewMemory(){
+  var out=setq('set-mem-out'); if(!out)return;
+  out.textContent='ဖတ်နေပါတယ်…';
+  try{
+    var r=await fetch('/api/memory');
+    var j=await settingsJson(r);
+    if(j.error){out.textContent='✗ '+j.error;return;}
+    out.textContent=j.text||'(ဘာမှ မမှတ်ထားသေးပါ)';
+  }catch(e){out.textContent='✗ ဖတ်လို့ မရပါ: '+e.message;}
+}
+
+async function addFact(){
+  var inp=setq('set-mem-input'); var out=setq('set-mem-out');
+  var text=inp?inp.value.trim():'';
+  if(!text){if(out)out.textContent='အရင် စာသား ရိုက်ထည့်ပါ';return;}
+  try{
+    var r=await fetch('/api/remember',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text:text})});
+    var j=await settingsJson(r);
+    if(j.ok){if(inp)inp.value='';if(out)out.textContent='✓ မှတ်ထားပြီးပါပြီ';}
+    else if(out)out.textContent='✗ '+(j.reason||j.error||'မှတ်မရပါ');
+  }catch(e){if(out)out.textContent='✗ မှတ်လို့ မရပါ: '+e.message;}
+}
+
+async function forgetMemory(){
+  var inp=setq('set-mem-input'); var out=setq('set-mem-out');
+  var kw=inp?inp.value.trim():'';
+  if(!kw){if(out)out.textContent='ဖျက်ချင်တဲ့ စကားလုံး အရင် ရိုက်ထည့်ပါ';return;}
+  if(!confirm('"'+kw+'" ပါတဲ့ အချက်တွေကို ဖျက်မှာ သေချာပါသလား?'))return;
+  try{
+    var r=await fetch('/api/memory/forget',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({keyword:kw})});
+    var j=await settingsJson(r);
+    if(j.error){if(out)out.textContent='✗ '+j.error;return;}
+    if(inp)inp.value='';
+    if(out)out.textContent='✓ '+(j.removed||0)+' ခု ဖျက်ပြီးပါပြီ';
+  }catch(e){if(out)out.textContent='✗ ဖျက်လို့ မရပါ: '+e.message;}
 }
 
 async function runBackup(){
@@ -2705,6 +2767,9 @@ async function resetSettings(){
   var cancel=setq('set-cancel'); if(cancel)cancel.addEventListener('click',closeSettings);
   var save=setq('set-save'); if(save)save.addEventListener('click',saveSettings);
   var doc=setq('set-doctor'); if(doc)doc.addEventListener('click',runDoctor);
+  var mv=setq('set-mem-view'); if(mv)mv.addEventListener('click',viewMemory);
+  var ma=setq('set-mem-add'); if(ma)ma.addEventListener('click',addFact);
+  var mf=setq('set-mem-forget'); if(mf)mf.addEventListener('click',forgetMemory);
   var bak=setq('set-backup'); if(bak)bak.addEventListener('click',runBackup);
   var rst=setq('set-reset'); if(rst)rst.addEventListener('click',resetSettings);
   var add=setq('set-key-add'); if(add)add.addEventListener('click',addKey);

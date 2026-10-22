@@ -322,7 +322,19 @@ async function fetchStub(url, opts) {
       keys: { openai: { total: 2, healthy: 2, dead: 0, cooling: 0 },
               gemini: { total: 0, healthy: 0, dead: 0, cooling: 0 } },
       disk_free_bytes: 5 * 1073741824,
+      storage: [{ label: 'agent data (~/.ai-agent)', bytes: 5242880 },
+                { label: 'backup zips', bytes: 1048576 }],
+      log_tail: ['2026-10-22 INFO boot ok', '2026-10-22 WARNING demo line'],
       code: { backend: 'opencode', installed: true } });
+  }
+  if (url === '/api/memory' && (!o.method || o.method === 'GET')) {
+    return jsonRes({ text: 'Facts:\n- likes tea' });
+  }
+  if (url === '/api/remember' && o.method === 'POST') {
+    return jsonRes({ ok: true });
+  }
+  if (url === '/api/memory/forget' && o.method === 'POST') {
+    return jsonRes({ ok: true, removed: 2 });
   }
   if (url === '/api/settings/backup' && o.method === 'POST') {
     return jsonRes({ ok: true, file: 'ai-agent-backup-test.zip', files: 12,
@@ -695,6 +707,10 @@ function click(id, ev) { const e = registry[id]; if (e) e.fire(ev || 'click'); }
   ok(doc.includes('Local model: model.litertlm'), 'doctor reports the local model');
   ok(doc.includes('openai: key 2/2 healthy'), 'doctor reports per-provider key health');
   ok(doc.includes('Storage free: 5.0 GB'), 'doctor reports free storage');
+  ok(doc.includes('Usage:'), 'doctor reports the storage breakdown');
+  ok(doc.includes('5.0 MB'), 'storage sizes are human readable');
+  ok(doc.includes('Recent log'), 'doctor shows the recent log');
+  ok(doc.includes('demo line'), 'log lines render');
   ok(doc.includes('opencode'), 'doctor reports the code backend');
 
   // backup — the zip name comes back, no key material
@@ -713,6 +729,31 @@ function click(id, ev) { const e = registry[id]; if (e) e.fire(ev || 'click'); }
      'reset POSTs the reset endpoint');
   ok(texts(registry['set-msg']).includes('reset'), 'reset confirms in the panel');
 
+  console.log('--- memory panel (Release 8) ---');
+  registry['set-mem-view'].fire('click');
+  await new Promise(r => setImmediate(r));
+  await new Promise(r => setImmediate(r));
+  ok(texts(registry['set-mem-out']).includes('likes tea'),
+     'memory view shows the stored facts');
+  registry['set-mem-add'].fire('click');  // primes the lazy input element
+  await new Promise(r => setImmediate(r));
+  registry['set-mem-input'].value = 'water the plants';
+  registry['set-mem-add'].fire('click');
+  await new Promise(r => setImmediate(r));
+  await new Promise(r => setImmediate(r));
+  ok(calls.some(c => c.url === '/api/remember' && c.method === 'POST'),
+     'add posts to /api/remember');
+  ok(texts(registry['set-mem-out']).includes('မှတ်ထားပြီးပါပြီ'),
+     'add confirms in the panel');
+  registry['set-mem-input'].value = 'tea';
+  registry['set-mem-forget'].fire('click');
+  await new Promise(r => setImmediate(r));
+  await new Promise(r => setImmediate(r));
+  ok(calls.some(c => c.url === '/api/memory/forget' && c.method === 'POST'),
+     'forget posts to /api/memory/forget');
+  ok(texts(registry['set-mem-out']).includes('2 ခု ဖျက်ပြီးပါပြီ'),
+     'forget reports how many were removed');
+
   console.log('--- settings tabs (Release 7) ---');
   sandbox.showSettingsTab('provider');
   eq(registry['set-pane-backend'].style.display, 'none', 'tab: backend pane hides');
@@ -724,10 +765,12 @@ function click(id, ev) { const e = registry[id]; if (e) e.fire(ev || 'click'); }
   sandbox.showSettingsTab('backend');
   eq(registry['set-pane-backend'].style.display, '', 'tab: backend pane back');
 
-  // every endpoint used must belong to routes/settings_api.py
+  // every endpoint used must belong to routes/settings_api.py or
+  // routes/memory_api.py (the Memory panel)
   const allowed = ['/api/settings/agent', '/api/settings/agent/keys',
                    '/api/settings/agent/keys/test',
                    '/api/settings/doctor', '/api/settings/backup',
+                   '/api/memory', '/api/remember', '/api/memory/forget',
                    '/api/settings/agent/reset',
                    /^\/api\/settings\/agent\/keys\/[a-z]+\/[A-Za-z0-9_]+$/,
                    /^\/api\/settings\/agent\/keys\/[a-z]+\/[A-Za-z0-9_]+\/activate$/];

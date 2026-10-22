@@ -11,6 +11,7 @@ No response from this file ever contains a raw key — `KeyManager.public()` /
 from __future__ import annotations
 
 import shutil
+from pathlib import Path
 
 from flask import Blueprint, jsonify, request
 from werkzeug.exceptions import HTTPException
@@ -417,7 +418,77 @@ def api_settings_doctor():
     except Exception as e:
         out["code"] = {"backend": "opencode", "installed": False,
                        "error": str(e)}
+    out["storage"] = _storage_report(km)
+    out["log_tail"] = _log_tail(km)
     return jsonify(out)
+
+
+def _dir_size(path, cap=20000):
+    """Bytes of a file or a directory tree; the walk stops after `cap`
+    files so a huge tree can never stall the doctor call."""
+    try:
+        p = Path(path)
+        if p.is_file():
+            return p.stat().st_size
+        if not p.exists():
+            return 0
+        total = 0
+        seen = 0
+        for f in p.rglob("*"):
+            try:
+                if f.is_file():
+                    total += f.stat().st_size
+                    seen += 1
+                    if seen >= cap:
+                        break
+            except OSError:
+                continue
+        return total
+    except Exception:
+        return 0
+
+
+def _storage_report(km):
+    """Where the app's own bytes live — the panel answer to a 'storage
+    ballooned' hunt, without opening a terminal."""
+    cfg_dir = Path(config.CONFIG_DIR)
+    home = Path.home()
+    items = [
+        ("agent data (~/.ai-agent)", _dir_size(cfg_dir)),
+        ("logs", _dir_size(cfg_dir / "logs")),
+        ("sessions file", _dir_size(cfg_dir / "sessions.json")),
+        ("memory file", _dir_size(cfg_dir / "memory.json")),
+        ("agent config (keys)", _dir_size(km.path)),
+        ("backup zips", sum(_dir_size(z)
+                            for z in home.glob("ai-agent-backup-*.zip"))),
+    ]
+    return [{"label": label, "bytes": int(size)} for label, size in items]
+
+
+def _log_tail(km, n=25):
+    """Last `n` lines of the agent log, with every stored raw key masked
+    and each line length-capped — readable in the panel, safe to show."""
+    try:
+        from core.log import log_file_path
+        path = log_file_path()
+        if not path.exists():
+            return []
+        raw_keys = []
+        try:
+            for bucket in (km.load().get("keys") or {}).values():
+                for e in bucket or []:
+                    if e.get("key"):
+                        raw_keys.append(e["key"])
+        except Exception:
+            raw_keys = []
+        lines = path.read_text(encoding="utf-8",
+                               errors="replace").splitlines()
+        out = []
+        for line in lines[-n:]:
+            out.append(redact(line.strip(), raw_keys)[:240])
+        return out
+    except Exception:
+        return []
 
 
 @bp.route("/api/settings/backup", methods=["POST"])

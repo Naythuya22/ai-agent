@@ -570,5 +570,55 @@ class Release71Tests(SettingsApiCase):
         self.assertEqual(j["provider_labels"]["deepseek"], "DeepSeek")
 
 
+class Release8Tests(SettingsApiCase):
+    """Groq / SiliconFlow / custom providers, doctor storage + log tail,
+    and the memory-forget route behind the Settings Memory panel."""
+
+    def test_new_providers_listed_with_labels(self):
+        _, j = call("get", "/api/settings/agent", expect=200)
+        for p in ("groq", "siliconflow", "custom"):
+            self.assertIn(p, j["providers"])
+            self.assertIn(p, j["fallback_order"])
+            self.assertIn(p, j["provider_labels"])
+        cfg = j["config"]
+        self.assertEqual(cfg["providers"]["groq"]["base_url"],
+                         "https://api.groq.com/openai/v1")
+        self.assertFalse(cfg["providers"]["custom"]["enabled"])
+
+    def test_groq_key_roundtrip_and_backend_order(self):
+        call("post", "/api/settings/agent/keys",
+             {"provider": "groq", "key": "gsk_test_1234567890",
+              "label": "groq1"}, expect=200)
+        _, j = call("get", "/api/settings/agent", expect=200)
+        keys = j["config"]["keys"]["groq"]
+        self.assertEqual(len(keys), 1)
+        self.assertEqual(keys[0]["status"], "ok")
+        be = AB.AgentBackend()
+        self.assertIn("groq", be.fallback_order())
+        self.assertIs(AB.ADAPTERS["groq"], AB.OpenAIAdapter)
+        self.assertIs(AB.ADAPTERS["custom"], AB.OpenAIAdapter)
+
+    def test_doctor_storage_and_log_tail(self):
+        _, j = call("get", "/api/settings/doctor", expect=200)
+        labels = [it["label"] for it in j["storage"]]
+        self.assertIn("backup zips", labels)
+        self.assertIn("logs", labels)
+        for it in j["storage"]:
+            self.assertIsInstance(it["bytes"], int)
+            self.assertGreaterEqual(it["bytes"], 0)
+        self.assertIsInstance(j["log_tail"], list)
+
+    def test_memory_forget_route(self):
+        call("post", "/api/remember", {"text": "likes green tea"},
+             expect=200)
+        _, j = call("post", "/api/memory/forget", {"keyword": "tea"},
+                    expect=200)
+        self.assertTrue(j["ok"])
+        self.assertGreaterEqual(j["removed"], 1)
+        _, j2 = call("get", "/api/memory", expect=200)
+        self.assertNotIn("green tea", j2["text"])
+        call("post", "/api/memory/forget", {"keyword": " "}, expect=400)
+
+
 if __name__ == "__main__":
     unittest.main()

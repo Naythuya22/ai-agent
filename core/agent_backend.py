@@ -89,6 +89,11 @@ MODELS: dict = {
     "anthropic": ["claude-3-5-haiku-latest", "claude-3-5-sonnet-latest",
                   "claude-3-opus-latest"],
     "deepseek": ["deepseek-chat", "deepseek-reasoner"],
+    "groq": ["llama-3.3-70b-versatile", "llama-3.1-8b-instant",
+             "openai/gpt-oss-120b", "openai/gpt-oss-20b"],
+    "siliconflow": ["Qwen/Qwen2.5-7B-Instruct", "deepseek-ai/DeepSeek-V3",
+                    "deepseek-ai/DeepSeek-R1", "Qwen/Qwen3-32B"],
+    "custom": [],
 }
 
 
@@ -1239,6 +1244,11 @@ ADAPTERS: dict = {
     "openrouter": OpenRouterAdapter,
     "anthropic": AnthropicAdapter,
     "deepseek": DeepSeekAdapter,
+    # OpenAI-compatible services (Release 8): the plain OpenAI adapter
+    # speaks to them unchanged; each provider's base_url points the way.
+    "groq": OpenAIAdapter,
+    "siliconflow": OpenAIAdapter,
+    "custom": OpenAIAdapter,
 }
 
 
