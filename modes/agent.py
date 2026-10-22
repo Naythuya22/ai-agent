@@ -204,6 +204,24 @@ _VERIFY_SYSTEM = (
     "Reply with exactly one of the three forms and nothing else."
 )
 
+# The user-side half of the summary pair compress_session writes: a
+# compressed transcript (manual or automatic) always opens with this
+# marker entry followed by an assistant entry holding the summary text.
+# Auto-compaction (Release 18) writes the same pair, so a transcript the
+# two paths produced is indistinguishable downstream.
+_SUMMARY_MARKER = "[Earlier conversation — summary]"
+
+# System prompt for the cloud summarizer step (Release 18): a cloud
+# turn's summary is written by the backend that served the turn, under
+# the same faithfulness discipline as the reviewer — a loose summary
+# would poison every later turn that reads it back as history.
+_SUMMARIZE_SYSTEM = (
+    "You are a careful summarizer. Summarize the conversation you are "
+    "given faithfully and concisely. Preserve facts, decisions and "
+    "open questions exactly as stated; never add, guess or embellish "
+    "anything that is not in the conversation."
+)
+
 _REFLECT_PROMPT = """You are reviewing one finished turn to decide
 whether a DURABLE lesson is worth saving to persistent memory.
 
@@ -309,6 +327,25 @@ def _compact_tool_results(messages: list) -> str:
     if len(out) > _VERIFY_TOTAL_CHARS:
         out = out[:_VERIFY_TOTAL_CHARS] + "\n…"
     return out
+
+
+def _summary_prompt(msgs: list) -> str:
+    """The one bullet-summary prompt every summarizer is fed (Release 18).
+
+    Renders ``msgs`` as ``role: text`` lines and asks for a 3–5 bullet
+    summary. The local summarizer (``_summarize_messages``) and the
+    cloud one (``_summarize_messages_cloud``) share this builder, so
+    which engine writes a summary never changes what it was asked for —
+    and manual compress_session's prompt is byte-identical to before.
+    """
+    convo = "\n".join(
+        f"{m.get('role', 'user')}: {m.get('text', '')}" for m in msgs
+    )
+    return (
+        "Summarize the following conversation in 3-5 concise bullet points. "
+        "Preserve key facts, user questions, decisions, and context needed to continue.\n\n"
+        f"{convo}\n\nSummary:"
+    )
 
 
 class AgentMode:
@@ -978,6 +1015,122 @@ class AgentMode:
         else:
             self._messages = msgs[excess:]
 
+    def _summarize_messages(self, msgs: list) -> str:
+        """Summarize a transcript slice with the on-device engine.
+
+        Feeds ``_summary_prompt(msgs)`` to ``self.llm.ask`` — a one-shot
+        on the local model — and returns the stripped summary text (""
+        when the engine produced nothing); engine errors propagate.
+
+        The summarizer matches the backend serving the turn (Release
+        18, KoHtet's ruling): this local core serves local turns and
+        manual compress_session; a cloud turn's history is summarized
+        by _summarize_messages_cloud instead — same prompt, stronger
+        model, and Cloud Only never has to wake an engine it may not
+        even have loaded. Neither call is metered as a user-answer
+        call: like the reviewer (see _reviewer_reply), the summarizer
+        is not the model that produced the answer.
+        """
+        return (self.llm.ask(_summary_prompt(msgs)) or "").strip()
+
+    def _summarize_messages_cloud(self, be, msgs: list) -> str:
+        """Summarize a transcript slice through the cloud backend.
+
+        The cloud twin of _summarize_messages: ONE tools-free backend
+        step carrying the same bullet-summary prompt as a lone user
+        message — exactly the _reviewer_reply shape, so the fresh
+        one-message list neither reads the whole conversation nor
+        writes anything into the transcript. Routing is the turn's
+        own: be.step walks route_providers(), so in locked mode the
+        summary is attempted on the pinned provider alone, and its
+        failure propagates (→ _cap_history falls back to the plain
+        trim) instead of quietly switching to another provider for a
+        call the user never sees. Like the reviewer, the step is
+        deliberately NOT passed through record_usage/meter_usage.
+        Backend errors propagate; an empty reply returns "".
+        """
+        reply = be.step(
+            system=_SUMMARIZE_SYSTEM,
+            messages=[{"role": "user", "text": _summary_prompt(msgs)}],
+            tools=[],
+            max_tokens=config.AGENT_VERIFY_MAX_TOKENS,
+        )
+        return (getattr(reply, "text", "") or "").strip()
+
+    def _cloud_summarizer(self, be):
+        """The summarize callable for a cloud turn's _cap_history.
+
+        None when there is no backend to summarize with — _cap_history
+        then uses the local core, exactly the pre-revision behaviour.
+        """
+        if be is None:
+            return None
+        return lambda msgs: self._summarize_messages_cloud(be, msgs)
+
+    def _auto_compact(self, max_entries: int = 40, summarize=None) -> bool:
+        """Summarize the head a trim would drop; keep one summary pair.
+
+        The kept tail is the newest ``max_entries - 2`` entries (the pair
+        takes the other two slots), split at the same pairing boundary
+        _trim_messages uses, so no kept tool_result is left dangling.
+        The dropped head is rendered whole into the summarizer — a
+        previous summary pair at its front is just more rendered lines,
+        which is what makes summaries roll forward into the next one
+        instead of stacking. Returns True when the head was replaced;
+        False (transcript untouched) when there is nothing sensible to
+        compact. Summarizer errors propagate to _cap_history, which
+        falls back to the plain trim.
+
+        ``summarize`` is the callable that writes the summary; it
+        defaults to the on-device core (_summarize_messages). Cloud
+        call sites pass _cloud_summarizer(be) so the summary is written
+        by the backend that served the turn (Release 18 revision).
+        """
+        if summarize is None:
+            summarize = self._summarize_messages
+        msgs = self._messages
+        keep = max_entries - 2
+        if keep < 1 or len(msgs) <= max_entries:
+            return False
+        cut = len(msgs) - keep
+        # Same rule as _trim_messages: never start with a dangling
+        # tool_result — its tool_call belongs to the summarized head.
+        while cut < len(msgs) and msgs[cut].get("role") == "tool_result":
+            cut += 1
+        if cut < 1 or cut >= len(msgs):
+            return False
+        summary = summarize(msgs[:cut])
+        if not summary:
+            return False
+        self._messages = (
+            [{"role": "user", "text": _SUMMARY_MARKER},
+             {"role": "assistant", "text": summary}]
+            + msgs[cut:]
+        )
+        log.info("auto-compact: %d entries summarized, %d kept",
+                 cut, len(msgs) - cut)
+        return True
+
+    def _cap_history(self, max_entries: int = 40, summarize=None) -> None:
+        """Turn-end history cap: compact when over, trim as the net.
+
+        Auto-compaction runs at most once per call and only when the
+        transcript is over the cap; ANY failure in it (engine error,
+        empty summary, no engine) falls back to the plain trim, so a
+        compaction problem can never lose or block the user's turn.
+        _trim_messages always runs last with its unchanged behaviour —
+        after a successful compaction it is a no-op by construction.
+        ``summarize`` is threaded to _auto_compact unchanged.
+        """
+        if (len(self._messages) > max_entries
+                and config.AUTO_COMPACT_ENABLED):
+            try:
+                self._auto_compact(max_entries, summarize)
+            except Exception as e:
+                log.warning("auto-compact failed, plain trim instead "
+                            "(%s: %s)", type(e).__name__, e)
+        self._trim_messages(max_entries)
+
     # ── hybrid backend (cloud when WiFi + keys, local otherwise) ──
 
     def _backend_obj(self):
@@ -1351,7 +1504,9 @@ class AgentMode:
             final_text = self._verify_cloud(be, final_text, _step)
         self._messages.append({"role": "assistant", "text": final_text,
                                "reasoning": step.reasoning})
-        self._trim_messages()   # F2: cap history
+        # A cloud turn's history is summarized by this same backend
+        # (Release 18 revision) — never by the on-device engine.
+        self._cap_history(summarize=self._cloud_summarizer(be))
         self._save_turn()
         return final_text
 
@@ -1755,7 +1910,8 @@ class AgentMode:
             self._messages.append({"role": "assistant", "text": final_text,
                                    "reasoning": getattr(
                                        self, "_stream_reasoning", "")})
-            self._trim_messages()   # F2: cap history
+            # Same backend-matched summarizer as _handle_cloud.
+            self._cap_history(summarize=self._cloud_summarizer(be))
             self._save_turn()
         except GeneratorExit:
             if any_output:
@@ -1772,7 +1928,12 @@ class AgentMode:
                 self._messages.append({"role": "assistant", "text": partial,
                                        "reasoning": getattr(
                                            self, "_stream_reasoning", "")})
-                self._trim_messages()   # F2: cap history
+                # The stream ran on the cloud backend, so its history
+                # is summarized there too (Release 18 revision);
+                # _backend_obj() returns the cached object and cannot
+                # raise — a None backend degrades to the local core.
+                self._cap_history(
+                    summarize=self._cloud_summarizer(self._backend_obj()))
                 self._save_turn()
             else:
                 # mirrors _try_cloud at L648 — keep in sync on any change
@@ -1926,7 +2087,7 @@ class AgentMode:
                     final_text = str(resp)
 
         self._messages.append({"role": "assistant", "text": final_text})
-        self._trim_messages()   # F2: cap history
+        self._cap_history()   # F2: cap history (compact, then trim)
         # Only now that the local model really answered — a Cloud Only refusal
         # or a cloud success must never be overwritten by this line.
         record_usage("local", self._local_label(), "", mode)
@@ -1992,21 +2153,11 @@ class AgentMode:
         except Exception:
             before = 0
 
-        convo = "\n".join(
-            f"{m.get('role', 'user')}: {m.get('text', '')}" for m in msgs
-        )
-        prompt = (
-            "Summarize the following conversation in 3-5 concise bullet points. "
-            "Preserve key facts, user questions, decisions, and context needed to continue.\n\n"
-            f"{convo}\n\nSummary:"
-        )
-
         try:
-            summary = self.llm.ask(prompt)
+            summary = self._summarize_messages(msgs)
         except Exception as e:
             return {"error": f"summarize failed: {type(e).__name__}: {e}"}
 
-        summary = (summary or "").strip()
         if not summary:
             return {"error": "empty summary"}
 
@@ -2016,7 +2167,7 @@ class AgentMode:
             return {"error": f"archive failed: {e}"}
 
         new_msgs = [
-            {"role": "user", "text": "[Earlier conversation — summary]"},
+            {"role": "user", "text": _SUMMARY_MARKER},
             {"role": "assistant", "text": summary},
         ]
         try:

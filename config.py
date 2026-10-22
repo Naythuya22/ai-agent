@@ -337,6 +337,13 @@ AGENT_INJECTION_GUARD = _env_bool("AI_AGENT_INJECTION", True)
 # Revert with AI_AGENT_FILE_JAIL=0 (power users / recovery only).
 FILE_JAIL_ENABLED = _env_bool("AI_AGENT_FILE_JAIL", True)
 
+# ── auto-compaction (Release 18) ─────────────────────────────
+# When an agent transcript grows past the history cap, the entries the
+# trim would have dropped are summarized into one rolling summary pair
+# (the same shape manual compress_session writes) instead of vanishing.
+# Revert with AI_AGENT_AUTO_COMPACT=0 — plain trim, exactly as before.
+AUTO_COMPACT_ENABLED = _env_bool("AI_AGENT_AUTO_COMPACT", True)
+
 # Dev only — /sw.js re-reads web/index.html on every request instead of
 # serving the hash computed at startup, so a frontend edit reaches the
 # browser without a server restart (Lesson #3). Off by default.
