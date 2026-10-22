@@ -245,6 +245,9 @@ footer{position:relative;padding:12px 12px 16px;background:var(--bg);border-top:
 .fb-btn{background:var(--bg-4);border:1px solid var(--border);color:var(--text);border-radius:4px;width:24px;height:22px;cursor:pointer;font-size:12px;line-height:1}
 .fb-tag{font-size:10px;color:var(--text-2);border:1px solid var(--border);border-radius:8px;padding:1px 6px;white-space:nowrap}
 .fb-row.off .fb-name{opacity:.5}
+.usage-row{padding:6px 0;border-bottom:1px solid var(--border)}
+.usage-row:last-child{border-bottom:0}
+.usage-head{font-size:12px;color:var(--text-panel)}
 .set-msg{font-size:11px;color:var(--text-2);min-height:14px;margin-top:6px}
 .set-msg.err{color:#dc2626}
 .set-btn{background:var(--accent);color:var(--accent-on);border:0;border-radius:4px;padding:6px 14px;font-size:12px;cursor:pointer;font-family:inherit}
@@ -479,6 +482,15 @@ footer{position:relative;padding:12px 12px 16px;background:var(--bg);border-top:
 </div>
 <div class="set-hint">Add = ရိုက်ထည့်တဲ့ စာသားကို အချက်အသစ် အနေနဲ့ မှတ်ထားမယ်။ Forget = အဲဒီ စကားလုံး ပါဝင်တဲ့ အချက်တွေကို ဖျက်မယ် (ဖျက်ပြီးရင် ပြန်ယူလို့ မရပါ)။</div>
 <div id="set-mem-out" class="set-hint" style="white-space:pre-line"></div>
+</div>
+</div>
+<button type="button" class="set-sec-head" data-tab="usage" id="set-head-usage">Usage <span class="set-sec-arrow" id="set-arrow-usage">▸</span></button>
+<div id="set-pane-usage" style="display:none">
+<div class="set-row">
+<span class="set-label">Provider usage</span>
+<div id="set-usage-list"></div>
+<div class="set-hint" id="set-usage-total"></div>
+<div class="set-hint">used = key တစ်ခုချင်းစီ အောင်မြင်စွာ ဖြေခဲ့တဲ့ အကြိမ် အရေအတွက်။</div>
 </div>
 </div>
 </div>
@@ -2362,7 +2374,7 @@ function showSettingsTab(name){
   // heading bars, one pane open at a time (name '' closes them all).
   // The stacked shape is deliberate — a new section is one more
   // heading + pane, however many get added later.
-  var panes={backend:setq('set-pane-backend'),provider:setq('set-pane-provider'),system:setq('set-pane-system')};
+  var panes={backend:setq('set-pane-backend'),provider:setq('set-pane-provider'),system:setq('set-pane-system'),usage:setq('set-pane-usage')};
   for(var k in panes){if(panes[k])panes[k].style.display=(k===name)?'':'none';}
   var heads=document.querySelectorAll('.set-sec-head');
   for(var i=0;i<heads.length;i++){
@@ -2479,6 +2491,7 @@ function renderSettings(){
   }
   renderFallback();
   renderProvider();
+  renderUsage();
   renderPromptTier();
 }
 
@@ -2629,6 +2642,63 @@ function keyStatusText(s){
   if(s==='dead')return 'invalid';
   if(s==='rate_limited')return '429 cooldown';
   return 'ready';
+}
+
+// Release 13 — per-provider usage, aggregated on the fly from the same
+// config the key rows render: public() already ships every key's used
+// counter, status, cooldown and last_error (masked keys only), so this
+// view needs no endpoint of its own. The ok/cooling/dead split follows
+// keyUsable() exactly — a rate_limited key whose cooldown has expired
+// counts as ok, the same answer the badges and fallback rows give.
+function usageCounts(ks){
+  var c={ok:0,cooling:0,dead:0,used:0,lastError:''};
+  for(var i=0;i<ks.length;i++){
+    var k=ks[i]||{};
+    c.used+=Number(k.used)||0;
+    if((k.status||'ok')==='dead')c.dead++;
+    else if(keyUsable(k))c.ok++;
+    else c.cooling++;
+    // No per-error timestamp is stored, so the last non-empty error in
+    // the bucket is the freshest signal the data carries.
+    if(k.last_error)c.lastError=String(k.last_error);
+  }
+  return c;
+}
+
+function renderUsage(){
+  var j=settingsState.data; if(!j)return;
+  var box=setq('set-usage-list'); if(!box)return;
+  box.innerHTML='';
+  var labels=j.provider_labels||((j.config||{}).provider_labels)||{};
+  var allKeys=((j.config||{}).keys)||{};
+  var provs=provs_(j);
+  var totKeys=0,totUsed=0;
+  for(var i=0;i<provs.length;i++){
+    var pid=provs[i];
+    var ks=allKeys[pid]||[];
+    var c=usageCounts(ks);
+    totKeys+=ks.length; totUsed+=c.used;
+    var row=document.createElement('div'); row.className='usage-row';
+    var head=document.createElement('div'); head.className='usage-head';
+    head.textContent=(labels[pid]||pid)+' — '+ks.length+' keys · used '+c.used;
+    row.appendChild(head);
+    var det=document.createElement('div'); det.className='set-hint';
+    if(!ks.length){
+      det.textContent='Key မထည့်ရသေးဘူး';
+      row.appendChild(det);
+    }else{
+      det.textContent='ok '+c.ok+' · ⏳ cooling '+c.cooling+' · dead '+c.dead;
+      row.appendChild(det);
+      if(c.lastError){
+        var er=document.createElement('div'); er.className='set-hint';
+        er.textContent='Last error: '+c.lastError;
+        row.appendChild(er);
+      }
+    }
+    box.appendChild(row);
+  }
+  var tot=setq('set-usage-total');
+  if(tot)tot.textContent='Total: '+totKeys+' keys · used '+totUsed;
 }
 
 function renderKeys(){

@@ -816,6 +816,58 @@ function click(id, ev) { const e = registry[id]; if (e) e.fire(ev || 'click'); }
      'R9.2: opening one section keeps the others closed');
   sandbox.showSettingsTab('backend');
 
+  console.log('--- usage view (Release 13) ---');
+  ok(html.includes('data-tab="usage"') && html.includes('id="set-pane-usage"'),
+     'R13: Usage is a fourth accordion section');
+  ok(html.includes('id="set-usage-list"') && html.includes('id="set-usage-total"'),
+     'R13: the usage pane has a list and a totals line');
+  ok(block.includes('renderUsage') && block.includes('usageCounts'),
+     'R13: the settings block aggregates and renders usage');
+
+  // the accordion treats usage like every other section
+  sandbox.showSettingsTab('usage');
+  eq(registry['set-pane-usage'].style.display, '', 'R13: usage pane opens');
+  eq(registry['set-pane-backend'].style.display, 'none',
+     'R13: opening usage closes the others');
+  eq(registry['set-arrow-usage'].textContent, '▾', 'R13: the open usage section shows ▾');
+  sandbox.toggleSettingsSection('usage');
+  eq(registry['set-pane-usage'].style.display, 'none',
+     'R13: tapping the usage heading closes it');
+  sandbox.showSettingsTab('backend');
+
+  // per-provider aggregation over config.keys, classified by keyUsable()
+  const uk = sandbox.settingsState.data.config.keys;
+  uk.openai[1].status = 'dead'; uk.openai[1].used = 7;
+  uk.openai[1].last_error = '401 unauthorized';
+  uk.gemini = [
+    { id: 'g_1', label: '', key_masked: 'AIza…1111', status: 'rate_limited',
+      cooldown_until: Date.now() / 1000 + 600, used: 2, last_error: '429 rate limited' },
+    { id: 'g_2', label: '', key_masked: 'AIza…2222', status: 'rate_limited',
+      cooldown_until: Date.now() / 1000 - 60, used: 3, last_error: '429 rate limited' },
+  ];
+  sandbox.renderSettings();
+  const uRows = registry['set-usage-list'].children;
+  eq(uRows.length, 5, 'R13: one usage row per provider');
+  ok(texts(uRows[0]).includes('OpenAI — 2 keys · used 11'),
+     'R13: used totals sum across keys: ' + texts(uRows[0]));
+  ok(texts(uRows[0]).includes('ok 1') && texts(uRows[0]).includes('dead 1'),
+     'R13: ok/dead counts split the bucket');
+  ok(texts(uRows[0]).includes('401 unauthorized'),
+     'R13: the last error is shown for the provider');
+  ok(texts(uRows[1]).includes('used 5'), 'R13: gemini used sums too');
+  ok(texts(uRows[1]).includes('ok 1') && texts(uRows[1]).includes('cooling 1'),
+     'R13: an expired cooldown counts as ok, a live one as cooling');
+  ok(texts(uRows[2]).includes('မထည့်ရသေးဘူး'),
+     'R13: a provider with no keys says so');
+  eq(registry['set-usage-total'].textContent, 'Total: 4 keys · used 16',
+     'R13: the totals line sums keys and calls');
+  ok(!texts(registry['set-usage-list']).includes(RAW_KEY),
+     'R13: usage never renders raw key material');
+  // restore the shared fixture for the blocks below
+  uk.openai[1].status = 'ok'; uk.openai[1].used = 0; uk.openai[1].last_error = null;
+  uk.gemini = [];
+  sandbox.renderSettings();
+
   // ---- Release 9: Auto switch toggle + pin state ----
   sandbox.settingsState.data.config.auto_switch = false;
   sandbox.settingsState.data.config.pinned_provider = 'gemini';
