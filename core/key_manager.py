@@ -277,6 +277,22 @@ class KeyManager:
         # the user's keys over a mode bit would be the worse failure.
         chmod_0600(self.path)
 
+    def reset_to_defaults(self) -> dict:
+        """Restore every setting to DEFAULT_CONFIG — except the keys.
+
+        The keys are the one thing a reset must never destroy: re-entering
+        five providers' worth of secrets because a model name was mistyped
+        is exactly the failure the Settings reset button exists to prevent.
+        Returns the public view of the restored config.
+        """
+        cfg = self.load()
+        keys = cfg.get("keys") or {}
+        fresh = json.loads(json.dumps(DEFAULT_CONFIG))
+        fresh["keys"] = {p: list(keys.get(p) or []) for p in PROVIDERS}
+        self._cfg = fresh
+        self.save()
+        return self.public()
+
     def _ensure_mode(self) -> None:
         """chmod 600 every time the file is seen, even if it arrived loose."""
         global _mode_warned

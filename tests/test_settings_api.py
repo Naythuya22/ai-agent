@@ -488,5 +488,61 @@ class ModelIndicatorTests(SettingsApiCase):
         _, j = call("get", "/api/settings/nope", expect=404)
         self.assertIn("error", j)
 
+
+class Release6Tests(SettingsApiCase):
+    """Settings panel additions: reset-to-defaults, doctor, backup."""
+
+    def _add_openai_key(self):
+        _, j = call("post", "/api/settings/agent/keys",
+                    {"provider": "openai", "key": RAW_OPENAI,
+                     "label": "keepme"}, expect=200)
+        return j
+
+    def test_reset_restores_defaults_and_keeps_keys(self):
+        self._add_openai_key()
+        call("post", "/api/settings/agent",
+             {"backend_mode": "cloud",
+              "providers": {"openai": {"model": "my-custom-model",
+                                       "enabled": False}}}, expect=200)
+        _, j = call("post", "/api/settings/agent/reset", {}, expect=200)
+        self.assertTrue(j["ok"])
+        cfg = j["config"]
+        self.assertEqual(cfg["backend_mode"], "auto")
+        self.assertEqual(cfg["providers"]["openai"]["model"], "gpt-4o-mini")
+        self.assertTrue(cfg["providers"]["openai"]["enabled"])
+        self.assertEqual(len(cfg["keys"]["openai"]), 1)
+        self.assertEqual(cfg["keys"]["openai"][0]["label"], "keepme")
+        # …and it persisted, not just in the response.
+        _, j2 = call("get", "/api/settings/agent", expect=200)
+        self.assertEqual(j2["config"]["backend_mode"], "auto")
+        self.assertEqual(len(j2["config"]["keys"]["openai"]), 1)
+        flat = json.dumps(j, ensure_ascii=False)
+        self.assertNotIn(RAW_OPENAI, flat)
+
+    def test_doctor_reports_key_health_disk_and_code(self):
+        self._add_openai_key()
+        _, j = call("get", "/api/settings/doctor", expect=200)
+        self.assertTrue(j["ok"])
+        self.assertTrue(j["config_exists"])
+        self.assertEqual(j["keys"]["openai"]["total"], 1)
+        self.assertEqual(j["keys"]["openai"]["healthy"], 1)
+        self.assertEqual(j["keys"]["gemini"]["total"], 0)
+        self.assertIsInstance(j["disk_free_bytes"], int)
+        self.assertGreater(j["disk_free_bytes"], 0)
+        self.assertIsInstance(j["code"], dict)
+        self.assertIn("installed", j["code"])
+        flat = json.dumps(j, ensure_ascii=False)
+        self.assertNotIn(RAW_OPENAI, flat)
+
+    def test_backup_endpoint_writes_a_zip(self):
+        from pathlib import Path
+        _, j = call("post", "/api/settings/backup", {}, expect=200)
+        self.assertTrue(j["ok"])
+        self.assertTrue(j["file"].endswith(".zip"))
+        self.assertTrue(j["includes_secrets"])
+        self.assertGreater(j["files"], 0)
+        self.assertTrue((Path.home() / j["file"]).exists())
+
+
 if __name__ == "__main__":
     unittest.main()

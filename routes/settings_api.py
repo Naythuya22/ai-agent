@@ -10,6 +10,8 @@ No response from this file ever contains a raw key — `KeyManager.public()` /
 """
 from __future__ import annotations
 
+import shutil
+
 from flask import Blueprint, jsonify, request
 from werkzeug.exceptions import HTTPException
 
@@ -356,6 +358,86 @@ def api_key_test():
         return _err("key is required")
     result = _backend().test_key(provider, key, model)
     return jsonify(result)
+
+
+@bp.route("/api/settings/agent/reset", methods=["POST"])
+def api_settings_reset():
+    """Restore the factory settings — mode, fallback order, provider
+    models/URLs — while keeping every stored API key.
+
+    This is the self-service recovery path: any Settings value a user can
+    mistype can be undone in one tap, and the secrets they cannot retype
+    from memory are never part of the blast radius.
+    """
+    km = _keys()
+    try:
+        pub = km.reset_to_defaults()
+    except Exception as e:
+        return _err("could not reset: %s" % e, 500)
+    log.info("agent settings reset to defaults (keys kept, config at %s)",
+             km.path)
+    return jsonify({"ok": True, "config": pub,
+                    "backend": _safe_status(),
+                    "prompt_tier": _prompt_tier_view(_backend())})
+
+
+@bp.route("/api/settings/doctor", methods=["GET"])
+def api_settings_doctor():
+    """One-tap system check for the Settings panel.
+
+    Read-only roll-up of what a user otherwise has to verify in a terminal:
+    backend state, per-provider key health (`KeyManager.summary()` — written
+    for this panel and until now never wired to a route), whether the Code
+    mode backend is installed, and free space where the config lives. No raw
+    key is ever part of the answer.
+    """
+    km = _keys()
+    out = {
+        "ok": True,
+        "config_path": str(km.path),
+        "config_exists": km.path.exists(),
+        "backend": _safe_status(),
+        "keys": km.summary(),
+        "disk_free_bytes": None,
+        "code": None,
+    }
+    try:
+        out["disk_free_bytes"] = shutil.disk_usage(str(km.path.parent)).free
+    except Exception as e:
+        out["disk_error"] = str(e)
+    try:
+        from core import code_backends
+        b = code_backends.get("opencode")
+        info = b.doctor()
+        out["code"] = {
+            "backend": "opencode",
+            "installed": bool(info.get("installed")),
+            "version": info.get("version"),
+        }
+    except Exception as e:
+        out["code"] = {"backend": "opencode", "installed": False,
+                       "error": str(e)}
+    return jsonify(out)
+
+
+@bp.route("/api/settings/backup", methods=["POST"])
+def api_settings_backup():
+    """Export a full backup zip from the Settings panel.
+
+    Same engine as `python3 backup.py export` (Release 1): the zip carries
+    the provider keys, so the answer reports that fact and the UI warns —
+    the file itself stays in the app home, never in the response.
+    """
+    try:
+        import backup as backup_mod
+        path = backup_mod.do_export()
+        man = backup_mod.read_manifest(path) or {}
+    except Exception as e:
+        return _err("backup failed: %s" % e, 500)
+    log.info("settings backup exported: %s", path)
+    return jsonify({"ok": True, "file": path.name,
+                    "files": len(man.get("files") or []),
+                    "includes_secrets": bool(man.get("includes_secrets"))})
 
 
 def _safe_status() -> dict:

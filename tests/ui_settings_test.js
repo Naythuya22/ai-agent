@@ -315,6 +315,25 @@ async function fetchStub(url, opts) {
     if (!body.key_id) return jsonRes({ ok: false, error: 'key is required' });
     return jsonRes({ ok: true, latency_ms: 120, model: 'gpt-4o-mini' });
   }
+  if (url === '/api/settings/doctor' && (!o.method || o.method === 'GET')) {
+    return jsonRes({ ok: true, config_path: '/data/agent_config.json',
+      config_exists: true,
+      backend: { online: true, state: 'online', local_model: 'model.litertlm' },
+      keys: { openai: { total: 2, healthy: 2, dead: 0, cooling: 0 },
+              gemini: { total: 0, healthy: 0, dead: 0, cooling: 0 } },
+      disk_free_bytes: 5 * 1073741824,
+      code: { backend: 'opencode', installed: true } });
+  }
+  if (url === '/api/settings/backup' && o.method === 'POST') {
+    return jsonRes({ ok: true, file: 'ai-agent-backup-test.zip', files: 12,
+                     includes_secrets: true });
+  }
+  if (url === '/api/settings/agent/reset' && o.method === 'POST') {
+    const cfg = JSON.parse(JSON.stringify(REMOTE.config));
+    cfg.backend_mode = 'auto';
+    return jsonRes({ ok: true, config: cfg, backend: REMOTE.backend,
+                     prompt_tier: REMOTE.prompt_tier });
+  }
   const act = /^\/api\/settings\/agent\/keys\/([a-z]+)\/([A-Za-z0-9_]+)\/activate$/.exec(url);
   if (act && o.method === 'POST') {
     const cfg = JSON.parse(JSON.stringify(REMOTE.config));
@@ -343,6 +362,7 @@ const sandbox = {
     documentElement: { getAttribute() { return null; }, setAttribute() {} },
   },
   fetch: fetchStub,
+  confirm: () => true,
   console,
   Event: function Event(type, opts) {
     this.type = type;
@@ -632,9 +652,72 @@ function click(id, ev) { const e = registry[id]; if (e) e.fire(ev || 'click'); }
   eq(calls.filter(c => /\/activate$/.test(c.url || '')).length, 1,
      'a key is activated exactly once per user action');
 
+  // ── Release 6: fallback skip reasons, key health detail, System actions ──
+  console.log('--- release 6: clarity + system ---');
+  await sandbox.loadSettings();
+  const fbRows = registry['set-fallback'].children;
+  const gemRow = fbRows.find(r => texts(r).includes('gemini'));
+  ok(gemRow && texts(gemRow).includes('no keys'),
+     'a provider with no keys says so in its fallback row');
+  const oaiRow = fbRows.find(r => texts(r).includes('openai'));
+  eq(texts(oaiRow).trim(), '1. openai ↑ ↓',
+     'a healthy provider row carries no skip tag');
+  sandbox.settingsState.data.config.providers.gemini.enabled = false;
+  sandbox.renderSettings();
+  const gemRow2 = registry['set-fallback'].children.find(r => texts(r).includes('gemini'));
+  ok(gemRow2 && texts(gemRow2).includes('off'),
+     'a disabled provider is marked off in its fallback row');
+  sandbox.settingsState.data.config.providers.gemini.enabled = true;
+
+  // key rows: usage counts, cooldown countdown, error tooltip
+  sandbox.settingsState.provider = 'openai';
+  const k2 = sandbox.settingsState.data.config.keys.openai[1];
+  k2.status = 'rate_limited';
+  k2.cooldown_until = Date.now() / 1000 + 600;
+  k2.last_error = '429 too many requests';
+  k2.used = 7;
+  sandbox.renderSettings();
+  const keyRows6 = registry['set-key-list'].children;
+  ok(texts(keyRows6[0]).includes('used 4'), 'key row shows its usage count');
+  ok(texts(keyRows6[1]).includes('used 7'), 'parked key shows its usage count');
+  ok(texts(keyRows6[1]).includes('⏳'), 'parked key shows its cooldown countdown');
+  const sx1 = keyRows6[1].children[0].children[3];
+  eq(sx1 && sx1.title, '429 too many requests',
+     'the last error is one hover away on the status badge');
+  k2.status = 'ok'; k2.cooldown_until = 0; k2.last_error = null; k2.used = 0;
+  sandbox.renderSettings();
+
+  // doctor — one tap, plain-language lines
+  registry['set-doctor'].fire('click');
+  await new Promise(r => setImmediate(r));
+  await new Promise(r => setImmediate(r));
+  const doc = texts(registry['set-doctor-out']);
+  ok(doc.includes('Local model: model.litertlm'), 'doctor reports the local model');
+  ok(doc.includes('openai: key 2/2 healthy'), 'doctor reports per-provider key health');
+  ok(doc.includes('Storage free: 5.0 GB'), 'doctor reports free storage');
+  ok(doc.includes('opencode'), 'doctor reports the code backend');
+
+  // backup — the zip name comes back, no key material
+  registry['set-backup'].fire('click');
+  await new Promise(r => setImmediate(r));
+  await new Promise(r => setImmediate(r));
+  ok(texts(registry['set-msg']).includes('ai-agent-backup-test.zip'),
+     'backup reports the created file name');
+
+  // reset — one POST, then settings reload and confirm in the panel
+  registry['set-reset'].fire('click');
+  await new Promise(r => setImmediate(r));
+  await new Promise(r => setImmediate(r));
+  await new Promise(r => setImmediate(r));
+  ok(calls.some(c => c.url === '/api/settings/agent/reset' && c.method === 'POST'),
+     'reset POSTs the reset endpoint');
+  ok(texts(registry['set-msg']).includes('reset'), 'reset confirms in the panel');
+
   // every endpoint used must belong to routes/settings_api.py
   const allowed = ['/api/settings/agent', '/api/settings/agent/keys',
                    '/api/settings/agent/keys/test',
+                   '/api/settings/doctor', '/api/settings/backup',
+                   '/api/settings/agent/reset',
                    /^\/api\/settings\/agent\/keys\/[a-z]+\/[A-Za-z0-9_]+$/,
                    /^\/api\/settings\/agent\/keys\/[a-z]+\/[A-Za-z0-9_]+\/activate$/];
   const bad = calls.filter(c => !allowed.some(a =>

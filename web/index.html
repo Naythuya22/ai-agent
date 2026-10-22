@@ -243,10 +243,13 @@ footer{position:relative;padding:12px 12px 16px;background:var(--bg);border-top:
 .fb-rank{width:16px;color:var(--text-2)}
 .fb-name{flex:1}
 .fb-btn{background:var(--bg-4);border:1px solid var(--border);color:var(--text);border-radius:4px;width:24px;height:22px;cursor:pointer;font-size:12px;line-height:1}
+.fb-tag{font-size:10px;color:var(--text-2);border:1px solid var(--border);border-radius:8px;padding:1px 6px;white-space:nowrap}
+.fb-row.off .fb-name{opacity:.5}
 .set-msg{font-size:11px;color:var(--text-2);min-height:14px;margin-top:6px}
 .set-msg.err{color:#dc2626}
 .set-btn{background:var(--accent);color:var(--accent-on);border:0;border-radius:4px;padding:6px 14px;font-size:12px;cursor:pointer;font-family:inherit}
 .set-btn.ghost{background:transparent;color:var(--text-2);border:1px solid var(--border)}
+.set-btn.danger{background:transparent;color:#dc2626;border:1px solid #dc262655}
 @media (max-width: 480px) {
   .pb-label { display: none; }
 }
@@ -396,7 +399,7 @@ footer{position:relative;padding:12px 12px 16px;background:var(--bg);border-top:
 <select id="set-provider" class="set-select" style="flex:1"></select>
 <label class="set-check"><input type="checkbox" id="set-enabled"> enabled</label>
 </div>
-<div class="set-hint">Fallback order (first one that has a healthy key is used):</div>
+<div class="set-hint">Fallback order — the first provider that is on and has a healthy key is used; the rest are skipped:</div>
 <div id="set-fallback"></div>
 </div>
 
@@ -422,6 +425,17 @@ footer{position:relative;padding:12px 12px 16px;background:var(--bg);border-top:
 <button id="set-key-add" type="button" class="set-btn">Add</button>
 </div>
 <div class="set-msg" id="set-msg"></div>
+</div>
+
+<div class="set-row">
+<span class="set-label">System</span>
+<div class="set-line">
+<button id="set-doctor" type="button" class="set-btn">Run checks</button>
+<button id="set-backup" type="button" class="set-btn">Backup now</button>
+<button id="set-reset" type="button" class="set-btn danger">Reset settings</button>
+</div>
+<div class="set-hint">Reset က setting တွေကိုပဲ မူလ အတိုင်း ပြန်ထားတာပါ — API key တွေ မပျက်ပါဘူး။ Backup ထဲမှာ key တွေ ပါတာမို့ ဖိုင်ကို သီးသန့် သိမ်းထားပါ။</div>
+<div id="set-doctor-out" class="set-hint" style="white-space:pre-line"></div>
 </div>
 
 </div>
@@ -2167,6 +2181,14 @@ async function loadSettings(){
   }catch(e){setSettingsMsg('Settings load failed: '+e.message,true)}
 }
 
+function localNoteText(mode){
+  // The footer note is a summary of the Backend Mode choice above — never a
+  // second, separate-looking setting. One fact, stated once, in mode terms.
+  if(mode==='cloud')return 'Cloud Only — Local fallback: off';
+  if(mode==='local')return 'Local Only — Local Gemma 4B';
+  return 'Auto — Fail ရင် → Local Gemma 4B';
+}
+
 function renderSettings(){
   var j=settingsState.data; if(!j)return;
   var cfg=j.config||{};
@@ -2175,9 +2197,7 @@ function renderSettings(){
   for(var i=0;i<radios.length;i++){radios[i].checked=(radios[i].value===mode);}
   var hint=setq('backend-mode-hint'); if(hint)hint.textContent=modeHint(mode);
   var note=setq('set-local-note');
-  if(note)note.textContent=(mode==='cloud')
-    ? 'Local fallback: off'
-    : 'Fail ရင် → Local Gemma 4B';
+  if(note)note.textContent=localNoteText(mode);
   var b=j.backend||{};
   var net=setq('set-net');
   if(net){
@@ -2222,6 +2242,23 @@ function renderFallback(){
       dn.addEventListener('click',function(){fbSwap(idx,idx+1)});
       row.appendChild(rank); row.appendChild(name);
       row.appendChild(up); row.appendChild(dn);
+      // Why this provider would be skipped, in the row itself — the order
+      // alone used to hide that "enabled: off" (set in the Provider block)
+      // silently removes a provider from the chain. The tag goes last so
+      // the ↑/↓ buttons keep their child positions.
+      var pcfg=((((settingsState.data||{}).config||{}).providers||{})[list[idx]])||{};
+      var pkeys=((((settingsState.data||{}).config||{}).keys||{})[list[idx]])||[];
+      var tag='';
+      if(pcfg.enabled===false){ tag='off'; row.className+=' off'; }
+      else if(!pkeys.length){ tag='no keys'; }
+      else if(!pkeys.some(function(k){return (k.status||'ok')==='ok';})){
+        tag='no healthy key';
+      }
+      if(tag){
+        var tg=document.createElement('span'); tg.className='fb-tag';
+        tg.textContent=tag;
+        row.appendChild(tg);
+      }
       box.appendChild(row);
     })(i);
   }
@@ -2341,10 +2378,21 @@ function renderKeys(){
       var m=document.createElement('span'); m.className='key-mask';
       m.textContent=k.key_masked||'';
       var lab=document.createElement('span'); lab.className='key-label';
-      lab.textContent=k.label?('· '+k.label):'';
+      lab.textContent=(k.label?('· '+k.label):'')+
+        (k.used?(' · used '+k.used):'');
       var sx=document.createElement('span');
       sx.className='key-status '+String(k.status||'ok');
       sx.textContent=keyStatusText(k.status);
+      // A parked key that only says "429 cooldown" leaves the one question
+      // that matters unanswered: until when? The API has carried
+      // cooldown_until (and last_error) all along — render them.
+      if(k.status==='rate_limited'&&k.cooldown_until){
+        var secs=Math.round(k.cooldown_until-Date.now()/1000);
+        if(secs>0){
+          sx.textContent+=' ⏳ '+(secs>=60?Math.ceil(secs/60)+'m':secs+'s');
+        }
+      }
+      if(k.last_error&&k.status!=='ok')sx.title=String(k.last_error);
       left.appendChild(m); left.appendChild(lab); left.appendChild(sx);
       var right=document.createElement('span'); right.className='key-acts';
       var tb=document.createElement('button'); tb.type='button';
@@ -2472,11 +2520,71 @@ async function saveSettings(){
   }catch(e){setSettingsMsg('Save failed: '+e.message,true)}
 }
 
+async function runDoctor(){
+  var out=setq('set-doctor-out'); if(!out)return;
+  out.textContent='စစ်ဆေးနေပါတယ်…';
+  try{
+    var r=await fetch('/api/settings/doctor');
+    var j=await settingsJson(r);
+    if(j.error){out.textContent='✗ '+j.error;return;}
+    var lines=[];
+    var b=j.backend||{};
+    lines.push((b.local_model?'✓':'✗')+' Local model: '+(b.local_model||'not found'));
+    lines.push((b.online?'✓':'•')+' Network: '+(b.online?'Online':'Offline'));
+    var ks=j.keys||{};
+    for(var p in ks){
+      var s=ks[p];
+      var line='• '+p+': key '+s.healthy+'/'+s.total+' healthy';
+      if(s.cooling)line+=' · '+s.cooling+' cooling';
+      if(s.dead)line+=' · '+s.dead+' invalid';
+      lines.push(line);
+    }
+    if(j.code){
+      lines.push((j.code.installed?'✓':'✗')+' opencode (Code mode): '+
+        (j.code.installed?'installed':'not installed'));
+    }
+    if(typeof j.disk_free_bytes==='number'){
+      lines.push('• Storage free: '+(j.disk_free_bytes/1073741824).toFixed(1)+' GB');
+    }
+    lines.push((j.config_exists?'✓':'✗')+' Config file: '+(j.config_path||''));
+    out.textContent=lines.join('\n');
+  }catch(e){out.textContent='✗ စစ်ဆေးလို့ မရပါ: '+e.message;}
+}
+
+async function runBackup(){
+  try{
+    setSettingsMsg('Backup လုပ်နေပါတယ်…');
+    var r=await fetch('/api/settings/backup',{method:'POST',
+      headers:{'Content-Type':'application/json'},body:'{}'});
+    var j=await settingsJson(r);
+    if(j.error){setSettingsMsg(j.error,true);return;}
+    setSettingsMsg('Backup ✓ '+j.file+' ('+j.files+' files) — '+
+      'key တွေ ပါတာမို့ သီးသန့် သိမ်းထားပါ');
+  }catch(e){setSettingsMsg('Backup failed: '+e.message,true)}
+}
+
+async function resetSettings(){
+  if(!confirm('Setting အားလုံးကို မူလ အတိုင်း ပြန်ထားမလား?\n'+
+              'API key တွေ မပျက်ပါဘူး — mode, model, fallback order တွေပဲ ပြန်ဖြစ်ပါမယ်။'))return;
+  try{
+    setSettingsMsg('Reset လုပ်နေပါတယ်…');
+    var r=await fetch('/api/settings/agent/reset',{method:'POST',
+      headers:{'Content-Type':'application/json'},body:'{}'});
+    var j=await settingsJson(r);
+    if(j.error){setSettingsMsg(j.error,true);return;}
+    await loadSettings();
+    setSettingsMsg('Settings reset ✓ (keys kept)');
+  }catch(e){setSettingsMsg('Reset failed: '+e.message,true)}
+}
+
 (function bindSettings(){
   if(!settingsModal)return;
   var close=setq('settings-close'); if(close)close.addEventListener('click',closeSettings);
   var cancel=setq('set-cancel'); if(cancel)cancel.addEventListener('click',closeSettings);
   var save=setq('set-save'); if(save)save.addEventListener('click',saveSettings);
+  var doc=setq('set-doctor'); if(doc)doc.addEventListener('click',runDoctor);
+  var bak=setq('set-backup'); if(bak)bak.addEventListener('click',runBackup);
+  var rst=setq('set-reset'); if(rst)rst.addEventListener('click',resetSettings);
   var add=setq('set-key-add'); if(add)add.addEventListener('click',addKey);
   var keyIn=setq('set-key-input');
   if(keyIn)keyIn.addEventListener('keydown',function(e){
@@ -2497,8 +2605,7 @@ async function saveSettings(){
       var hint=setq('backend-mode-hint');
       if(hint)hint.textContent=modeHint(this.value);
       var note=setq('set-local-note');
-      if(note)note.textContent=(this.value==='cloud')
-        ? 'Local fallback: off' : 'Fail ရင် → Local Gemma 4B';
+      if(note)note.textContent=localNoteText(this.value);
     });
   }
   var tierRadios=document.getElementsByName('prompt-tier-mode');

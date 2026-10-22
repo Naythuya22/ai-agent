@@ -36,3 +36,4 @@ prompts-test-empty/
 # Eval harness run artifacts (timestamped, not source)
 eval/results/
 test-out.txt
+*.backup-*
