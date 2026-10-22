@@ -17,7 +17,7 @@ from core.llm import (
     supports_vision,
 )
 from core.log import get_logger
-from modes.agent import last_usage, record_usage
+from modes.agent import last_usage, meter_usage, record_usage
 from routes._helpers import (
     active_key_label,
     agent_context,
@@ -787,6 +787,7 @@ def _record_local_turn(agent_mode) -> dict:
         mode = agent_mode._mode()
     except Exception:
         mode = ""
+    meter_usage("local", name, "", None)   # Release 17: ledger, as in handle()
     return record_usage("local", name, "", mode)
 
 

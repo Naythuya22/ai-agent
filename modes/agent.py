@@ -74,6 +74,26 @@ def last_usage() -> dict:
     return dict(_USAGE)
 
 
+def meter_usage(backend: str, model: str = "", provider: str = "",
+                usage: dict | None = None) -> None:
+    """Persist one completed call in the usage ledger (Release 17).
+
+    Called beside record_usage() at exactly the points where a cloud
+    step or a local turn completes — so a call is metered exactly when
+    the chip says it ran, and never for the reviewer's private steps
+    (record_usage is deliberately not called there either). The
+    HTTP-transport branch of handle() does NOT meter: the server that
+    answered already metered its own side, and counting both ends of
+    that one turn would double it. Fully guarded — a broken ledger
+    must never break a turn.
+    """
+    try:
+        from core import usage_store
+        usage_store.record_call(backend, model, provider, usage)
+    except Exception as e:
+        log.debug("usage metering failed: %s: %s", type(e).__name__, e)
+
+
 def record_tier(tier: str, source: str) -> dict:
     """Remember which system prompt this turn was given, and why.
 
@@ -1240,6 +1260,8 @@ class AgentMode:
             # can change mid-turn when a key runs out, and the chip must show
             # the model that produced the answer the user is reading.
             record_usage("cloud", step.model or "", step.provider or "", mode)
+            meter_usage("cloud", step.model or "", step.provider or "",
+                        step.usage)
             return step
 
         step = _step()
@@ -1546,6 +1568,9 @@ class AgentMode:
                     # ever looks at its tool_calls.
                     record_usage("cloud", info.get("model") or "",
                                  info.get("provider") or "", mode)
+                    meter_usage("cloud", info.get("model") or "",
+                                info.get("provider") or "",
+                                info.get("usage"))
                     self._stream_reasoning = info.get("reasoning") or ""
                 elif kind == "error":
                     yield ("error", payload)     # forwarded verbatim
@@ -1704,6 +1729,8 @@ class AgentMode:
                                    max_tokens=config.agent_max_tokens(self.name))
                     record_usage("cloud", step.model or "", step.provider or "",
                                  mode)
+                    meter_usage("cloud", step.model or "",
+                                step.provider or "", step.usage)
                     return step
 
                 # mirrors _handle_cloud at L742 — keep in sync on any change.
@@ -1903,6 +1930,7 @@ class AgentMode:
         # Only now that the local model really answered — a Cloud Only refusal
         # or a cloud success must never be overwritten by this line.
         record_usage("local", self._local_label(), "", mode)
+        meter_usage("local", self._local_label(), "", None)
         if self._store:
             try:
                 self._store.save_mode("agent", self._messages)

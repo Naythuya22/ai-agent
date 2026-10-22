@@ -868,6 +868,49 @@ function click(id, ev) { const e = registry[id]; if (e) e.fire(ev || 'click'); }
   uk.gemini = [];
   sandbox.renderSettings();
 
+  console.log('--- usage tokens (Release 17) ---');
+  ok(block.includes('usageTokenAgg') && block.includes('usageTokenLine'),
+     'R17: the settings block aggregates persisted token totals');
+  sandbox.settingsState.data.usage = {
+    openai: { models: { 'gpt-4o-mini': {
+      calls: 3, measured_calls: 3, prompt_tokens: 2000,
+      completion_tokens: 500, updated: 'x', cost_per_1k: 0.15 } } },
+    gemini: { models: { 'gemini-2.5-flash': {
+      calls: 2, measured_calls: 1, prompt_tokens: 100,
+      completion_tokens: null, updated: 'x', cost_per_1k: null } } },
+    local: { models: { 'Gemma 4 E4B': {
+      calls: 4, measured_calls: 0, prompt_tokens: null,
+      completion_tokens: null, updated: 'x', cost_per_1k: null } } },
+  };
+  sandbox.renderSettings();
+  const tRows = registry['set-usage-list'].children;
+  eq(tRows.length, 6, 'R17: the local row joins the five provider rows');
+  ok(texts(tRows[0]).includes('Calls 3'), 'R17: openai calls shown');
+  ok(texts(tRows[0]).includes('2,000 in') && texts(tRows[0]).includes('500 out'),
+     'R17: measured tokens shown with separators');
+  ok(texts(tRows[0]).includes('est. cost $0.3000'),
+     'R17: input-cost estimate from the per-model rate: ' + texts(tRows[0]));
+  ok(texts(tRows[1]).includes('Calls 2') && texts(tRows[1]).includes('100 in'),
+     'R17: partial tokens still show what was measured');
+  ok(texts(tRows[1]).includes('(partial)'),
+     'R17: unmeasured calls mark the tokens partial');
+  ok(texts(tRows[1]).includes('est. cost —'),
+     'R17: no rate → cost stays unknown, not $0');
+  ok(texts(tRows[5]).includes('Local (on-device)')
+     && texts(tRows[5]).includes('Calls 4')
+     && texts(tRows[5]).includes('tokens —'),
+     'R17: local calls counted, tokens honestly unknown');
+  eq(registry['set-usage-total'].textContent,
+     'Total: 2 keys · used 4 · calls 9 · tokens 2,600 · est. $0.3000',
+     'R17: the totals line extends with calls, tokens and estimate');
+  // restore: no usage payload → the R13 rendering is byte-identical
+  delete sandbox.settingsState.data.usage;
+  sandbox.renderSettings();
+  eq(registry['set-usage-list'].children.length, 5,
+     'R17: without usage data the local row disappears');
+  eq(registry['set-usage-total'].textContent, 'Total: 2 keys · used 4',
+     'R17: without usage data the totals line is the R13 one');
+
   // ---- Release 9: Auto switch toggle + pin state ----
   sandbox.settingsState.data.config.auto_switch = false;
   sandbox.settingsState.data.config.pinned_provider = 'gemini';

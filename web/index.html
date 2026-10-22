@@ -2665,14 +2665,60 @@ function usageCounts(ks){
   return c;
 }
 
+// Release 17 — persisted token totals, shipped as data.usage by
+// /api/settings/agent (core/usage_store.py). Aggregates the per-model
+// rows for one provider: a model contributes cost only when both its
+// prompt tokens and its rate are known, and the estimate prices input
+// tokens only — cost_per_1k is an input rate, so the figure is an
+// estimate of input cost, never a bill. Unknown stays '—', not 0.
+function usageTokenAgg(entry){
+  var a={calls:0,measured:0,prompt:0,completion:0,hasPrompt:false,
+         hasCompletion:false,cost:0,hasCost:false};
+  var models=(entry&&entry.models)||{};
+  for(var m in models){
+    var r=models[m]||{};
+    a.calls+=Number(r.calls)||0;
+    a.measured+=Number(r.measured_calls)||0;
+    if(r.prompt_tokens!=null){a.prompt+=Number(r.prompt_tokens)||0;a.hasPrompt=true;}
+    if(r.completion_tokens!=null){a.completion+=Number(r.completion_tokens)||0;a.hasCompletion=true;}
+    if(r.prompt_tokens!=null&&r.cost_per_1k!=null){
+      a.cost+=(Number(r.prompt_tokens)/1000)*Number(r.cost_per_1k);a.hasCost=true;
+    }
+  }
+  return a;
+}
+
+function fmtUsageNum(n){return String(Math.round(n)).replace(/\B(?=(\d{3})+(?!\d))/g,',');}
+function fmtUsageCost(x){return '$'+x.toFixed(4);}
+
+function usageTokenLine(a){
+  var s='Calls '+a.calls;
+  if(a.measured>0){
+    s+=' · tokens '+(a.hasPrompt?fmtUsageNum(a.prompt):'—')+' in · '
+      +(a.hasCompletion?fmtUsageNum(a.completion):'—')+' out';
+    if(a.measured<a.calls)s+=' (partial)';
+    s+=' · est. cost '+(a.hasCost?fmtUsageCost(a.cost):'—');
+  }else{
+    s+=' · tokens — · est. cost —';
+  }
+  return s;
+}
+
 function renderUsage(){
   var j=settingsState.data; if(!j)return;
   var box=setq('set-usage-list'); if(!box)return;
   box.innerHTML='';
   var labels=j.provider_labels||((j.config||{}).provider_labels)||{};
   var allKeys=((j.config||{}).keys)||{};
+  var usage=j.usage||{};
   var provs=provs_(j);
   var totKeys=0,totUsed=0;
+  var totCalls=0,totPrompt=0,totCompletion=0,totMeasured=0,totCost=0,totHasCost=false;
+  function addTotals(a){
+    totCalls+=a.calls; totMeasured+=a.measured;
+    totPrompt+=a.prompt; totCompletion+=a.completion;
+    if(a.hasCost){totCost+=a.cost; totHasCost=true;}
+  }
   for(var i=0;i<provs.length;i++){
     var pid=provs[i];
     var ks=allKeys[pid]||[];
@@ -2695,10 +2741,41 @@ function renderUsage(){
         row.appendChild(er);
       }
     }
+    if(usage[pid]){
+      var a=usageTokenAgg(usage[pid]);
+      addTotals(a);
+      var tl=document.createElement('div'); tl.className='set-hint';
+      tl.textContent=usageTokenLine(a);
+      row.appendChild(tl);
+    }
     box.appendChild(row);
   }
+  // Local turns have no keys to hang a row on — the ledger is the only
+  // place they show up, and only once one has actually run.
+  if(usage.local){
+    var la=usageTokenAgg(usage.local);
+    if(la.calls>0){
+      addTotals(la);
+      var lrow=document.createElement('div'); lrow.className='usage-row';
+      var lhead=document.createElement('div'); lhead.className='usage-head';
+      lhead.textContent='Local (on-device)';
+      lrow.appendChild(lhead);
+      var ldet=document.createElement('div'); ldet.className='set-hint';
+      ldet.textContent=usageTokenLine(la);
+      lrow.appendChild(ldet);
+      box.appendChild(lrow);
+    }
+  }
   var tot=setq('set-usage-total');
-  if(tot)tot.textContent='Total: '+totKeys+' keys · used '+totUsed;
+  if(tot){
+    var t='Total: '+totKeys+' keys · used '+totUsed;
+    if(totCalls>0){
+      t+=' · calls '+totCalls;
+      if(totMeasured>0)t+=' · tokens '+fmtUsageNum(totPrompt+totCompletion);
+      if(totHasCost)t+=' · est. '+fmtUsageCost(totCost);
+    }
+    tot.textContent=t;
+  }
 }
 
 function renderKeys(){

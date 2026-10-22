@@ -58,8 +58,8 @@ class SettingsApiCase(unittest.TestCase):
 class GetSettingsTests(SettingsApiCase):
     def test_get_returns_json_with_every_section(self):
         _, j = call("get", "/api/settings/agent", expect=200)
-        for key in ("ok", "config", "backend", "costs", "providers", "modes",
-                    "models", "fallback_order", "local_fallback",
+        for key in ("ok", "config", "backend", "costs", "usage", "providers",
+                    "modes", "models", "fallback_order", "local_fallback",
                     "provider_labels"):
             self.assertIn(key, j, msg=key)
         self.assertTrue(j["ok"])
@@ -96,6 +96,26 @@ class GetSettingsTests(SettingsApiCase):
         self.assertEqual(j["costs"]["deepseek"], AB.cost_per_1k(
             "deepseek", j["config"]["providers"]["deepseek"]["model"]))
         self.assertIsNotNone(j["costs"]["openai"])
+
+    def test_usage_totals_are_reported_per_model(self):
+        """Release 17: the persisted ledger rides along, with a rate
+        resolved per model actually seen (not just the configured one)."""
+        from core import usage_store
+        before = usage_store.totals().get("openai", {}).get("models", {}) \
+            .get("gpt-4o-mini", {})
+        usage_store.record_call("cloud", "gpt-4o-mini", "openai",
+                                {"prompt_tokens": 2000,
+                                 "completion_tokens": 500})
+        _, j = call("get", "/api/settings/agent", expect=200)
+        agg = j["usage"]["openai"]["models"]["gpt-4o-mini"]
+        self.assertEqual(agg["calls"], (before.get("calls") or 0) + 1)
+        self.assertEqual(agg["prompt_tokens"],
+                         (before.get("prompt_tokens") or 0) + 2000)
+        self.assertEqual(agg["completion_tokens"],
+                         (before.get("completion_tokens") or 0) + 500)
+        self.assertEqual(agg["cost_per_1k"],
+                         AB.cost_per_1k("openai", "gpt-4o-mini"))
+        self.assertIsNotNone(agg["cost_per_1k"])
 
     def test_no_raw_key_is_ever_returned(self):
         self.km.add_key("openai", RAW_OPENAI, "main")

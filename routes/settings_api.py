@@ -88,6 +88,31 @@ def _prompt_tier_view(be) -> dict:
     return view
 
 
+def _usage_payload() -> dict:
+    """Persisted token totals per provider/model (Release 17).
+
+    Rates are resolved here, per model actually seen, because the
+    top-level ``costs`` map only prices each provider's *configured*
+    model. A broken or absent ledger yields {} — Settings must never
+    fail over a statistics file.
+    """
+    try:
+        from core import usage_store
+        raw = usage_store.totals()
+    except Exception as e:
+        log.warning("usage totals failed: %s: %s", type(e).__name__, e)
+        return {}
+    out = {}
+    for provider, entry in (raw or {}).items():
+        models = {}
+        for model, agg in ((entry or {}).get("models") or {}).items():
+            row = dict(agg or {})
+            row["cost_per_1k"] = cost_per_1k(provider, model)
+            models[model] = row
+        out[provider] = {"models": models}
+    return out
+
+
 @bp.route("/api/settings/agent", methods=["GET"])
 def api_settings_get():
     km = _keys()
@@ -111,6 +136,7 @@ def api_settings_get():
             "config_exists": km.path.exists(),
             "backend": status,
             "costs": costs,
+            "usage": _usage_payload(),
             "providers": list(PROVIDERS),
             "provider_labels": _labels(),
             "modes": list(MODES),
