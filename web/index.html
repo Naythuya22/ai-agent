@@ -778,13 +778,36 @@ function setStatus(t){statusTextEl.textContent=t||''}
   var mpListEl=document.getElementById('mp-list');
   var mpNoteEl=document.getElementById('mp-note');
   function mpClose(){ if(mpEl)mpEl.hidden=true; }
+  // One key-health rule, shared with the backend (KeyManager.healthy):
+  // a key is usable unless it is dead or still inside its 429 cooldown.
+  // The stored status alone is NOT the rule — a rate_limited key whose
+  // cooldown has expired is usable again, even though its status only
+  // flips back to 'ok' after its next successful call. (Release 8.1: the
+  // picker and the fallback list used to demand status==='ok', which
+  // greyed out providers the backend would happily have used, and left
+  // their keys looking parked until a turn happened to reach them.)
+  // Defined here, inside the indicator block, because Settings' fallback
+  // list and key rows use the same rule (keyUsable, in the Settings
+  // section) — the two copies must stay in step, and the picker and
+  // settings UI suites each pin the same cases against their copy.
+  function mpKeyUsable(k){
+    if(!k)return false;
+    if((k.status||'ok')==='dead')return false;
+    return (Number(k.cooldown_until)||0) <= Date.now()/1000;
+  }
+  // Why a provider that has keys still cannot be used, in its own words:
+  // every key dead reads differently from every key merely cooling down.
+  function mpKeyBlockReason(ks){
+    for(var i=0;i<ks.length;i++){ if((ks[i].status||'ok')!=='dead')return '⏳ cooling'; }
+    return 'key invalid';
+  }
   function mpUsable(cfg,p){
     var pc=(cfg.providers||{})[p]||{};
     if(pc.enabled===false)return 'off';
     var ks=(cfg.keys||{})[p]||[];
     if(!ks.length)return 'no keys';
-    for(var i=0;i<ks.length;i++){ if(ks[i].status==='ok')return ''; }
-    return 'no healthy key';
+    for(var i=0;i<ks.length;i++){ if(mpKeyUsable(ks[i]))return ''; }
+    return mpKeyBlockReason(ks);
   }
   async function openModelPicker(){
     if(!mpEl||!mpListEl)return;
@@ -2382,8 +2405,8 @@ function renderFallback(){
       var tag='';
       if(pcfg.enabled===false){ tag='off'; row.className+=' off'; }
       else if(!pkeys.length){ tag='no keys'; }
-      else if(!pkeys.some(function(k){return (k.status||'ok')==='ok';})){
-        tag='no healthy key';
+      else if(!pkeys.some(function(k){return keyUsable(k);})){
+        tag=keyBlockReason(pkeys);
       }
       if(tag){
         var tg=document.createElement('span'); tg.className='fb-tag';
@@ -2465,6 +2488,24 @@ function renderProvider(){
   renderKeys();
 }
 
+// The Settings copy of the one key-health rule (see mpKeyUsable in the
+// model-indicator block for the picker's copy — the two must stay in
+// step, and both UI suites pin the same cases): a key is usable unless
+// it is dead or still inside its 429 cooldown. A rate_limited key whose
+// cooldown has expired is usable again, even though its stored status
+// only flips back to 'ok' after its next successful call.
+function keyUsable(k){
+  if(!k)return false;
+  if((k.status||'ok')==='dead')return false;
+  return (Number(k.cooldown_until)||0) <= Date.now()/1000;
+}
+// Why a provider that has keys still cannot be used, in its own words:
+// every key dead reads differently from every key merely cooling down.
+function keyBlockReason(ks){
+  for(var i=0;i<ks.length;i++){ if((ks[i].status||'ok')!=='dead')return '⏳ cooling'; }
+  return 'key invalid';
+}
+
 function keyStatusText(s){
   if(s==='dead')return 'invalid';
   if(s==='rate_limited')return '429 cooldown';
@@ -2512,8 +2553,13 @@ function renderKeys(){
       lab.textContent=(k.label?('· '+k.label):'')+
         (k.used?(' · used '+k.used):'');
       var sx=document.createElement('span');
-      sx.className='key-status '+String(k.status||'ok');
-      sx.textContent=keyStatusText(k.status);
+      // A rate_limited key whose cooldown has already expired is usable
+      // again (see keyUsable) — badge it ready, not "429 cooldown", or the
+      // row keeps calling a healthy key parked. Still cooling keeps the
+      // rate_limited styling and gains the countdown below.
+      var expiredLimited=(k.status==='rate_limited'&&keyUsable(k));
+      sx.className='key-status '+String(expiredLimited?'ok':(k.status||'ok'));
+      sx.textContent=expiredLimited?'ready':keyStatusText(k.status);
       // A parked key that only says "429 cooldown" leaves the one question
       // that matters unanswered: until when? The API has carried
       // cooldown_until (and last_error) all along — render them.
@@ -2523,7 +2569,7 @@ function renderKeys(){
           sx.textContent+=' ⏳ '+(secs>=60?Math.ceil(secs/60)+'m':secs+'s');
         }
       }
-      if(k.last_error&&k.status!=='ok')sx.title=String(k.last_error);
+      if(k.last_error&&k.status!=='ok'&&!expiredLimited)sx.title=String(k.last_error);
       left.appendChild(m); left.appendChild(lab); left.appendChild(sx);
       var right=document.createElement('span'); right.className='key-acts';
       var tb=document.createElement('button'); tb.type='button';

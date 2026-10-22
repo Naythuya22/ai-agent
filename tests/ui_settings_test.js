@@ -699,6 +699,34 @@ function click(id, ev) { const e = registry[id]; if (e) e.fire(ev || 'click'); }
   k2.status = 'ok'; k2.cooldown_until = 0; k2.last_error = null; k2.used = 0;
   sandbox.renderSettings();
 
+  // ── Release 8.1: an expired cooldown reads as ready everywhere ──
+  // The backend would use this key on the next turn (status flips to 'ok'
+  // only after that call), so neither the badge nor the fallback row may
+  // keep calling it parked.
+  k2.status = 'rate_limited';
+  k2.cooldown_until = Date.now() / 1000 - 60;
+  k2.last_error = '429 too many requests';
+  sandbox.renderSettings();
+  const keyRows81 = registry['set-key-list'].children;
+  ok(texts(keyRows81[1]).includes('ready'),
+     'expired-cooldown key badges ready');
+  ok(!texts(keyRows81[1]).includes('429 cooldown'),
+     'expired-cooldown key drops the parked label');
+  const oaiRow81 = registry['set-fallback'].children.find(r => texts(r).includes('openai'));
+  eq(texts(oaiRow81).trim(), '1. openai ↑ ↓',
+     'fallback row treats an expired cooldown as healthy');
+  // while every key is still cooling, the row says so plainly
+  const k1 = sandbox.settingsState.data.config.keys.openai[0];
+  k1.status = 'rate_limited'; k1.cooldown_until = Date.now() / 1000 + 600;
+  k2.cooldown_until = Date.now() / 1000 + 600;
+  sandbox.renderSettings();
+  const oaiRow81b = registry['set-fallback'].children.find(r => texts(r).includes('openai'));
+  ok(texts(oaiRow81b).includes('⏳ cooling'),
+     'fallback row says cooling while all keys cool down');
+  k1.status = 'ok'; k1.cooldown_until = 0;
+  k2.status = 'ok'; k2.cooldown_until = 0; k2.last_error = null;
+  sandbox.renderSettings();
+
   // doctor — one tap, plain-language lines
   registry['set-doctor'].fire('click');
   await new Promise(r => setImmediate(r));

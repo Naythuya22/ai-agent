@@ -235,6 +235,38 @@ vm.runInContext(block, sandbox, { filename: 'indicator-block.js' });
   eq(postLog[0].fallback, ['gemini', 'openai', 'deepseek'],
      'pick moves the provider to the front, order otherwise kept');
   eq(picker.hidden, true, 'picker closes after a pick');
+
+  // ── Release 8.1: the picker health rule matches the backend ──
+  // KeyManager.healthy(): usable = not dead AND cooldown expired. A
+  // rate_limited key whose cooldown is over is usable again — its stored
+  // status only flips back to 'ok' after a successful call, which may
+  // never come if an earlier provider keeps answering first. (The first
+  // picker demanded status==='ok' and greyed such providers out.)
+  settingsReply.config.keys.openai = [{ id: 'k1', status: 'rate_limited', cooldown_until: Date.now() / 1000 - 60 }];
+  settingsReply.config.keys.gemini = [{ id: 'k2', status: 'rate_limited', cooldown_until: Date.now() / 1000 + 600 }];
+  settingsReply.config.keys.deepseek = [{ id: 'k3', status: 'dead' }];
+  await sandbox.openModelPicker();
+  eq(mpList.children.length, 3, 'picker reopens for the 8.1 health cases');
+  eq(mpList.children[0].children[2].textContent, '✓ next',
+     'expired-cooldown provider is usable again and marked next');
+  eq(mpList.children[1].children[2].textContent, '⏳ cooling',
+     'still-cooling provider says cooling, not no healthy key');
+  ok(!(mpList.children[1].listeners.click || []).length, 'cooling provider cannot be picked');
+  eq(mpList.children[2].children[2].textContent, 'key invalid',
+     'all-dead provider says key invalid');
+  ok(!(mpList.children[2].listeners.click || []).length, 'dead-key provider cannot be picked');
+  // a usable provider that is not next stays pickable
+  settingsReply.config.keys.openai = [{ id: 'k1', status: 'ok' }];
+  settingsReply.config.keys.gemini = [{ id: 'k2', status: 'rate_limited', cooldown_until: Date.now() / 1000 - 60 }];
+  await sandbox.openModelPicker();
+  eq(mpList.children[1].children.length, 2, 'usable non-next row carries no block tag');
+  mpList.children[1].fire('click');
+  await new Promise(r => setImmediate(r));
+  await new Promise(r => setImmediate(r));
+  eq(postLog.length, 2, 'picking the expired-cooldown provider posts once more');
+  eq(postLog[1].fallback, ['gemini', 'openai', 'deepseek'],
+     'expired-cooldown pick moves it to the front');
+  eq(picker.hidden, true, 'picker closes after the 8.1 pick');
   sandbox.state.mode = 'chat';
   const callsBefore = calls.length;
   await sandbox.openModelPicker();
