@@ -145,6 +145,22 @@ def main() -> None:
     print("  POST /v1/chat/completions", flush=True)
     print("\nPress Ctrl+C to stop.\n", flush=True)
 
+    # Data outlives code: when the newest backup in ~ is over a week
+    # old, take a fresh one before serving. A failed backup must never
+    # stop the server — warn and continue. Opt out with
+    # AI_AGENT_NO_AUTO_BACKUP=1.
+    if not os.environ.get("AI_AGENT_NO_AUTO_BACKUP"):
+        try:
+            import backup as _backup
+            _made = _backup.maybe_auto_backup()
+            if _made:
+                print(f"  Auto-backup: {_made.name} written",
+                      flush=True)
+        except Exception as exc:  # startup must survive a bad backup
+            log.warning("auto-backup failed: %s", exc)
+            print(f"  ⚠ Auto-backup failed ({exc}) — server continues",
+                  flush=True)
+
     start_idle_watchdog()
     app.run(host=args.host, port=args.port, threaded=True, debug=False)
 

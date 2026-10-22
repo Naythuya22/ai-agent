@@ -9,10 +9,12 @@ Run:  sh tests/run.sh -p "test_backup.py"
 from __future__ import annotations
 
 import json
+import os
 import stat
 import tempfile
 import unittest
 import zipfile
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from _harness import bootstrap
@@ -138,6 +140,74 @@ class TestImport(BackupCase):
         junk.write_bytes(b"not a zip at all")
         with self.assertRaises(BK.BackupError):
             BK.read_manifest(junk)
+
+
+class TestAutoBackup(BackupCase):
+    """maybe_auto_backup: freshness gate, creation, retention pruning."""
+
+    NOW = datetime(2026, 10, 22, 12, 0, 0)
+
+    def setUp(self):
+        super().setUp()
+        self.home_dir = self.tmp / "fakehome"
+        self.home_dir.mkdir()
+
+    def _fake_backup(self, name: str, age_days: float) -> Path:
+        p = self.home_dir / name
+        p.write_bytes(b"old backup bytes")
+        ts = (self.NOW - timedelta(days=age_days)).timestamp()
+        os.utime(p, (ts, ts))
+        return p
+
+    def _auto(self, **kw):
+        return BK.maybe_auto_backup(self.NOW, home_dir=self.home_dir,
+                                    roots=self.roots, **kw)
+
+    def _names(self) -> list[str]:
+        return sorted(p.name for p in
+                      self.home_dir.glob("ai-agent-backup-*.zip"))
+
+    def test_no_existing_backup_creates_one(self):
+        made = self._auto()
+        self.assertIsNotNone(made)
+        self.assertTrue(made.exists())
+        self.assertEqual(made.parent, self.home_dir)
+        manifest = BK.read_manifest(made)
+        entries = {f["entry"] for f in manifest["files"]}
+        self.assertIn("home/memory.json", entries)
+        self.assertIn("project-data/agent_config.json", entries)
+
+    def test_fresh_backup_is_left_alone(self):
+        self._fake_backup("ai-agent-backup-20261021-120000.zip", 1)
+        self.assertIsNone(self._auto())
+        self.assertEqual(self._names(),
+                         ["ai-agent-backup-20261021-120000.zip"])
+
+    def test_stale_backup_triggers_a_new_one(self):
+        self._fake_backup("ai-agent-backup-20261014-120000.zip", 8)
+        made = self._auto()
+        self.assertIsNotNone(made)
+        self.assertEqual(len(self._names()), 2)
+
+    def test_just_under_a_week_is_still_fresh(self):
+        self._fake_backup("ai-agent-backup-20261015-130000.zip",
+                          7 - 1 / 24)
+        self.assertIsNone(self._auto())
+
+    def test_prunes_to_newest_four_and_spares_snapshots(self):
+        seeded = [self._fake_backup(
+            f"ai-agent-backup-202610{10 + i:02d}-120000.zip", 12 - i)
+            for i in range(5)]
+        snap = self.home_dir / "ai-agent-pre-restore-20261001-000000.zip"
+        snap.write_bytes(b"safety snapshot")
+        made = self._auto()
+        self.assertIsNotNone(made)
+        names = self._names()
+        self.assertEqual(len(names), 4)
+        self.assertIn(made.name, names)
+        self.assertNotIn(seeded[0].name, names)  # oldest pruned
+        self.assertNotIn(seeded[1].name, names)  # second-oldest pruned
+        self.assertTrue(snap.exists())           # snapshot untouched
 
 
 if __name__ == "__main__":

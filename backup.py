@@ -25,7 +25,7 @@ import hashlib
 import json
 import sys
 import zipfile
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 _root = Path(__file__).resolve().parent
@@ -119,6 +119,56 @@ def do_export(out_path: Path | None = None, *, include_secrets: bool = True,
     if manifest["includes_secrets"]:
         out_path.chmod(0o600)
     return out_path
+
+
+# ── automatic backup ─────────────────────────────────────────────
+
+AUTO_BACKUP_PREFIX = "ai-agent-backup-"
+AUTO_BACKUP_MAX_AGE_DAYS = 7
+AUTO_BACKUP_KEEP = 4
+
+
+def _auto_backup_files(home_dir: Path) -> list[Path]:
+    """Backup zips in *home_dir*, newest first.
+
+    Only the ``ai-agent-backup-*.zip`` names :func:`do_export` writes by
+    default are managed here — pre-restore snapshots
+    (``ai-agent-pre-restore-*.zip``) are safety copies, never pruned.
+    """
+    if not home_dir.is_dir():
+        return []
+    files = [p for p in home_dir.glob(AUTO_BACKUP_PREFIX + "*.zip")
+             if p.is_file()]
+    files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+    return files
+
+
+def maybe_auto_backup(now: datetime | None = None, *,
+                      home_dir: Path | None = None,
+                      roots: dict[str, Path] | None = None,
+                      max_age_days: int = AUTO_BACKUP_MAX_AGE_DAYS,
+                      keep: int = AUTO_BACKUP_KEEP) -> Path | None:
+    """Write a fresh backup when the newest one is *max_age_days* old.
+
+    Returns the new backup's path, or ``None`` when the newest existing
+    backup is still fresh. After writing, backups beyond the newest
+    *keep* are deleted. Raises on failure — the caller (server startup)
+    treats a failed backup as a warning, never a reason not to start.
+    """
+    now = now or datetime.now()
+    home_dir = Path(home_dir) if home_dir else Path.home()
+    existing = _auto_backup_files(home_dir)
+    if existing:
+        newest_age = now - datetime.fromtimestamp(
+            existing[0].stat().st_mtime)
+        if newest_age < timedelta(days=max_age_days):
+            return None
+    stamp = now.strftime("%Y%m%d-%H%M%S")
+    out = do_export(home_dir / f"{AUTO_BACKUP_PREFIX}{stamp}.zip",
+                    include_secrets=True, roots=roots)
+    for stale in _auto_backup_files(home_dir)[keep:]:
+        stale.unlink()
+    return out
 
 
 # ── list / import ────────────────────────────────────────────────────
