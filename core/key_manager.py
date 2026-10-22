@@ -32,12 +32,18 @@ import time
 from pathlib import Path
 
 import config
+from core.data_version import warn_if_newer
 from core.log import get_logger
 
 log = get_logger("key_manager")
 
 CONFIG_PATH = Path(config.AGENT_CONFIG_FILE)
 FILE_MODE = 0o600
+
+# On-disk schema version of agent_config.json, stamped on every save
+# and checked on every load (see core/data_version.py). The version
+# lives only in the file — the in-memory config never carries it.
+DATA_VERSION = 1
 
 # Set once a filesystem has refused a chmod (FUSE/sdcardfs on /storage does),
 # so every later load does not log the same failure again.
@@ -225,6 +231,7 @@ class KeyManager:
         # Default is config.keys_file() — the private location once the
         # keys have moved there, the project file while they have not.
         self.path = Path(path) if path else config.keys_file()
+        self.data_version = DATA_VERSION
         self._cfg: dict | None = None
         self._cursor: dict = {}      # provider -> next index (round-robin)
         self.migrated_from: Path | None = None
@@ -264,6 +271,14 @@ class KeyManager:
         if self.path.exists():
             try:
                 raw = json.loads(self.path.read_text(encoding="utf-8"))
+                if isinstance(raw, dict):
+                    # The version belongs to the file, not the config:
+                    # note it, warn when it is newer than this build,
+                    # and keep it out of the merged config (and so out
+                    # of every API response built from it).
+                    self.data_version = warn_if_newer(
+                        "agent_config.json", raw, DATA_VERSION, log)
+                    raw = {k: v for k, v in raw.items() if k != "version"}
             except (OSError, json.JSONDecodeError) as e:
                 # Never silently hand out defaults while a user's keys sit in
                 # a broken file — keep the bytes for them and start fresh.
@@ -315,7 +330,9 @@ class KeyManager:
     def save(self) -> None:
         cfg = self.load()
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        data = json.dumps(cfg, ensure_ascii=False, indent=2)
+        payload = dict(cfg)
+        payload["version"] = DATA_VERSION
+        data = json.dumps(payload, ensure_ascii=False, indent=2)
         # Unique temp name: Settings writes this file from several
         # request threads at once, and a shared `.tmp` made one
         # thread's os.replace() consume the file out from under

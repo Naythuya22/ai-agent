@@ -8,6 +8,7 @@ from dataclasses import dataclass, asdict
 from datetime import datetime
 from pathlib import Path
 
+from core.data_version import warn_if_newer
 from core.log import get_logger
 
 # Paths
@@ -545,6 +546,11 @@ def model_missing_message(path: str = "") -> str:
 
 @dataclass
 class Config:
+    # On-disk schema version, stamped into config.json on every save
+    # (see core/data_version.py). A plain class attribute, not a
+    # dataclass field, so asdict()/load() filtering are unaffected.
+    DATA_VERSION = 1
+
     model_path: str = DEFAULT_MODEL
     backend: str = "GPU"
     context_size: int = 8192
@@ -556,7 +562,9 @@ class Config:
         try:
             CONFIG_DIR.mkdir(parents=True, exist_ok=True)
             tmp = CONFIG_FILE.with_suffix(".tmp")
-            tmp.write_text(json.dumps(asdict(self), indent=2, ensure_ascii=False))
+            payload = asdict(self)
+            payload["version"] = self.DATA_VERSION
+            tmp.write_text(json.dumps(payload, indent=2, ensure_ascii=False))
             tmp.replace(CONFIG_FILE)
         except OSError as e:
             log.error("config save failed for %s: %s: %s",
@@ -578,6 +586,9 @@ class Config:
                 log.warning("config unreadable (%s: %s) — using defaults",
                             type(e).__name__, e)
                 data = None
+
+        if data is not None:
+            warn_if_newer("config.json", data, cls.DATA_VERSION, log)
 
         if data is None:
             cfg = cls()

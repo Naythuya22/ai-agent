@@ -154,6 +154,23 @@ class TestConfigRepair(unittest.TestCase):
         cfg = Config.load()
         self.assertIsInstance(cfg.model_path, str)
 
+    def test_saved_config_carries_a_version(self):
+        bootstrap()
+        cfg = Config.load()
+        cfg.save()
+        data = json.loads(
+            (current_home() / ".ai-agent" / "config.json").read_text())
+        self.assertEqual(data["version"], Config.DATA_VERSION)
+
+    def test_newer_version_config_still_loads(self):
+        bootstrap()
+        home = current_home()
+        (home / ".ai-agent" / "config.json").write_text(
+            json.dumps({"version": 99,
+                        "model_path": str(home / "fake-models" / "stub-model.litertlm")})
+        )
+        self.assertEqual(Config.load().validate(), [])
+
     def test_unknown_keys_dropped(self):
         bootstrap()
         home = current_home()
