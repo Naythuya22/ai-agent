@@ -218,35 +218,60 @@ class KeyManagerTest(unittest.TestCase):
 
 
 class FixedPathTest(unittest.TestCase):
-    """The key file must not move with $HOME — the phone has two of them.
+    """Where the key file lives: private storage, found under both HOMEs.
 
-    The server runs with HOME=/data/data/com.termux/files/home and the shell
-    with HOME=/root, so a HOME-derived path splits into two files and the keys
-    vanish on restart.
+    The phone runs the server with HOME=/data/data/com.termux/files/home
+    and the shell with HOME=/root, so a plain $HOME-derived path splits
+    into two files and the keys vanish on restart. The private location
+    is therefore canonicalised on the Termux files dir itself — a device
+    fact, identical under both HOMEs (config.private_keys_file). Until
+    v1.9.0 the file sat in <project>/data, on shared storage where any
+    app with the storage permission could read it; load() moves it.
     """
 
     def setUp(self):
         import config as cfg_mod
         self.cfg = cfg_mod
         self._saved = (cfg_mod.DATA_DIR, cfg_mod.AGENT_CONFIG_FILE,
-                       cfg_mod.DEFAULT_DATA_DIR, cfg_mod.LEGACY_HOMES)
+                       cfg_mod.DEFAULT_DATA_DIR, cfg_mod.LEGACY_HOMES,
+                       cfg_mod.CONFIG_DIR, cfg_mod.TERMUX_HOME)
 
     def tearDown(self):
         (self.cfg.DATA_DIR, self.cfg.AGENT_CONFIG_FILE,
-         self.cfg.DEFAULT_DATA_DIR, self.cfg.LEGACY_HOMES) = self._saved
+         self.cfg.DEFAULT_DATA_DIR, self.cfg.LEGACY_HOMES,
+         self.cfg.CONFIG_DIR, self.cfg.TERMUX_HOME) = self._saved
 
     def _point_at(self, data: Path):
         self.cfg.DATA_DIR = data
         self.cfg.DEFAULT_DATA_DIR = data
         self.cfg.AGENT_CONFIG_FILE = data / "agent_config.json"
 
-    def test_default_path_is_the_project_data_dir(self):
-        """Out of the box the file is <project>/data/agent_config.json."""
-        self._point_at(self.cfg.PROJECT_ROOT / "data")
+    def _point_private(self, root: Path):
+        """Private location = <root>/home/.ai-agent (no Termux dir)."""
+        self.cfg.CONFIG_DIR = root / "home" / ".ai-agent"
+        self.cfg.TERMUX_HOME = root / "no-termux-here"
+
+    def test_default_path_is_private_for_a_fresh_install(self):
+        """Nothing anywhere yet: the file is born in private storage."""
+        root = Path(tempfile.mkdtemp())
+        self._point_at(root / "data")
+        self._point_private(root)
+        self.cfg.LEGACY_HOMES = ()
         km = KeyManager()
         self.assertEqual(km.path,
-                         self.cfg.PROJECT_ROOT / "data" / "agent_config.json")
+                         root / "home" / ".ai-agent" / "agent_config.json")
         self.assertTrue(km.path.is_absolute())
+
+    def test_default_path_is_project_while_migration_is_pending(self):
+        """Keys still on shared storage: read there until load() moves."""
+        root = Path(tempfile.mkdtemp())
+        self._point_at(root / "data")
+        self._point_private(root)
+        self.cfg.LEGACY_HOMES = ()
+        (root / "data").mkdir(parents=True)
+        (root / "data" / "agent_config.json").write_text("{}")
+        km = KeyManager()
+        self.assertEqual(km.path, root / "data" / "agent_config.json")
 
     def test_the_two_phone_homes_are_both_searched(self):
         dirs = [str(d) for d in self.cfg.legacy_config_dirs()]
@@ -266,12 +291,20 @@ class FixedPathTest(unittest.TestCase):
             }]}},
         ), encoding="utf-8")
         self._point_at(root / "data")
+        self._point_private(root)
         self.cfg.LEGACY_HOMES = (str(root / "old-home"),)
 
         km = KeyManager()
-        self.assertFalse(km.path.exists())
+        # Read precedence finds the legacy copy before anything moves.
+        self.assertEqual(km.path, legacy_dir / "agent_config.json")
         km.load()
-        self.assertEqual(km.migrated_from, legacy_dir / "agent_config.json")
+        # The move chains legacy HOME → project → private; the recorded
+        # source is the project file, and it is gone afterwards.
+        self.assertEqual(km.migrated_from,
+                         root / "data" / "agent_config.json")
+        self.assertFalse((root / "data" / "agent_config.json").exists())
+        self.assertEqual(km.path,
+                         root / "home" / ".ai-agent" / "agent_config.json")
         self.assertEqual(km.entries("openai")[0]["key"],
                          "sk-live-legacy-0000000000")
         self.assertEqual(km.path.stat().st_mode & 0o777, 0o600)
@@ -305,10 +338,111 @@ class FixedPathTest(unittest.TestCase):
         self.assertEqual(km.entries("openai"), [])
         self.assertFalse(km.path.exists())
 
+    def _write_keys(self, path: Path, key_id: str, raw: str):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"keys": {"openai": [{
+            "id": key_id, "key": raw, "label": "", "status": "ok",
+            "cooldown_until": 0.0, "used": 1}]}}), encoding="utf-8")
+
+    def test_keys_migrate_from_project_to_private_on_load(self):
+        root = Path(tempfile.mkdtemp())
+        data = root / "data"
+        self._write_keys(data / "agent_config.json", "k_p", "sk-proj-key")
+        self._point_at(data)
+        self._point_private(root)
+        self.cfg.LEGACY_HOMES = ()
+        km = KeyManager()
+        self.assertEqual(km.path, data / "agent_config.json")
+        km.load()
+        private = root / "home" / ".ai-agent" / "agent_config.json"
+        self.assertEqual(km.path, private)
+        self.assertEqual(km.migrated_from, data / "agent_config.json")
+        self.assertFalse((data / "agent_config.json").exists())
+        self.assertEqual(km.entries("openai")[0]["key"], "sk-proj-key")
+        self.assertEqual(private.stat().st_mode & 0o777, 0o600)
+
+    def test_project_copy_wins_over_a_stale_private_copy(self):
+        """Both files exist: the project copy is the live one — it is
+        the only one pre-v1.9.0 code ever wrote. load() moves FROM
+        it, and the displaced private copy is kept, not destroyed."""
+        root = Path(tempfile.mkdtemp())
+        data = root / "data"
+        self._write_keys(data / "agent_config.json", "k_a", "sk-live-key")
+        self._point_at(data)
+        self._point_private(root)
+        private = root / "home" / ".ai-agent" / "agent_config.json"
+        self._write_keys(private, "k_b", "sk-stale-key")
+        self.cfg.LEGACY_HOMES = ()
+        km = KeyManager()
+        self.assertEqual(km.path, data / "agent_config.json")
+        km.load()
+        self.assertEqual(km.path, private)
+        self.assertEqual(km.migrated_from, data / "agent_config.json")
+        self.assertEqual(km.entries("openai")[0]["key"], "sk-live-key")
+        self.assertFalse((data / "agent_config.json").exists())
+        superseded = list(private.parent.glob(
+            "agent_config.json.superseded-*"))
+        self.assertEqual(len(superseded), 1)
+        self.assertIn("sk-stale-key", superseded[0].read_text())
+
+    def test_identical_copies_just_retire_the_project_file(self):
+        root = Path(tempfile.mkdtemp())
+        data = root / "data"
+        self._write_keys(data / "agent_config.json", "k_a", "sk-same-key")
+        self._point_at(data)
+        self._point_private(root)
+        private = root / "home" / ".ai-agent" / "agent_config.json"
+        self._write_keys(private, "k_a", "sk-same-key")
+        self.cfg.LEGACY_HOMES = ()
+        km = KeyManager()
+        km.load()
+        self.assertEqual(km.path, private)
+        self.assertEqual(km.migrated_from, data / "agent_config.json")
+        self.assertFalse((data / "agent_config.json").exists())
+        self.assertEqual(list(private.parent.glob(
+            "agent_config.json.superseded-*")), [])
+        self.assertEqual(km.entries("openai")[0]["key"], "sk-same-key")
+
+    def test_failed_private_migration_falls_back_to_project(self):
+        root = Path(tempfile.mkdtemp())
+        data = root / "data"
+        self._write_keys(data / "agent_config.json", "k_p", "sk-proj-key")
+        self._point_at(data)
+        self.cfg.LEGACY_HOMES = ()
+        # Block the private location: TERMUX_HOME/.ai-agent is a file,
+        # so the private dir can never be created there.
+        phone = root / "phone"
+        phone.mkdir()
+        (phone / ".ai-agent").write_text("not a dir")
+        self.cfg.TERMUX_HOME = phone
+        km = KeyManager()
+        km.load()
+        self.assertEqual(km.path, data / "agent_config.json")
+        self.assertIsNone(km.migrated_from)
+        self.assertEqual(km.entries("openai")[0]["key"], "sk-proj-key")
+        self.assertTrue((data / "agent_config.json").exists())
+
+    def test_termux_home_is_the_canonical_private_location(self):
+        root = Path(tempfile.mkdtemp())
+        data = root / "data"
+        self._write_keys(data / "agent_config.json", "k_p", "sk-proj-key")
+        self._point_at(data)
+        self.cfg.LEGACY_HOMES = ()
+        phone = root / "phone"
+        phone.mkdir()
+        self.cfg.TERMUX_HOME = phone
+        self.cfg.CONFIG_DIR = root / "elsewhere" / ".ai-agent"
+        km = KeyManager()
+        km.load()
+        self.assertEqual(km.path,
+                         phone / ".ai-agent" / "agent_config.json")
+        self.assertEqual(km.entries("openai")[0]["key"], "sk-proj-key")
+
     def test_save_never_raises_when_chmod_is_refused(self):
         """/storage/emulated/0 has no mode bits — keys must still be written."""
         root = Path(tempfile.mkdtemp())
         self._point_at(root / "data")
+        self._point_private(root)
         self.cfg.LEGACY_HOMES = ()
         real_chmod = os.chmod
 

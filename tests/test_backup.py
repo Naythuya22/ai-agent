@@ -32,6 +32,7 @@ def stage(root: Path) -> dict[str, Path]:
     (home / "memory.json").write_text('{"facts": ["a"]}')
     (home / "sessions.json").write_text('{"sessions": []}')
     (home / "auth_token").write_text("tok123")
+    (home / "agent_config.json").write_text('{"keys": {}}')
     (home / "skills" / "demo.md").write_text("skill")
     (home / "logs" / "agent.log").write_text("noise")
     (home / "junk.pyc").write_bytes(b"\x00")
@@ -62,6 +63,7 @@ class TestExport(BackupCase):
         self.assertIn("home/memory.json", entries)
         self.assertIn("home/sessions.json", entries)
         self.assertIn("home/skills/demo.md", entries)
+        self.assertIn("home/agent_config.json", entries)
         self.assertIn("project-data/agent_config.json", entries)
         self.assertIn("sdcard/code_sessions.json", entries)
         self.assertFalse(any("logs/" in e for e in entries))
@@ -78,6 +80,7 @@ class TestExport(BackupCase):
         manifest = BK.read_manifest(path)
         entries = {f["entry"] for f in manifest["files"]}
         self.assertNotIn("project-data/agent_config.json", entries)
+        self.assertNotIn("home/agent_config.json", entries)
         self.assertNotIn("home/auth_token", entries)
         self.assertIn("home/memory.json", entries)
         self.assertFalse(manifest["includes_secrets"])

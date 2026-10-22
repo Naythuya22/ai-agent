@@ -5,6 +5,7 @@ import json
 import os
 import shutil
 from dataclasses import dataclass, asdict
+from datetime import datetime
 from pathlib import Path
 
 from core.log import get_logger
@@ -84,6 +85,101 @@ def migrate_legacy_file(name: str, dest: Path) -> Path | None:
         except OSError:
             continue
     return None
+
+
+# ── private keys location (v1.9.0) ─────────────────────────────────
+#
+# The keys used to live only in the project/data file above. On the
+# phone the project sits on shared storage, where any app holding the
+# storage permission can read them — mode bits do not apply there.
+# The canonical home is now the app-private .ai-agent dir. On the
+# phone that is the Termux files dir, named outright because it is a
+# device fact, identical under both of the phone's HOMEs; elsewhere
+# it is CONFIG_DIR, beside config.json / memory / sessions.
+TERMUX_HOME = Path("/data/data/com.termux/files/home")
+
+
+def private_keys_file() -> Path:
+    """Canonical private location of agent_config.json."""
+    if TERMUX_HOME.is_dir():
+        return TERMUX_HOME / ".ai-agent" / "agent_config.json"
+    return Path(CONFIG_DIR) / "agent_config.json"
+
+
+def keys_file() -> Path:
+    """The agent_config.json to read and write right now.
+
+    Only the real fixed install resolves privately; a retargeted
+    AGENT_CONFIG_FILE (test harness, tools) is returned untouched.
+    Read precedence: the project file while it exists — it is the
+    only copy pre-v1.9.0 code ever wrote, so it is the live one
+    until the move completes — then the private file, then a copy
+    in any known legacy HOME. A fresh install is born private.
+    """
+    project = Path(AGENT_CONFIG_FILE)
+    if project.parent != DEFAULT_DATA_DIR:
+        return project
+    if project.exists():
+        return project
+    private = private_keys_file()
+    if private.exists():
+        return private
+    for d in legacy_config_dirs():
+        cand = d / "agent_config.json"
+        if cand.is_file():
+            return cand
+    return private
+
+
+def migrate_keys_to_private() -> Path | None:
+    """Move the keys from shared storage into private_keys_file().
+
+    Copy → byte-verify → delete the shared original; any failure
+    leaves the original in place and returns None, so the caller
+    keeps reading it where it was. Returns the path moved FROM.
+    Only runs for the real fixed data dir, like migrate_legacy_file.
+
+    A file already sitting at the private path is a leftover from
+    the legacy-HOME era, never the live copy (nothing wrote there
+    while the project file existed). It is never destroyed: an
+    identical one is simply retired with the project file, a
+    differing one is renamed to ``agent_config.json.superseded-*``
+    before the live copy takes its place.
+    """
+    project = Path(AGENT_CONFIG_FILE)
+    private = private_keys_file()
+    try:
+        if project.parent != DEFAULT_DATA_DIR:
+            return None
+        if not project.is_file():
+            # Keys may still sit in a pre-absolute-path HOME dir:
+            # pull them into the project file first, then move on.
+            migrate_legacy_file(project.name, project)
+            if not project.is_file():
+                return None
+        src = project.read_bytes()
+        if private.is_file() and private.read_bytes() == src:
+            project.unlink()
+            return project
+        private.parent.mkdir(parents=True, exist_ok=True)
+        if private.is_file():
+            stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+            private.replace(private.with_name(
+                "agent_config.json.superseded-" + stamp))
+        tmp = private.with_name(private.name + ".tmp")
+        shutil.copyfile(str(project), str(tmp))
+        if tmp.read_bytes() != src:
+            tmp.unlink(missing_ok=True)
+            return None
+        os.replace(str(tmp), str(private))
+        try:
+            os.chmod(str(private), 0o600)
+        except OSError:
+            pass        # the data matters more than the mode bit
+        project.unlink()
+        return project
+    except OSError:
+        return None
 
 
 # Assigned after CONFIG_DIR exists: core.log resolves the log directory from

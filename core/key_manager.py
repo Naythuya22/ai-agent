@@ -1,11 +1,18 @@
 """API key storage and rotation for Agent Mode's cloud backends.
 
-Keys live in ``<project>/data/agent_config.json`` with mode 0600 — a fixed
-absolute path taken from ``config.AGENT_CONFIG_FILE``, never from $HOME. The
-server runs with HOME=/data/data/com.termux/files/home while the shell has
-HOME=/root, so any HOME-derived location splits into two files and the keys
-vanish on restart. On first run an existing file is migrated in from those
-legacy locations (see :func:`config.migrate_legacy_file`).
+Keys live in ``~/.ai-agent/agent_config.json`` (``config.private_keys_file()``)
+with mode 0600 — app-private storage, beside config/memory/sessions. They
+used to sit in ``<project>/data/agent_config.json``; on the phone the project
+is on shared storage, where any app with the storage permission could read
+them, so on first load the file is copied to the private location, verified
+byte for byte, and the shared original deleted (see
+:func:`config.migrate_keys_to_private`). The private location is canonical
+under both of the phone's HOMEs (the server runs with
+HOME=/data/data/com.termux/files/home, the shell with HOME=/root), and the
+older legacy-HOME migration (``config.migrate_legacy_file``) still feeds into
+the move. The path is resolved per instance via ``config.keys_file()`` — a
+retargeted ``AGENT_CONFIG_FILE`` (tests, tools) keeps the old behaviour
+exactly.
 
 Two rules that nothing here may break:
 
@@ -213,10 +220,11 @@ class KeyManager:
     """Reads/writes agent_config.json and decides which key is next."""
 
     def __init__(self, path: Path | str | None = None):
-        # Resolved per instance, not at import: `config.AGENT_CONFIG_FILE` is
+        # Resolved per instance, not at import: the config paths are
         # re-pointed by the test harness and by any future config reload.
-        # Default is the fixed <project>/data/agent_config.json — never $HOME.
-        self.path = Path(path) if path else Path(config.AGENT_CONFIG_FILE)
+        # Default is config.keys_file() — the private location once the
+        # keys have moved there, the project file while they have not.
+        self.path = Path(path) if path else config.keys_file()
         self._cfg: dict | None = None
         self._cursor: dict = {}      # provider -> next index (round-robin)
         self.migrated_from: Path | None = None
@@ -225,6 +233,21 @@ class KeyManager:
     def load(self) -> dict:
         if self._cfg is not None:
             return self._cfg
+        # v1.9.0: move the keys out of shared storage into the private
+        # location. One-time and verified; a failure simply leaves us
+        # reading the project copy — never a reason to lose the keys.
+        # migrate_keys_to_private() self-guards retargeted setups.
+        if self.path != config.private_keys_file():
+            try:
+                moved = config.migrate_keys_to_private()
+                if moved is not None:
+                    self.migrated_from = moved
+                    self.path = config.private_keys_file()
+                    log.info("migrated %s from %s to %s",
+                             self.path.name, moved, self.path)
+            except Exception as e:
+                log.warning("private keys migration failed: %s: %s",
+                            type(e).__name__, e)
         if not self.path.exists():
             # First run after the path became absolute: pull the keys over
             # from whichever HOME they used to be written to.
