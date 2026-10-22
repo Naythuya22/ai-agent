@@ -800,6 +800,22 @@ function click(id, ev) { const e = registry[id]; if (e) e.fire(ev || 'click'); }
   sandbox.showSettingsTab('backend');
   eq(registry['set-pane-backend'].style.display, '', 'tab: backend pane back');
 
+  console.log('--- settings accordion (Release 9.2) ---');
+  ok(html.includes('class="set-sec-head"') && html.includes('data-tab="provider"'),
+     'R9.2: sections are stacked heading bars, not a tab row');
+  ok(!html.includes('id="set-tabs"'), 'R9.2: the old tab row is gone');
+  eq(registry['set-arrow-backend'].textContent, '▾', 'R9.2: the open section shows ▾');
+  eq(registry['set-arrow-provider'].textContent, '▸', 'R9.2: a closed section shows ▸');
+  sandbox.toggleSettingsSection('backend');
+  eq(registry['set-pane-backend'].style.display, 'none',
+     'R9.2: tapping the open heading closes it');
+  eq(registry['set-arrow-backend'].textContent, '▸', 'R9.2: its arrow closes too');
+  sandbox.toggleSettingsSection('system');
+  eq(registry['set-pane-system'].style.display, '', 'R9.2: tapping a closed heading opens it');
+  eq(registry['set-pane-provider'].style.display, 'none',
+     'R9.2: opening one section keeps the others closed');
+  sandbox.showSettingsTab('backend');
+
   // ---- Release 9: Auto switch toggle + pin state ----
   sandbox.settingsState.data.config.auto_switch = false;
   sandbox.settingsState.data.config.pinned_provider = 'gemini';

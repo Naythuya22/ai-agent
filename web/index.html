@@ -250,8 +250,9 @@ footer{position:relative;padding:12px 12px 16px;background:var(--bg);border-top:
 .set-btn{background:var(--accent);color:var(--accent-on);border:0;border-radius:4px;padding:6px 14px;font-size:12px;cursor:pointer;font-family:inherit}
 .set-btn.ghost{background:transparent;color:var(--text-2);border:1px solid var(--border)}
 .set-btn.danger{background:transparent;color:#dc2626;border:1px solid #dc262655}
-.set-tab{flex:1;background:var(--bg-4);border:1px solid var(--border-2);color:var(--text-chip);padding:7px 4px;border-radius:8px;cursor:pointer;font-family:inherit;font-size:12.5px}
-.set-tab.active{background:var(--accent);border-color:var(--accent);color:var(--accent-on);font-weight:600}
+.set-sec-head{display:block;width:100%;text-align:left;background:var(--bg-4);border:1px solid var(--border-2);color:var(--text-chip);padding:9px 10px;border-radius:8px;cursor:pointer;font-family:inherit;font-size:13px;margin-bottom:8px}
+.set-sec-head.active{background:var(--accent);border-color:var(--accent);color:var(--accent-on);font-weight:600}
+.set-sec-arrow{float:right}
 .model-info{cursor:pointer}
 .mp{position:fixed;left:0;right:0;bottom:0;z-index:120;background:var(--bg-5);border-top:1px solid var(--border);border-radius:14px 14px 0 0;padding:10px 14px;box-shadow:0 -8px 30px rgba(0,0,0,.35)}
 .mp[hidden]{display:none}
@@ -381,11 +382,7 @@ footer{position:relative;padding:12px 12px 16px;background:var(--bg);border-top:
 <button id="settings-close" type="button" style="background:transparent;border:0;color:var(--text-2);font-size:20px;cursor:pointer">&times;</button>
 </div>
 <div id="settings-body" style="overflow-y:auto;flex:1;padding:12px 16px;max-height:66vh">
-<div id="set-tabs" style="display:flex;gap:6px;margin-bottom:12px">
-<button type="button" class="set-tab active" data-tab="backend">Backend</button>
-<button type="button" class="set-tab" data-tab="provider">Provider &amp; Keys</button>
-<button type="button" class="set-tab" data-tab="system">System</button>
-</div>
+<button type="button" class="set-sec-head active" data-tab="backend" id="set-head-backend">Backend <span class="set-sec-arrow" id="set-arrow-backend">▾</span></button>
 <div id="set-pane-backend">
 <div class="set-row">
 <span class="set-label">Backend Mode</span>
@@ -422,6 +419,7 @@ footer{position:relative;padding:12px 12px 16px;background:var(--bg);border-top:
 <div id="set-net" class="set-hint">&hellip;</div>
 </div>
 </div>
+<button type="button" class="set-sec-head" data-tab="provider" id="set-head-provider">Provider &amp; Keys <span class="set-sec-arrow" id="set-arrow-provider">▸</span></button>
 <div id="set-pane-provider" style="display:none">
 <div class="set-row">
 <span class="set-label" for="set-provider">Provider</span>
@@ -457,6 +455,7 @@ footer{position:relative;padding:12px 12px 16px;background:var(--bg);border-top:
 <div class="set-msg" id="set-msg"></div>
 </div>
 </div>
+<button type="button" class="set-sec-head" data-tab="system" id="set-head-system">System <span class="set-sec-arrow" id="set-arrow-system">▸</span></button>
 <div id="set-pane-system" style="display:none">
 <div class="set-row">
 <span class="set-label">System</span>
@@ -2359,19 +2358,36 @@ function renderPromptTierPending(mode){
 }
 
 function showSettingsTab(name){
+  // Release 9.2 — the Settings sections are an accordion now: stacked
+  // heading bars, one pane open at a time (name '' closes them all).
+  // The stacked shape is deliberate — a new section is one more
+  // heading + pane, however many get added later.
   var panes={backend:setq('set-pane-backend'),provider:setq('set-pane-provider'),system:setq('set-pane-system')};
   for(var k in panes){if(panes[k])panes[k].style.display=(k===name)?'':'none';}
-  var tabs=document.querySelectorAll('.set-tab');
-  for(var i=0;i<tabs.length;i++){
-    var on=tabs[i].getAttribute&&tabs[i].getAttribute('data-tab')===name;
-    tabs[i].className='set-tab'+(on?' active':'');
+  var heads=document.querySelectorAll('.set-sec-head');
+  for(var i=0;i<heads.length;i++){
+    var on=heads[i].getAttribute&&heads[i].getAttribute('data-tab')===name;
+    heads[i].className='set-sec-head'+(on?' active':'');
   }
+  for(var a in panes){
+    var arrow=setq('set-arrow-'+a);
+    if(arrow)arrow.textContent=(a===name)?'▾':'▸';
+  }
+  try{localStorage.setItem('ai-agent-set-sec',name||'')}catch(e){}
+}
+
+function toggleSettingsSection(name){
+  var pane=setq('set-pane-'+name);
+  if(pane&&pane.style.display!=='none'){showSettingsTab('');}
+  else{showSettingsTab(name);}
 }
 
 function openSettings(){
   if(!settingsModal)return;
   settingsModal.style.display='flex';
-  showSettingsTab('backend');
+  var sec='backend';
+  try{sec=localStorage.getItem('ai-agent-set-sec')||'backend'}catch(e){}
+  showSettingsTab(sec);
   loadSettings();
 }
 
@@ -2920,9 +2936,9 @@ async function resetSettings(){
 
 (function bindSettings(){
   if(!settingsModal)return;
-  var tabs=document.querySelectorAll('.set-tab');
+  var tabs=document.querySelectorAll('.set-sec-head');
   for(var ti=0;ti<tabs.length;ti++)(function(btn){
-    btn.addEventListener('click',function(){showSettingsTab(btn.getAttribute('data-tab'));});
+    btn.addEventListener('click',function(){toggleSettingsSection(btn.getAttribute('data-tab'));});
   })(tabs[ti]);
   var close=setq('settings-close'); if(close)close.addEventListener('click',closeSettings);
   var cancel=setq('set-cancel'); if(cancel)cancel.addEventListener('click',closeSettings);
