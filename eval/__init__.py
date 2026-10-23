@@ -1,6 +1,6 @@
-"""Lightweight eval harness: measure answer quality over time.
+"""Eval package: home of the deterministic answer-quality harness.
 
-Modes:
-  --stub  (default)  scripted answers — verifies harness logic, not model quality
-  --live             real model — the actual quality measurement (Phase 3)
+`run_eval.py` (Release 20) drives the real mode objects in-process
+over the cases in `cases.json` and scores answers with deterministic
+checks only — no LLM judge. See this package's README.md for usage.
 """

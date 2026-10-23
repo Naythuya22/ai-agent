@@ -97,9 +97,10 @@ is trusted.
 
 ## Relationship to the older harness
 
-`eval/run.py` + `eval/runner.py` (Phase-3 era) score *canned* stub
-answers and POST live cases to a *running server*. This harness is
-complementary: it runs in-process through the real mode objects, so
-tool execution, the jail and the redactor are part of what is
-measured, and it needs no running server. The older files are
-untouched.
+The Phase-3 era harness (`eval/run.py` + `eval/runner.py`, which
+scored *canned* stub answers and POSTed live cases to a *running
+server*) was removed in Release 23 (v1.21.0); it is recoverable from
+git tag `v1.20.0`. This harness superseded it: it runs in-process
+through the real mode objects, so tool execution, the jail and the
+redactor are part of what is measured, and it needs no running
+server.
