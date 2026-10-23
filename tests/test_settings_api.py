@@ -64,6 +64,15 @@ class GetSettingsTests(SettingsApiCase):
             self.assertIn(key, j, msg=key)
         self.assertTrue(j["ok"])
 
+    def test_version_reported_from_single_source(self):
+        """Release 25: the version a tester reads in Settings → System
+        comes from config.VERSION — the one source of truth — so the
+        payload, the settings row and install.sh can never disagree."""
+        import config as app_config
+        _, j = call("get", "/api/settings/agent", expect=200)
+        self.assertEqual(j["version"], app_config.VERSION)
+        self.assertTrue(j["version"])
+
     def test_provider_dropdown_labels(self):
         _, j = call("get", "/api/settings/agent", expect=200)
         self.assertEqual(sorted(j["providers"]), sorted(PROVIDERS))

@@ -803,8 +803,7 @@ class App:
     def run(self) -> int:
         if not self.llm.health_check():
             print(f"{C_RED}Server not running.{C_RESET}")
-            print(f"{C_DIM}Start:  cd ~/ai-agent && python server.py &{C_RESET}")
-            print(f"{C_DIM}Or:     agent web{C_RESET}")
+            print(f"{C_DIM}Start:  python3 server.py  (in the project folder){C_RESET}")
             return 1
         self._banner()
         while self.running:

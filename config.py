@@ -11,6 +11,12 @@ from pathlib import Path
 from core.data_version import warn_if_newer
 from core.log import get_logger
 
+# Release version — the single source of truth for "what version is
+# this". Bumped once per release; surfaced in Settings → System (via
+# GET /api/settings/agent) so a tester can report exactly what they run.
+# (Data-file versions are separate: Config.DATA_VERSION et al.)
+VERSION = "1.23.0"
+
 # Paths
 PROJECT_ROOT = Path(__file__).resolve().parent
 CONFIG_DIR = Path.home() / ".ai-agent"

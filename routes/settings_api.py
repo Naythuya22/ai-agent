@@ -128,6 +128,7 @@ def api_settings_get():
                  for p in PROVIDERS}
         return jsonify({
             "ok": True,
+            "version": config.VERSION,
             "config": cfg,
             # Fixed, HOME-independent location of the key file. Surfaced so a
             # "keys vanished after restart" report can be checked against the

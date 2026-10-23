@@ -1743,6 +1743,44 @@ class AgentMode:
         record_usage("")
         return text
 
+    # Release 25 — the fresh-install dead end. A brand-new user has no
+    # keys and (usually) no local model file: cloud declines with
+    # "no_usable_key" and the local engine then raises "Model not
+    # found", which used to reach the user as a raw developer error
+    # that never mentioned keys at all. Callers invoke this ONLY after
+    # the local engine failed to start, so "nothing can answer" is
+    # already established; when the blocker is keys, close the turn
+    # with guidance instead of the exception. Same transcript contract
+    # as _cloud_only_reply (append the pair, save, record no usage).
+    NO_KEY_GUIDANCE = (
+        "🔑 သုံးလို့ရတဲ့ API key မရှိသေးလို့ အခုတော့ မဖြေနိုင်သေးပါ။\n"
+        "Settings မှာ provider key တစ်ခု ထည့်လိုက်ရင် သုံးလို့ ရပါပြီ — "
+        "Gemini key ကို Google AI Studio (aistudio.google.com) မှာ "
+        "ကိုယ့် Google အကောင့်နဲ့ အခမဲ့ ထုတ်ယူနိုင်ပါတယ်။\n"
+        "Local model ဖိုင် (.litertlm) ထည့်ထားရင်လည်း "
+        "key မလိုဘဲ သုံးနိုင်ပါတယ်။")
+
+    def _key_guidance(self, user_input: str):
+        """The NO_KEY_GUIDANCE reply, or None when keys are not the
+        blocker (offline, local-only, backend unavailable…)."""
+        be = self._backend_obj()
+        if be is None:
+            return None
+        try:
+            if be.why_not_cloud() != "no_usable_key":
+                return None
+        except Exception as e:
+            log.debug("key guidance check failed: %s: %s",
+                      type(e).__name__, e)
+            return None
+        text = self.NO_KEY_GUIDANCE
+        self._messages.append({"role": "user", "text": user_input})
+        self._messages.append({"role": "assistant", "text": text})
+        self._trim_messages()
+        self._save_turn()
+        record_usage("")
+        return text
+
     def _budget_notice(self, max_iter: int, partial_text: str = "") -> str:
         """Burmese notice for a turn the step budget cut short (Release 15).
 
@@ -2442,7 +2480,18 @@ class AgentMode:
             refusal = self._cloud_only_reply(user_input, "exhausted")
             self._finish_turn(user_input, refusal)
             return refusal
-        self._ensure_conv(system=system)
+        try:
+            self._ensure_conv(system=system)
+        except Exception:
+            # Release 25: fresh install (no keys, no model file) — the
+            # raw "Model not found" error never told the user the real
+            # fix is a key. Guidance applies only when keys are the
+            # blocker; anything else keeps the original error.
+            guide = self._key_guidance(user_input)
+            if guide is None:
+                raise
+            self._finish_turn(user_input, guide)
+            return guide
         assert self._conv is not None
 
         # Bug #3: manual tool-calling loop (transparent + persistable)

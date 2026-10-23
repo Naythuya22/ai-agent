@@ -52,8 +52,9 @@ python app.py
 ## ၄။ Cloud key ထည့်ရန် (သုံးချင်မှ)
 
 Web UI ရဲ့ **Settings** မှာ provider တစ်ခုချင်းစီအတွက် key ထည့်ပါ။
-Key တွေကို project folder ထဲက `data/agent_config.json` မှာ
-သိမ်းပါတယ် — အဲဒီ ဖိုင်ကို ဘယ်သူ့ကိုမှ မပေးပါနဲ့။
+Key တွေကို Termux ရဲ့ private နေရာ (app data) ထဲမှာပဲ သိမ်းပါတယ် —
+project folder ထဲမှာ မရှိပါဘူး။ Backup zip ထဲမှာ key တွေ ပါတာမို့
+အဲဒီ ဖိုင်ကို ဘယ်သူ့ကိုမှ မပေးပါနဲ့။
 
 ## ၅။ Code mode (သုံးချင်မှ)
 

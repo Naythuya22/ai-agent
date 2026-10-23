@@ -210,6 +210,10 @@ footer{position:relative;padding:12px 12px 16px;background:var(--bg);border-top:
 #update-banner .ub-btn:active{background:#e0e0e0}
 #offline-banner{position:fixed;top:0;left:0;right:0;background:var(--stop);color:#fff;padding:6px 14px;font-size:12px;z-index:9998;text-align:center;display:none}
 #offline-banner.show{display:block}
+#nokey-banner{position:fixed;top:0;left:0;right:0;background:var(--accent);color:var(--accent-on);padding:10px 14px;font-size:14px;z-index:9997;display:none;align-items:center;gap:12px;box-shadow:0 2px 8px rgba(0,0,0,.4)}
+#nokey-banner.show{display:flex}
+#nokey-banner .nk-msg{flex:1;font-weight:500}
+#nokey-banner .nk-btn{background:#fff;color:#0b8469;border:none;border-radius:6px;padding:6px 14px;font-size:13px;font-weight:600;cursor:pointer}
 
 /* ── Settings (hybrid backend) ── */
 #settings-btn{text-align:left}
@@ -292,6 +296,10 @@ footer{position:relative;padding:12px 12px 16px;background:var(--bg);border-top:
   <button class="ub-btn" id="update-btn">Update</button>
 </div>
 <div id="offline-banner" role="status">⚠️ Offline — some features unavailable</div>
+<div id="nokey-banner" role="alert">
+  <span class="nk-msg">🔑 API key မရှိသေးပါ — ထည့်ပြီးမှ သုံးလို့ ရပါမယ်။ Gemini key ကို အခမဲ့ ရနိုင်ပါတယ်။</span>
+  <button class="nk-btn" id="nokey-settings-btn" type="button">Settings ဖွင့်ရန်</button>
+</div>
 <header>
 <div class="brand">ai-agent</div>
 <div class="modes">
@@ -459,6 +467,11 @@ footer{position:relative;padding:12px 12px 16px;background:var(--bg);border-top:
 </div>
 <button type="button" class="set-sec-head" data-tab="system" id="set-head-system">System <span class="set-sec-arrow" id="set-arrow-system">▸</span></button>
 <div id="set-pane-system" style="display:none">
+<div class="set-row">
+<span class="set-label">Version</span>
+<div class="set-line"><span id="set-version"></span></div>
+<div class="set-hint">Feedback ပို့တဲ့အခါ ဒီ version ကို ထည့်ပြောပေးပါ။</div>
+</div>
 <div class="set-row">
 <span class="set-label">System</span>
 <div class="set-line">
@@ -939,8 +952,35 @@ function setStatus(t){statusTextEl.textContent=t||''}
   if(mpCloseBtn&&mpCloseBtn.addEventListener){
     mpCloseBtn.addEventListener('click',function(){ mpClose(); });
   }
+  // Release 25 — fresh-install hint: no usable key AND no local model
+  // means nothing can answer yet. Say so up front, with the way out,
+  // instead of letting the first message die on a raw error. Painted
+  // from the same settings answer Settings itself renders: backend
+  // .usable lists providers that can take a turn right now, and
+  // backend.local_model names the on-device model ('' = none found).
+  var noKeyBannerEl=document.getElementById('nokey-banner');
+  function renderNoKeyBanner(show){
+    if(!noKeyBannerEl)return;
+    noKeyBannerEl.className=show?'show':'';
+  }
+  async function checkNoKeyBanner(){
+    if(!noKeyBannerEl)return;
+    try{
+      var r=await fetch('/api/settings/agent');
+      var j=await r.json();
+      if(!j||j.error){renderNoKeyBanner(false);return}
+      var be=j.backend||{};
+      var usable=be.usable||[];
+      renderNoKeyBanner(usable.length===0&&!be.local_model);
+    }catch(e){/* cosmetic only — never break the page over a hint */}
+  }
+  var noKeyBtn=document.getElementById('nokey-settings-btn');
+  if(noKeyBtn&&noKeyBtn.addEventListener){
+    noKeyBtn.addEventListener('click',function(){ if(typeof openSettings==='function')openSettings(); });
+  }
   // ── end model indicator ──
   if(typeof window!=='undefined')window.addEventListener('load', function(){try{updateModelInfo()}catch(_mi){}});
+  if(typeof window!=='undefined')window.addEventListener('load', function(){try{checkNoKeyBanner()}catch(_nk){}});
 function clearActivity(){actPhase='';activityEl.hidden=true}
 function setActivity(phase,label){
   if(actPhase===phase&&actLabelEl.textContent===label)return;
@@ -2405,6 +2445,9 @@ function openSettings(){
 
 function closeSettings(){
   if(settingsModal)settingsModal.style.display='none';
+  // Release 25: a key added in Settings must retire the no-key banner
+  // without waiting for a reload.
+  if(typeof checkNoKeyBanner==='function'){try{checkNoKeyBanner()}catch(_nk){}}
 }
 
 async function settingsJson(r){
@@ -2446,6 +2489,7 @@ function localNoteText(mode){
 
 function renderSettings(){
   var j=settingsState.data; if(!j)return;
+  var ver=setq('set-version'); if(ver)ver.textContent=j.version?('ai-agent v'+j.version):'';
   var cfg=j.config||{};
   var mode=cfg.backend_mode||'auto';
   var radios=document.getElementsByName('backend-mode');

@@ -44,8 +44,20 @@ else
     fi
 fi
 
+python3 - <<'PYEOF' || { echo "error: Python 3.11+ is required." >&2; exit 1; }
+import sys
+raise SystemExit(0 if sys.version_info >= (3, 11) else 1)
+PYEOF
+
 say "Installing Python dependencies"
 python3 -m pip install -r requirements.txt
+
+# Fail loudly here rather than at first server start: Flask is the one
+# hard dependency the whole app stands on.
+python3 -c "import flask" 2>/dev/null || {
+    echo "error: Flask did not install — check the pip output above." >&2
+    exit 1
+}
 
 if [ "$WITH_CODE" = 1 ]; then
     say "Installing Code mode dependencies (node + opencode)"
@@ -67,4 +79,9 @@ cat <<'EOF'
   3. Add provider keys in the web UI under Settings (optional).
   4. Back up your data now and then regularly:
        python3 backup.py export
+
+  (Burmese) ပထမဆုံး အသုံးပြုသူများ — key မရှိရင် ဘာမှ ဖြေမှာ မဟုတ်ပါ။
+  Settings မှာ Gemini key (Google AI Studio မှာ အခမဲ့ ရနိုင်ပါတယ်) အရင်
+  ထည့်ပါ။ အဆင့်လိုက် လမ်းညွှန်: docs/BETA.my.md
 EOF
+python3 -c "import config; print('Installed: ai-agent v' + config.VERSION)" 2>/dev/null || true

@@ -303,6 +303,29 @@ vm.runInContext(block, sandbox, { filename: 'indicator-block.js' });
   eq(calls.length, callsBefore, 'picker never opens in Code Mode');
   sandbox.state.mode = 'agent';
 
+  // ── no-key banner (Release 25) ──
+  // A fresh install can answer nothing: no provider has a usable key
+  // and there is no local model. The banner must say so up front —
+  // and must retire the moment either side can take a turn.
+  ok(html.includes('id="nokey-banner"'), 'no-key banner markup exists');
+  ok(html.includes('#nokey-banner.show{'), 'no-key banner CSS present');
+  ok(html.includes('id="nokey-settings-btn"'), 'banner carries a Settings button');
+  const nkBanner = regEl('nokey-banner');
+  settingsReply = { ok: true, backend: { usable: [], local_model: '' } };
+  await sandbox.checkNoKeyBanner();
+  eq(nkBanner.className, 'show', 'banner shows when nothing can answer');
+  settingsReply = { ok: true, backend: { usable: ['gemini'], local_model: '' } };
+  await sandbox.checkNoKeyBanner();
+  eq(nkBanner.className, '', 'banner hides once a provider is usable');
+  settingsReply = { ok: true, backend: { usable: [], local_model: 'gemma-4-e4b' } };
+  await sandbox.checkNoKeyBanner();
+  eq(nkBanner.className, '', 'banner hides when a local model exists');
+  settingsReply = { error: 'backend unavailable' };
+  threw = null;
+  try { await sandbox.checkNoKeyBanner(); } catch (e) { threw = e; }
+  ok(threw === null, 'an error settings answer does not escape the banner check');
+  eq(nkBanner.className, '', 'an error settings answer keeps the banner hidden');
+
   console.log(failures ? `\n${failures} FAILURES` : '\nALL PASS');
   process.exit(failures ? 1 : 0);
 })().catch(e => { console.error('FAIL exception: ' + (e && e.stack || e)); process.exit(1); });

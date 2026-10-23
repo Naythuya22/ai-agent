@@ -393,6 +393,19 @@ def api_agent_stream():
             agent_mode._ensure_conv()
             conv = agent_mode._conv
         except Exception as e:
+            # Release 25: fresh install (no keys, no model file) — send
+            # the key guidance as a normal reply instead of the raw
+            # "Model not found" error frame. _key_guidance has already
+            # appended and saved the turn, like the cloud paths above.
+            guide = agent_mode._key_guidance(msg)
+            if guide is not None:
+                gtext = sanitize_text(guide)
+                if gtext:
+                    yield _sse({"type": "chunk", "text": gtext})
+                end_frame = _end(gtext, [], last_usage())
+                _finish(gtext)
+                yield end_frame
+                return
             _finish("")
             yield _sse({"type": "error", "error": "%s: %s" % (type(e).__name__, e)})
             return
