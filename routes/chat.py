@@ -421,6 +421,7 @@ def api_agent_stream():
         done = False
         loop_detected = False
         seq_cut = False
+        failed_after_tools = False   # Release 24: stream died mid-work
 
         try:
             with inference_guard():
@@ -452,6 +453,18 @@ def api_agent_stream():
                                 continue
                             yield _sse({"type": "chunk", "text": safe})
                         elif kind == "error":
+                            if any(m.get("role") == "tool_result"
+                                   for m in agent_mode._messages[before_len:]):
+                                # Release 24: tools already ran — the turn
+                                # must not vanish unsaved behind a bare error
+                                # frame. End it through the normal tail
+                                # below with the failure reply (completed-
+                                # work summary + recorded line), the same
+                                # preservation AgentMode.handle() performs.
+                                final_text = agent_mode._local_failure_text(
+                                    agent_mode._messages[before_len:])
+                                failed_after_tools = True
+                                break
                             _finish("")
                             yield _sse({"type": "error", "error": str(data)})
                             return
@@ -475,6 +488,10 @@ def api_agent_stream():
                                     final_text = text_this
                                 else:
                                     final_text = data.get("text") or text_this
+
+                    if failed_after_tools:
+                        done = True
+                        break
 
                     if not tool_calls_this:
                         final_text = final_text or text_this
@@ -508,9 +525,17 @@ def api_agent_stream():
                         current_input = {"role": "tool", "name": name, "content": result}
 
                 if not done:
-                    _finish("")
-                    yield _sse({"type": "error", "error": "max_iter (%d) reached" % max_iter})
-                    return
+                    if any(m.get("role") == "tool_result"
+                           for m in agent_mode._messages[before_len:]):
+                        # Release 24: the budget ran out mid-work — close
+                        # the turn through the normal tail with the failure
+                        # reply instead of dropping it unsaved.
+                        final_text = agent_mode._local_failure_text(
+                            agent_mode._messages[before_len:])
+                    else:
+                        _finish("")
+                        yield _sse({"type": "error", "error": "max_iter (%d) reached" % max_iter})
+                        return
 
                 # One full validation pass over the finished message: covers the
                 # `end`-text path (chunks may not equal it) and keeps corrupt

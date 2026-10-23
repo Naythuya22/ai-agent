@@ -181,7 +181,14 @@ class AgentCloudCase(AgentCloudBase):
                                   status=422))
         out = self.mode.handle("hello")
         self.assertTrue(out.startswith("☁️ Cloud Only"), out[:80])
-        self.assertIn("422", out, "the real provider error is hidden")
+        # Release 24: the cause is classified Burmese now — the raw
+        # provider status/body must NOT reach the reply (before R24
+        # this test pinned the raw "422: missing field content" text).
+        self.assertIn("Provider ဘက်က ပြဿနာ ရှိနေတယ်", out,
+                      "the classified cause is missing")
+        self.assertNotIn("422", out, "raw provider status leaked")
+        self.assertNotIn("missing field content", out,
+                         "raw provider body leaked")
         self.assertIsNone(self.mode._conv)
         self.assertFalse(self.llm.loaded,
                          "Cloud Only answered from the local model")

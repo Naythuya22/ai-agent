@@ -144,6 +144,17 @@ class ToolThenAnswerTransport:
                 "usage": {"prompt_tokens": 6, "completion_tokens": 3}}
 
 
+class SimulatedProcessDeath(BaseException):
+    """A death no in-process handler may catch (power loss, SIGKILL).
+
+    BaseException on purpose: Release 24 made AgentMode.handle()
+    preserve a tool-using turn whose engine raises an ordinary
+    Exception mid-work (it now answers with the failure reply instead
+    of raising) — the checkpoint/resume path below is for the deaths
+    that leave no exception to handle at all.
+    """
+
+
 class CrashConversation:
     """Local engine stub: one tool round, then the process 'dies'."""
 
@@ -158,7 +169,7 @@ class CrashConversation:
                     "tool_calls": [{"function": {
                         "name": "list_files",
                         "arguments": {"directory": self.directory}}}]}
-        raise RuntimeError("simulated crash: process died mid-turn")
+        raise SimulatedProcessDeath("simulated crash: process died mid-turn")
 
 
 class CrashEngine:
@@ -338,7 +349,14 @@ class StreamCrashResumeCase(CheckpointBase):
 class LocalCrashResumeCase(CheckpointBase):
     def test_local_crash_resumes_from_checkpoint(self):
         """(a-local) The on-device loop checkpoints too: one executed
-        tool round survives the engine 'dying' on the next call."""
+        tool round survives the process dying on the next call.
+
+        Release 24 adjustment: the death is a BaseException now. An
+        ordinary engine Exception after tool work no longer propagates
+        out of handle() — the turn is preserved in the transcript with
+        the failure reply (tests/test_failure_replies.py). Checkpoint
+        resume remains the recovery for deaths no code can catch.
+        """
         self.km.set_mode("local")
         self.km.save()
         conv = CrashConversation(str(self.dir_a))
@@ -349,7 +367,7 @@ class LocalCrashResumeCase(CheckpointBase):
                                      http=ToolThenAnswerTransport(
                                          str(self.dir_a)))
         sid = mode.session_id
-        with self.assertRaises(RuntimeError):
+        with self.assertRaises(SimulatedProcessDeath):
             mode.handle("LOCAL_TASK")
         entry = self.filed(sid)
         self.assertIsNotNone(entry)

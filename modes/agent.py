@@ -1197,6 +1197,8 @@ class AgentMode:
         "local_only": "Local Only mode ဖြစ်နေလို့",
         "backend_unavailable": "Cloud backend ကို စတင်လို့မရတော့ဘူး",
         "exhausted": "Cloud provider အားလုံး မအောင်မြင်တော့ဘူး",
+        # Release 24: every key merely parked — temporary, with a wait.
+        "cooling": "Provider key တွေ အကုန် cooldown ထဲမှာ ရှိတယ်",
     }
 
     def _try_cloud(self, user_input: str, system: str = ""):
@@ -1246,28 +1248,35 @@ class AgentMode:
                 pass
         if not want:
             if mode == "cloud":
+                if reason == "no_usable_key":
+                    # Release 24: "no usable key" can mean every key is
+                    # merely parked — a temporary state the reply must
+                    # name as such, with the wait, not as a missing key.
+                    classified = self._classify_failure(be, None)
+                    if classified["park_only"]:
+                        return self._cloud_only_reply(
+                            user_input, "cooling",
+                            causes=classified["lines"])
                 return self._cloud_only_reply(user_input, reason)
             return None
         before = len(self._messages)
-        reason, detail = "exhausted", ""
+        reason = "exhausted"
         locked_reason = None
         locked_provider = ""
         locked_detail = ""
+        failure_exc = None
         try:
             return self._handle_cloud(user_input, be, system=system)
         except Exception as e:
             from core.agent_backend import BackendExhausted
             from core.key_manager import redact
+            failure_exc = e
             if isinstance(e, BackendExhausted):
                 log.warning("cloud backends exhausted (%s)", e)
                 msg = str(e)
                 reason = ("offline" if ("network" in msg.lower()
                                         or "no network" in msg.lower())
                           else "exhausted")
-                try:
-                    detail = redact(msg, be.keys.all_keys())[:220]
-                except Exception:
-                    detail = msg[:220]
                 if getattr(e, "locked_reason", None):
                     locked_reason = e.locked_reason
                     locked_provider = getattr(e, "locked_provider", "") or ""
@@ -1279,19 +1288,269 @@ class AgentMode:
                         locked_detail = ""
             else:
                 log.error("cloud step failed (%s: %s)", type(e).__name__, e)
-                detail = "%s: %s" % (type(e).__name__, e)
-                try:
-                    from core.key_manager import redact
-                    detail = redact(detail, be.keys.all_keys())[:220]
-                except Exception:
-                    detail = detail[:220]
+        # Release 24: a turn that already executed tools must not be
+        # rolled back into nothing — its tool_call/tool_result entries
+        # are the only record that side effects happened (the live
+        # v1.21.0 failure: the file was written, the reply said the
+        # turn could not be answered, the transcript showed nothing).
+        # Preserve the turn, close it with the failure reply (completed-
+        # work summary + classified cause) and save it. Falling back to
+        # the local model here would re-run the whole turn and repeat
+        # the side effects, so a tool-using turn stops with the reply
+        # in auto mode too. Turns with no tool work keep the rollback
+        # (and auto's silent local fallback) exactly as before.
+        turn_entries = self._messages[before:]
+        if any(m.get("role") == "tool_result" for m in turn_entries):
+            try:
+                return self._preserve_failed_turn(
+                    be, mode, turn_entries,
+                    locked=(locked_provider, locked_reason, locked_detail)
+                    if locked_reason else None,
+                    exc=failure_exc)
+            except Exception as e:
+                log.error("failed-turn preservation failed (%s: %s) — "
+                          "rolling back as before", type(e).__name__, e)
         del self._messages[before:]
         if locked_reason:
             return self._locked_reply(user_input, locked_provider,
                                       locked_reason, locked_detail)
         if mode == "cloud":
-            return self._cloud_only_reply(user_input, reason, detail)
+            # Release 24: the reply is composed from the classified
+            # failure records — never from the exception's raw text
+            # (provider JSON, masked key fragments, mid-word cuts).
+            classified = self._classify_failure(be, failure_exc)
+            if classified["park_only"]:
+                return self._cloud_only_reply(
+                    user_input, "cooling", causes=classified["lines"])
+            return self._cloud_only_reply(
+                user_input, reason, causes=classified["lines"])
         return None
+
+    # ── failure replies (Release 24) ───────────────────────────────
+    #
+    # A failed turn used to show the provider's raw error text —
+    # redacted and cut at 220 chars, but still JSON fragments, masked
+    # key material and sentences severed mid-word — and a turn that
+    # died after running tools lost the tools from the transcript
+    # entirely. The builders below compose every failure reply from
+    # structured state only: the per-provider records step() left on
+    # the exception, the key states the backend reads back, and the
+    # turn's own tool entries. Deterministic, no provider call.
+
+    # failure_reason() vocabulary → Burmese cause + one action hint.
+    FAILURE_REASONS = {
+        "key_invalid": "API key က အလုပ်မလုပ်တော့ဘူး",
+        "no_balance": "အကောင့်မှာ ဘေ/credit မရှိတော့ဘူး",
+        "rate_limited": "Limit ပြည့်သွားပြီ (429)",
+        "cooling": "Key က cooldown ထဲမှာ ရှိတယ်",
+        "model_unavailable": "အဲဒီ model ကို အခု မရနိုင်ဘူး",
+        "no_keys": "Key မရှိဘူး",
+        "off": "Provider ကို ပိတ်ထားတယ်",
+        "network": "Network မရှိလို့ ချိတ်မရဘူး",
+        "server_error": "Provider ဘက်က ပြဿနာ ရှိနေတယ်",
+    }
+    FAILURE_HINTS = {
+        "key_invalid": "Settings မှာ key ကို ပြန်စစ်ပါ",
+        "no_balance": "credit ဖြည့်ပါ၊ ဒါမှမဟုတ် free model ပြောင်းသုံးပါ",
+        "rate_limited": "ခဏ စောင့်ပြီး ပြန်စမ်းပါ",
+        "cooling": "ခဏ စောင့်ပြီး ပြန်စမ်းပါ",
+        "model_unavailable": "Settings မှာ model ပြောင်းရွေးပါ",
+        "no_keys": "Settings မှာ key ထည့်ပါ",
+        "off": "Settings မှာ provider ပြန်ဖွင့်ပါ",
+        "network": "network ချိတ်ဆက်မှု ပြန်စစ်ပါ",
+        "server_error": "ခဏနေ ပြန်စမ်းပါ",
+    }
+
+    def _classify_failure(self, be, exc=None) -> dict:
+        """Classified Burmese causes for a cloud failure.
+
+        Merges the exception's per-provider records (providers step()
+        actually tried) with the backend's key-state overview
+        (providers it never reached — e.g. a key parked by an earlier
+        step of the same turn, whose remaining wait the overview can
+        still name). Returns {"lines", "park_only", "wait"}:
+        park_only when every blocker is a cooling/rate-limit park with
+        a known remaining time — a temporary state, not exhaustion.
+        Never raises: classification trouble degrades to no lines and
+        the caller's headline still stands.
+        """
+        merged = {}
+        order = []
+        try:
+            for f in (getattr(exc, "failures", None) or []):
+                p = f.get("provider") or ""
+                if not p or p in merged:
+                    continue
+                wait = None
+                ra = f.get("retry_after")
+                if ra:
+                    try:
+                        wait = max(1, int(round(float(ra))))
+                    except (TypeError, ValueError):
+                        wait = None
+                merged[p] = {"reason": f.get("reason") or "server_error",
+                             "wait": wait}
+                order.append(p)
+            overview = []
+            if be is not None:
+                try:
+                    overview = be.failure_overview() or []
+                except Exception:
+                    overview = []
+            for o in overview:
+                p = o.get("provider") or ""
+                if not p:
+                    continue
+                if p not in merged:
+                    merged[p] = {"reason": o.get("reason") or "server_error",
+                                 "wait": o.get("wait")}
+                    order.append(p)
+                elif merged[p]["wait"] is None and o.get("wait"):
+                    merged[p]["wait"] = o["wait"]
+        except Exception as e:
+            log.warning("failure classification failed (%s: %s)",
+                        type(e).__name__, e)
+            return {"lines": [], "park_only": False, "wait": None}
+        from core.key_manager import PROVIDER_LABELS
+        lines = []
+        for p in order:
+            info = merged[p]
+            cause = self.FAILURE_REASONS.get(
+                info["reason"], self.FAILURE_REASONS["server_error"])
+            line = "• %s: %s" % (PROVIDER_LABELS.get(p, p), cause)
+            hint = self.FAILURE_HINTS.get(info["reason"], "")
+            if hint:
+                line += " — " + hint
+                if info["reason"] in ("cooling", "rate_limited") \
+                        and info["wait"]:
+                    line += " (~%d စက္ကန့်)" % info["wait"]
+            lines.append(line)
+        known = [merged[p]["wait"] for p in order if merged[p]["wait"]]
+        park_only = bool(order) and all(
+            merged[p]["reason"] in ("cooling", "rate_limited")
+            and merged[p]["wait"] for p in order)
+        return {"lines": lines, "park_only": park_only,
+                "wait": min(known) if known else None}
+
+    # Args that name what a tool call acted on, in preference order.
+    _TARGET_KEYS = ("path", "file", "filename", "filepath", "directory",
+                    "dir", "query", "command", "cmd", "url", "name")
+
+    @staticmethod
+    def _shorten_target(target: str) -> str:
+        """Fit a tool target into the summary's 48-char slot.
+
+        Plain values (commands, queries) read best from the front, so
+        they keep the existing head-truncation. A path reads the other
+        way — the filename at the END is what identifies it — so a
+        long path keeps its tail behind an ASCII "..." marker.
+        Head-truncating a path loses the filename entirely wherever
+        directory prefixes run long (on Termux the tmp prefix alone
+        is longer than the whole slot), which is exactly the R24
+        phone-only failure this replaces."""
+        if len(target) <= 48:
+            return target
+        if "/" in target:
+            return "..." + target[-45:]
+        return target[:48]
+
+    def _work_summary(self, entries) -> str:
+        """Completed-work summary for a turn that died mid-work.
+
+        Built from the turn's own tool_call/tool_result pairs, in
+        execution order — deterministic, no provider call. A result
+        counts as failed when its text carries the tools' own "Error:"
+        prefix (the shape _execute_tool guarantees). "" when no tool
+        completed a result this turn.
+        """
+        parts = []
+        pending = None
+        for m in entries:
+            role = m.get("role")
+            if role == "tool_call":
+                pending = m
+            elif role == "tool_result":
+                name = m.get("tool") or (pending or {}).get("tool") or "tool"
+                args = (pending or {}).get("args") or {}
+                pending = None
+                target = ""
+                if isinstance(args, dict):
+                    for k in self._TARGET_KEYS:
+                        v = args.get(k)
+                        if isinstance(v, str) and v.strip():
+                            target = self._shorten_target(
+                                " ".join(v.split()))
+                            break
+                ok = not str(m.get("text") or "").startswith("Error")
+                label = "%s (%s)" % (name, target) if target else name
+                parts.append("%s — %s" % (label, "အောင်မြင်"
+                                           if ok else "မအောင်မြင်"))
+        if not parts:
+            return ""
+        return ("ဒီနေရာအထိ ပြီးပြီးသားပါ: " + "၊ ".join(parts) + "။\n"
+                "ဒီအလုပ်တွေကို မှတ်တမ်းမှာ သိမ်းထားပါတယ် — "
+                "အစက ပြန်လုပ်စရာ မလိုပါဘူး။")
+
+    def _failure_turn_text(self, mode: str, classified: dict,
+                           summary: str) -> str:
+        """The failure reply closing a preserved cloud turn."""
+        lines = []
+        if mode == "cloud":
+            lines.append("☁️ Cloud Only mode ဖြစ်နေလို့ ဒီအလှည့်ကို "
+                         "ဆက်မဖြေနိုင်တော့ဘူး။")
+        else:
+            lines.append("☁️ Cloud provider တွေ မဖြေနိုင်လို့ ဒီအလှည့်ကို "
+                         "ဒီတင် ရပ်လိုက်ပါတယ်။")
+        lines.extend(classified["lines"])
+        if summary:
+            lines.append(summary)
+        if mode == "cloud":
+            lines.append("⚙️ Settings → Backend Mode ကနေ Auto ပြောင်းရင် "
+                         "Local Gemma 4B ကို အလိုအလျောက် fallback ဖြစ်မယ်။")
+        lines.append("ဆက်လုပ်စေချင်ရင် \"ဆက်လုပ်ပါ\" လို့ ပြန်ပြောပါ — "
+                     "ကျန်နေတဲ့ အလုပ်ကို ဆက်လုပ်ပေးပါမယ်။")
+        return "\n".join(lines)
+
+    def _local_failure_text(self, entries) -> str:
+        """The failure reply closing a preserved local turn."""
+        lines = ["⚠️ Local model က ကြားဖြတ် ရပ်သွားလို့ ဒီအလှည့်ကို "
+                 "ဆက်မဖြေနိုင်တော့ဘူး။"]
+        summary = self._work_summary(entries)
+        if summary:
+            lines.append(summary)
+        lines.append("ဆက်လုပ်စေချင်ရင် \"ဆက်လုပ်ပါ\" လို့ ပြန်ပြောပါ — "
+                     "ကျန်နေတဲ့ အလုပ်ကို ဆက်လုပ်ပေးပါမယ်။")
+        return "\n".join(lines)
+
+    def _preserve_failed_turn(self, be, mode: str, turn_entries,
+                              locked=None, exc=None) -> str:
+        """Close a tool-using turn that died on the cloud path.
+
+        The transcript already holds the user message and the turn's
+        tool_call/tool_result entries (the caller does NOT roll back);
+        append the failure reply as the assistant entry, trim, save.
+        _save_turn clears the mid-turn checkpoint — the Release 24
+        invariant: completed tool work is recoverable from durable
+        state, here the transcript itself, and the reply says so, so
+        the checkpoint has nothing left to guard. record_usage("")
+        mirrors the other generated replies: the text the user reads
+        was composed here, not produced by a model (the real steps are
+        already in the Release 17 ledger via meter_usage).
+        """
+        summary = self._work_summary(turn_entries)
+        if locked is not None:
+            provider, reason, detail = locked
+            text = self._locked_text(provider, reason, detail)
+            if summary:
+                text += "\n" + summary
+        else:
+            text = self._failure_turn_text(
+                mode, self._classify_failure(be, exc), summary)
+        self._messages.append({"role": "assistant", "text": text})
+        self._trim_messages()
+        self._save_turn()
+        record_usage("")
+        return text
 
     def _save_turn(self) -> None:
         if not self._store:
@@ -1428,22 +1687,27 @@ class AgentMode:
         "server_error": "Provider ဘက်က ပြဿနာ ရှိနေတယ်",
     }
 
+    def _locked_text(self, provider: str, reason: str,
+                     detail: str = "") -> str:
+        """The locked-mode stop text (Release 9 wording, unchanged)."""
+        from core.key_manager import PROVIDER_LABELS
+        label = PROVIDER_LABELS.get(provider, provider or "provider")
+        why = self.LOCKED_REASONS.get(reason, reason or "server_error")
+        if detail:
+            why = why + " — " + detail
+        return ("🔒 Lock ချထားတဲ့ " + label + " က မဖြေနိုင်ဘူး: " + why +
+                "\nAuto switch ပိတ်ထားလို့ တခြား model ကို အလိုအလျောက် "
+                "မပြောင်းဘူး။ ပြောင်းသုံးချင်ရင် model chip ကို နှိပ်ပြီး "
+                "ရွေးပါ၊ ဒါမှမဟုတ် Settings → Backend မှာ Auto switch "
+                "ပြန်ဖွင့်ပါ။")
+
     def _locked_reply(self, user_input: str, provider: str,
                       reason: str, detail: str = "") -> str:
         """Locked mode (Release 9): the pinned provider failed and auto
         switch is off, so the turn stops here with the reason — the user
         pinned that model on purpose and asked to decide themselves,
         not to be switched quietly."""
-        from core.key_manager import PROVIDER_LABELS
-        label = PROVIDER_LABELS.get(provider, provider or "provider")
-        why = self.LOCKED_REASONS.get(reason, reason or "server_error")
-        if detail:
-            why = why + " — " + detail
-        text = ("🔒 Lock ချထားတဲ့ " + label + " က မဖြေနိုင်ဘူး: " + why +
-                "\nAuto switch ပိတ်ထားလို့ တခြား model ကို အလိုအလျောက် "
-                "မပြောင်းဘူး။ ပြောင်းသုံးချင်ရင် model chip ကို နှိပ်ပြီး "
-                "ရွေးပါ၊ ဒါမှမဟုတ် Settings → Backend မှာ Auto switch "
-                "ပြန်ဖွင့်ပါ။")
+        text = self._locked_text(provider, reason, detail)
         self._messages.append({"role": "user", "text": user_input})
         self._messages.append({"role": "assistant", "text": text})
         self._trim_messages()
@@ -1453,15 +1717,23 @@ class AgentMode:
         return text
 
     def _cloud_only_reply(self, user_input: str, reason: str,
-                          detail: str = "") -> str:
+                          detail: str = "", causes=None) -> str:
         """Cloud Only mode with no usable provider: say so instead of
-        quietly answering from the local 4B model the user just switched off."""
+        quietly answering from the local 4B model the user just switched off.
+
+        ``causes`` (Release 24): the classified per-provider lines from
+        _classify_failure, printed under the headline in place of the
+        old raw ``detail``. With neither, the output is exactly the
+        pre-R24 shape every simple-reason caller relies on.
+        """
         why = self.CLOUD_ONLY_REASONS.get(reason, reason or "exhausted")
         if detail:
             why = why + " — " + detail
-        text = ("☁️ Cloud Only mode ဖြစ်နေလို့ မဖြေရတော့ဘူး: " + why +
-                "\n⚙️ Settings → Backend Mode ကနေ Auto ပြောင်းရင် "
-                "Local Gemma 4B ကို အလိုအလျောက် fallback ဖြစ်မယ်။")
+        text = "☁️ Cloud Only mode ဖြစ်နေလို့ မဖြေရတော့ဘူး: " + why
+        if causes:
+            text += "\n" + "\n".join(causes)
+        text += ("\n⚙️ Settings → Backend Mode ကနေ Auto ပြောင်းရင် "
+                 "Local Gemma 4B ကို အလိုအလျောက် fallback ဖြစ်မယ်။")
         self._messages.append({"role": "user", "text": user_input})
         self._messages.append({"role": "assistant", "text": text})
         self._trim_messages()
@@ -1973,6 +2245,7 @@ class AgentMode:
         any_output = False
         partial = ""
         final_text = None
+        failed_commit = False   # Release 24: failure already committed
         try:
             for kind, payload in self._try_cloud_stream():
                 if kind == "end":
@@ -1991,49 +2264,63 @@ class AgentMode:
                 # 3's job too, as in handle()'s Cloud Only branch). Same
                 # rollback the non-streaming failure path performs.
                 # mirrors _try_cloud at L648 — keep in sync on any change
-                del self._messages[before:]
-                return
-            be = self._backend_obj()
-            if be is not None:
-                mode = self._mode()
-                system = self._with_memory(self._system_prompt()[0])
-
-                def _step():
-                    # mirrors _handle_cloud at L690 — keep in sync on any change
-                    step = be.step(system=system, messages=self._messages,
-                                   tools=self._tools,
-                                   max_tokens=config.agent_max_tokens(self.name))
-                    record_usage("cloud", step.model or "", step.provider or "",
-                                 mode)
-                    meter_usage("cloud", step.model or "",
-                                step.provider or "", step.usage)
-                    return step
-
-                # mirrors _handle_cloud at L742 — keep in sync on any change.
-                # One reviewer pass, running on the unmodified
-                # _verify_cloud/_reviewer_reply
-                if getattr(self, "_stream_budget_exhausted", False):
-                    # Release 15: the end text is the generated budget
-                    # notice, not a model answer — nothing to verify.
-                    log.info("verify skipped: step budget exhausted "
-                             "(notice turn)")
-                elif self._should_skip_verify():
-                    # Batch 4.2i: nudge-fired turns are tool-grounded.
-                    log.info("verify skipped: capability nudge turn (tool-grounded)")
+                #
+                # Release 24 exception: when tools already executed, the
+                # rollback would erase their only record and Part 3's
+                # fallback would re-run the whole turn, repeating the
+                # side effects. Commit the turn with the failure reply
+                # instead — the same preservation _try_cloud performs.
+                turn_entries = self._messages[before:]
+                if any(m.get("role") == "tool_result"
+                       for m in turn_entries):
+                    final_text = self._commit_failed_stream_turn(
+                        turn_entries)
+                    failed_commit = True
                 else:
-                    final_text = self._verify_cloud(be, final_text, _step)
-            # Sanitize + commit, the mechanism _handle_cloud uses at L744-747:
-            # tool output was already banner-ed and redacted inside
-            # _execute_tool/_guard_result on the way in, so there is nothing
-            # left to strip from the answer — then cap history, then persist.
-            # mirrors _handle_cloud at L744 — keep in sync on any change
-            self.turns += 1
-            self._messages.append({"role": "assistant", "text": final_text,
-                                   "reasoning": getattr(
-                                       self, "_stream_reasoning", "")})
-            # Same backend-matched summarizer as _handle_cloud.
-            self._cap_history(summarize=self._cloud_summarizer(be))
-            self._save_turn()
+                    del self._messages[before:]
+                    return
+            if not failed_commit:
+                be = self._backend_obj()
+                if be is not None:
+                    mode = self._mode()
+                    system = self._with_memory(self._system_prompt()[0])
+
+                    def _step():
+                        # mirrors _handle_cloud at L690 — keep in sync on any change
+                        step = be.step(system=system, messages=self._messages,
+                                       tools=self._tools,
+                                       max_tokens=config.agent_max_tokens(self.name))
+                        record_usage("cloud", step.model or "", step.provider or "",
+                                     mode)
+                        meter_usage("cloud", step.model or "",
+                                    step.provider or "", step.usage)
+                        return step
+
+                    # mirrors _handle_cloud at L742 — keep in sync on any change.
+                    # One reviewer pass, running on the unmodified
+                    # _verify_cloud/_reviewer_reply
+                    if getattr(self, "_stream_budget_exhausted", False):
+                        # Release 15: the end text is the generated budget
+                        # notice, not a model answer — nothing to verify.
+                        log.info("verify skipped: step budget exhausted "
+                                 "(notice turn)")
+                    elif self._should_skip_verify():
+                        # Batch 4.2i: nudge-fired turns are tool-grounded.
+                        log.info("verify skipped: capability nudge turn (tool-grounded)")
+                    else:
+                        final_text = self._verify_cloud(be, final_text, _step)
+                # Sanitize + commit, the mechanism _handle_cloud uses at L744-747:
+                # tool output was already banner-ed and redacted inside
+                # _execute_tool/_guard_result on the way in, so there is nothing
+                # left to strip from the answer — then cap history, then persist.
+                # mirrors _handle_cloud at L744 — keep in sync on any change
+                self.turns += 1
+                self._messages.append({"role": "assistant", "text": final_text,
+                                       "reasoning": getattr(
+                                           self, "_stream_reasoning", "")})
+                # Same backend-matched summarizer as _handle_cloud.
+                self._cap_history(summarize=self._cloud_summarizer(be))
+                self._save_turn()
         except GeneratorExit:
             if any_output:
                 # Commit the partial answer — only because real output
@@ -2060,13 +2347,56 @@ class AgentMode:
                 # mirrors _try_cloud at L648 — keep in sync on any change
                 del self._messages[before:]
             raise
-        except Exception:
+        except Exception as e:
             # mirrors _try_cloud at L648 — keep in sync on any change. Same
             # rollback the non-streaming failure path performs, then the
             # error keeps travelling so the route can report it.
-            del self._messages[before:]
-            raise
+            #
+            # Release 24 exception, same rule as the no-end-frame path
+            # above: when tools already executed, preserve the turn
+            # instead. The error is logged and the turn ends with the
+            # failure reply as its end frame — re-raising would send the
+            # route into a fallback that rolls this transcript back and
+            # re-runs the turn, repeating the side effects. If the
+            # preservation itself fails, the old behaviour stands.
+            turn_entries = self._messages[before:]
+            if any(m.get("role") == "tool_result" for m in turn_entries):
+                log.error("cloud stream died mid-work (%s: %s) — "
+                          "preserving the completed tool work",
+                          type(e).__name__, e)
+                try:
+                    final_text = self._commit_failed_stream_turn(
+                        turn_entries)
+                except Exception:
+                    del self._messages[before:]
+                    raise
+            else:
+                del self._messages[before:]
+                raise
         yield ("end", final_text)
+
+    def _commit_failed_stream_turn(self, turn_entries) -> str:
+        """Commit a streamed cloud turn that died after running tools.
+
+        The streamed twin of _preserve_failed_turn: the transcript
+        already holds the route's user append and the turn's
+        tool_call/tool_result entries — append the failure reply
+        (work summary + classified cause from key state; a stream
+        failure raises no exception to classify from), trim, save.
+        _save_turn clears the checkpoint: the transcript now carries
+        the work and the reply says so.
+        """
+        be = self._backend_obj()
+        mode = self._mode()
+        text = self._failure_turn_text(
+            mode, self._classify_failure(be, None),
+            self._work_summary(turn_entries))
+        self.turns += 1
+        self._messages.append({"role": "assistant", "text": text})
+        self._trim_messages()
+        self._save_turn()
+        record_usage("")
+        return text
 
     def handle(self, user_input: str) -> str:
         if not user_input or not user_input.strip():
@@ -2116,6 +2446,7 @@ class AgentMode:
         assert self._conv is not None
 
         # Bug #3: manual tool-calling loop (transparent + persistable)
+        turn_start = len(self._messages)   # Release 24: this turn's slice
         self._messages.append({"role": "user", "text": user_input})
         resp = self._conv.send_message(user_input)
         self.turns += 1
@@ -2124,67 +2455,86 @@ class AgentMode:
         final_text = ""
         _seen_calls = set()  # A8c: dedup guard
         _finished = False   # Release 15: the loop saw a tool-free response
-        for _ in range(max_iter):
-            tool_calls = None
-            if isinstance(resp, dict):
-                tool_calls = resp.get("tool_calls")
-            if not tool_calls:
-                # No more tool calls — extract final text
-                try:
-                    final_text = resp["content"][0]["text"]
-                except (KeyError, IndexError, TypeError):
-                    final_text = str(resp)
-                _finished = True
-                break
+        try:
+            for _ in range(max_iter):
+                tool_calls = None
+                if isinstance(resp, dict):
+                    tool_calls = resp.get("tool_calls")
+                if not tool_calls:
+                    # No more tool calls — extract final text
+                    try:
+                        final_text = resp["content"][0]["text"]
+                    except (KeyError, IndexError, TypeError):
+                        final_text = str(resp)
+                    _finished = True
+                    break
 
-            # Save tool call to _messages
-            for tc in tool_calls:
-                fn_info = tc.get("function", {}) if isinstance(tc, dict) else {}
-                name = fn_info.get("name", "")
-                args = fn_info.get("arguments", {})
-                # ── A8c: dedup guard ──
-                import json as _j
-                try:
-                    _key = (name, _j.dumps(args, sort_keys=True))
-                except Exception:
-                    _key = (name, str(args))
-                if _key in _seen_calls:
-                    _skip = self._cached_text(
-                        name, args,
-                        f"(skipped: {name} already called with identical args this turn)")
+                # Save tool call to _messages
+                for tc in tool_calls:
+                    fn_info = tc.get("function", {}) if isinstance(tc, dict) else {}
+                    name = fn_info.get("name", "")
+                    args = fn_info.get("arguments", {})
+                    # ── A8c: dedup guard ──
+                    import json as _j
+                    try:
+                        _key = (name, _j.dumps(args, sort_keys=True))
+                    except Exception:
+                        _key = (name, str(args))
+                    if _key in _seen_calls:
+                        _skip = self._cached_text(
+                            name, args,
+                            f"(skipped: {name} already called with identical args this turn)")
+                        self._messages.append({
+                            "role": "tool_result",
+                            "tool": name,
+                            "text": _skip,
+                        })
+                        self._save_checkpoint()   # Release 19
+                        resp = self._conv.send_message({
+                            "role": "tool",
+                            "name": name,
+                            "content": _skip,
+                        })
+                        continue
+                    _seen_calls.add(_key)
+                    # ── end guard ──
+                    self._messages.append({
+                        "role": "tool_call",
+                        "tool": name,
+                        "args": args,
+                    })
+                    result = self._execute_tool(name, args)
+                    self._turn_iter += 1   # budget: one more loop iteration spent
                     self._messages.append({
                         "role": "tool_result",
                         "tool": name,
-                        "text": _skip,
+                        "text": result,
                     })
-                    self._save_checkpoint()   # Release 19
+                    self._save_checkpoint()   # Release 19: result is durable
+                    # Send result back to LLM
                     resp = self._conv.send_message({
                         "role": "tool",
                         "name": name,
-                        "content": _skip,
+                        "content": result,
                     })
-                    continue
-                _seen_calls.add(_key)
-                # ── end guard ──
-                self._messages.append({
-                    "role": "tool_call",
-                    "tool": name,
-                    "args": args,
-                })
-                result = self._execute_tool(name, args)
-                self._turn_iter += 1   # budget: one more loop iteration spent
-                self._messages.append({
-                    "role": "tool_result",
-                    "tool": name,
-                    "text": result,
-                })
-                self._save_checkpoint()   # Release 19: result is durable
-                # Send result back to LLM
-                resp = self._conv.send_message({
-                    "role": "tool",
-                    "name": name,
-                    "content": result,
-                })
+        except Exception as e:
+            # Release 24: the engine died mid-work. With tool
+            # results already in the transcript, the turn must not
+            # die with the exception — its completed work would be
+            # invisible in the saved transcript (the cloud path's
+            # v1.21.0 failure, local edition). Close the turn with
+            # the failure reply instead and let the common tail
+            # below save it; with no tool work done, the old
+            # behaviour (the exception travels) stands.
+            if not any(m.get("role") == "tool_result"
+                       for m in self._messages[turn_start:]):
+                raise
+            log.error("local turn died mid-work (%s: %s) — "
+                      "preserving the completed tool work",
+                      type(e).__name__, e)
+            final_text = self._local_failure_text(
+                self._messages[turn_start:])
+            _finished = True
 
         if not _finished:
             # Release 15: the budget ran out before the loop could look at

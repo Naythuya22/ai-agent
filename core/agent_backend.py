@@ -153,7 +153,17 @@ class CloudError(Exception):
 
 
 class BackendExhausted(Exception):
-    """Every provider ran out of usable keys — the caller drops to local."""
+    """Every provider ran out of usable keys — the caller drops to local.
+
+    ``failures`` (Release 24): per-provider classified failure records
+    from the walk that gave up — {provider, reason, status, kind,
+    retry_after}, reason in failure_reason()'s vocabulary. This is the
+    structured evidence the user-facing failure text is composed from;
+    the exception message itself keeps the raw detail for the log and
+    must never be shown to the user.
+    """
+
+    failures: list = []
 
 
 def failure_reason(err) -> str:
@@ -1548,7 +1558,9 @@ class AgentBackend:
                                              config.agent_max_tokens())
         self.refresh()
         if not self.online():
-            raise BackendExhausted("no network")
+            exc = BackendExhausted("no network")
+            exc.failures = []
+            raise exc
         # The transcript stores {"text": ...}; every cloud API wants
         # {"content": ...}. Skipping this is what made Cloud Only answer
         # "providers exhausted" on a 422 `missing field content`.
@@ -1560,6 +1572,7 @@ class AgentBackend:
         tools = _tool_schemas(tools)
         last: CloudError | None = None
         tried = []
+        failures = []   # Release 24: per-provider classified records
         pin = self.locked_pin()
         providers = self.route_providers()
         if pin is not None and not providers:
@@ -1567,6 +1580,7 @@ class AgentBackend:
             # all (off / no keys / dead / cooling) — say which, and why.
             raise self._locked_exhausted(pin, self.pin_block_reason(pin))
         for provider in providers:
+            prov_last: CloudError | None = None
             adapter = ADAPTERS[provider]()
             prov_cfg = (self.keys.load().get("providers") or {}).get(provider) or {}
             model = prov_cfg.get("model") or ""
@@ -1666,6 +1680,7 @@ class AgentBackend:
                         except CloudError as retry_err:
                             e = retry_err
                     last = e
+                    prov_last = e
                     self._handle_error(provider, entry, e, model)
                     if e.kind in ("network",):
                         # No point walking the remaining providers — none of
@@ -1674,7 +1689,19 @@ class AgentBackend:
                             raise self._locked_exhausted(
                                 pin, "network",
                                 _sanitize(e.message or "", 200))
-                        raise BackendExhausted("network")
+                        exc = BackendExhausted("network")
+                        exc.failures = failures + [{
+                            "provider": provider, "reason": "network",
+                            "status": e.status, "kind": e.kind,
+                            "retry_after": e.retry_after}]
+                        raise exc
+            if prov_last is not None:
+                failures.append({
+                    "provider": provider,
+                    "reason": failure_reason(prov_last),
+                    "status": prov_last.status,
+                    "kind": prov_last.kind,
+                    "retry_after": prov_last.retry_after})
         detail = ""
         if last is not None:
             detail = "%s%s: %s" % (
@@ -1683,13 +1710,65 @@ class AgentBackend:
         if pin is not None:
             # Locked mode never falls through: the pinned provider had
             # its attempts and failed — report the classified reason.
-            raise self._locked_exhausted(
+            exc = self._locked_exhausted(
                 pin, failure_reason(last),
                 _sanitize(last.message or "", 200) if last is not None
                 else "")
-        raise BackendExhausted("providers exhausted: %s%s" % (
+            exc.failures = failures
+            raise exc
+        exc = BackendExhausted("providers exhausted: %s%s" % (
             ", ".join(tried) or "no keys",
             (" — " + detail) if detail else ""))
+        exc.failures = failures
+        raise exc
+
+    def failure_overview(self) -> list:
+        """Why each keyed provider cannot take a turn right now.
+
+        Read from key state only — no provider is called. One entry per
+        provider that holds keys but has no usable one, in fallback
+        order: {"provider", "reason", "wait"} — reason in
+        failure_reason()'s vocabulary, plus "cooling" (every live key
+        parked; wait = seconds until the soonest one frees) and "off".
+
+        Release 24: the user-facing failure text is composed from this
+        (merged with the exception's own records), so a provider that
+        step() never got to try — its key was parked by an earlier step
+        of the same turn — is still named, with its remaining wait.
+        """
+        self.refresh()
+        cfg = self.keys.load()
+        now = time.time()
+        out = []
+        for p in self.fallback_order():
+            prov = (cfg.get("providers") or {}).get(p) or {}
+            entries = (cfg.get("keys") or {}).get(p) or []
+            if not entries:
+                continue
+            if self.keys.healthy(p):
+                continue            # usable — not a blocker
+            if prov.get("enabled") is False:
+                out.append({"provider": p, "reason": "off", "wait": None})
+                continue
+            live = [e for e in entries if e.get("status") != "dead"]
+            if not live:
+                out.append({"provider": p, "reason": "key_invalid",
+                            "wait": None})
+                continue
+            waits = [float(e.get("cooldown_until") or 0) - now
+                     for e in live]
+            if all(w > 0 for w in waits):
+                out.append({"provider": p, "reason": "cooling",
+                            "wait": max(1, int(round(min(waits))))})
+                continue
+            reason = "server_error"
+            for e in live:
+                if e.get("last_error"):
+                    reason = failure_reason(
+                        CloudError("", str(e["last_error"])))
+                    break
+            out.append({"provider": p, "reason": reason, "wait": None})
+        return out
 
     # ---------- one step, streamed ----------
     def step_stream(self, *, system: str, messages: list, tools: list,
