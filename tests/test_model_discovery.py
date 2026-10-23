@@ -407,8 +407,11 @@ class EndpointTests(unittest.TestCase):
         self.assertEqual([m["id"] for m in data["models"]],
                          AB.MODELS["deepseek"])
         for m in data["models"]:
+            # Release 29: the entry shape gains image_input; presets
+            # (no catalogue metadata) always carry it False.
             self.assertEqual(set(m), {"id", "name", "context", "kind",
-                                      "free"})
+                                      "free", "image_input"})
+            self.assertIs(m["image_input"], False)
 
     def test_cache_shape_is_served(self):
         MD.store("openai", MD.normalise("openai", OPENAI_MODELS))

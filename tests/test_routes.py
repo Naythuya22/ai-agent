@@ -305,6 +305,63 @@ class TestAgentImageUpload(unittest.TestCase):
             litert_lm.VISION_SUPPORTED = True
             clear_vision_cache()
 
+    def test_cloud_vision_route_also_opens_the_gate(self):
+        """Release 29: no local vision, but a routed cloud model can
+        read images → staging is accepted; the turn decides where the
+        image goes. The app mode's backend is swapped for one bound
+        to this test's keys (the test_agent_stream_cloud pattern) so
+        the gate probe reads THIS config + catalogue cache, whatever
+        earlier tests left on the shared mode; everything is restored
+        afterwards."""
+        from core import model_discovery as MD
+        from core.agent_backend import AgentBackend
+        from core.key_manager import KeyManager
+        from routes._state import get_agent_mode
+
+        litert_lm.VISION_SUPPORTED = False
+        clear_vision_cache()
+        km = KeyManager()
+        saved_cfg = km.path.read_bytes() if km.path.exists() else None
+        cache_path = MD.default_path()
+        saved_cache = (cache_path.read_bytes()
+                       if cache_path.exists() else None)
+        agent_mode = get_agent_mode()
+        saved_backend = agent_mode._backend
+        try:
+            if km.path.exists():
+                km.path.unlink()
+            km.add_key("openai", "<redacted>", "t")
+            cfg = km.load()
+            cfg["providers"]["openai"]["model"] = "vision-model-x"
+            cfg["prefer_cloud"] = True
+            cfg["cost_ack"] = True
+            km.save()
+            MD.store("openai", [{"id": "vision-model-x",
+                                 "name": "vision-model-x",
+                                 "context": None, "kind": "chat",
+                                 "free": None, "image_input": True}])
+            agent_mode._backend = AgentBackend(
+                keys=km, net_state=lambda: "online",
+                http=lambda *a, **k: {})
+            with closing(self._post("pic.png", "image/png", self.PNG)) as r:
+                self.assertEqual(r.status_code, 200)
+                body = r.get_json()
+            self.assertTrue(body["vision"])
+        finally:
+            agent_mode._backend = saved_backend
+            litert_lm.VISION_SUPPORTED = True
+            clear_vision_cache()
+            if saved_cfg is None:
+                if km.path.exists():
+                    km.path.unlink()
+            else:
+                km.path.write_bytes(saved_cfg)
+            if saved_cache is None:
+                if cache_path.exists():
+                    cache_path.unlink()
+            else:
+                cache_path.write_bytes(saved_cache)
+
     def test_agent_stream_unknown_image_is_400(self):
         with closing(client.post(
             "/api/agent/stream",

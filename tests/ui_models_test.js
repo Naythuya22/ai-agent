@@ -115,7 +115,7 @@ const MODELS_PAYLOAD = {
   fetched_at: '2026-10-23T13:00:00', stored_model: 'gpt-gone-1',
   stored_model_status: 'missing',
   models: [
-    { id: 'gpt-4o', name: 'GPT-4o', context: 128000, kind: 'chat', free: false },
+    { id: 'gpt-4o', name: 'GPT-4o', context: 128000, kind: 'chat', free: false, image_input: true },
     { id: 'gpt-4o-mini', name: 'GPT-4o mini', context: 128000, kind: 'chat', free: true },
     { id: 'text-embedding-3-small', name: 'Text Embedding 3 Small', context: 8191, kind: 'embed', free: false },
     { id: 'whisper-1', name: 'Whisper', context: null, kind: 'audio', free: null },
@@ -218,7 +218,7 @@ const PICKER_MODELS = {
   openai: { ok: true, provider: 'openai', source: 'live', fetched_at: 'x',
             stored_model: 'gpt-4o-mini', stored_model_status: 'ok',
             models: [
-              { id: 'gpt-4o', name: 'GPT-4o', context: 128000, kind: 'chat', free: false },
+              { id: 'gpt-4o', name: 'GPT-4o', context: 128000, kind: 'chat', free: false, image_input: true },
               { id: 'gpt-4o-mini', name: 'GPT-4o mini', context: 128000, kind: 'chat', free: true },
               { id: 'text-embedding-3-small', name: 'Emb', context: 8191, kind: 'embed', free: false },
             ] },
@@ -273,6 +273,10 @@ vm.runInContext(indicatorBlock, pickerSandbox, { filename: 'indicator-block.js' 
   eq(byVal['whisper-1'].disabled, true, 'audio option is disabled');
   eq(byVal['gpt-gone-1'].disabled, false, 'the stored value itself stays selectable');
   ok(byVal['gpt-4o'].textContent.includes('ctx 128K'), 'context size is shown');
+  ok(byVal['gpt-4o'].textContent.includes('📷'),
+     'vision-capable model is badged 📷 (Release 29)');
+  ok(!byVal['gpt-4o-mini'].textContent.includes('📷'),
+     'unflagged model carries no 📷 badge');
   ok(byVal['gpt-4o-mini'].textContent.includes('free'), 'free model is badged');
   ok(!byVal['gpt-4o'].textContent.includes('free'), 'paid model is not badged free');
   eq(registry['set-model-warn'].style.display, '', 'missing warning is visible');
@@ -316,7 +320,7 @@ vm.runInContext(indicatorBlock, pickerSandbox, { filename: 'indicator-block.js' 
   console.log('--- settings model rows (27.1) ---');
   const listBox = registry['set-model-list'];
   eq(listBox.children.map(r => r.textContent),
-     ['gpt-4o · ctx 128K', 'gpt-4o-mini · ctx 128K · free',
+     ['gpt-4o · ctx 128K · 📷', 'gpt-4o-mini · ctx 128K · free',
       'gpt-gone-1 (custom) ✓',
       'text-embedding-3-small · ctx 8.2K — chat မဟုတ် (embed)',
       'whisper-1 — chat မဟုတ် (audio)'],
@@ -366,8 +370,8 @@ vm.runInContext(indicatorBlock, pickerSandbox, { filename: 'indicator-block.js' 
   const box = openaiRow.children.find(c => c.className === 'mp-models');
   ok(!!box, 'openai row gained a model chip box');
   eq(box.children.map(c => c.textContent),
-     ['gpt-4o', 'gpt-4o-mini ✓ · free'],
-     'chips are chat models only, stored one ticked, free badged');
+     ['gpt-4o · 📷', 'gpt-4o-mini ✓ · free'],
+     'chips are chat models only, stored one ticked, free + 📷 badged');
   ok(texts(geminiRow).includes('⚠️'), 'missing stored model is marked ⚠️ in the picker');
 
   // tapping a chip for the "next" provider saves just the model

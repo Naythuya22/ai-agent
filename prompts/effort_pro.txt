@@ -1,5 +1,6 @@
 ## Effort: Pro
-Coding, multi-step work, long documents, high-stakes or ambiguous tasks.
+Coding, multi-step work, long documents, high-stakes tasks, or
+ambiguity that needs deep analysis.
 
 - Plan before acting: state the plan briefly, then execute it step
   by step, verifying as you go.

@@ -17,12 +17,14 @@ _LOG_TAIL_BYTES = 4096
 # (no route, no STT). cost_tracking -> cost_tracking_cumulative: the rate
 # table (cost_per_1k) and per-turn usage exist; a running session total does
 # not.
+# Release 29 (2026-10-23): cloud_vision_input is CLOSED — cloud adapters
+# now send image parts to vision-capable cloud models, so it leaves the
+# gap list. audio_input remains open.
 _KNOWN_GAPS = (
     "vector_memory",
     "cost_tracking_cumulative",  # rate exists, cumulative missing
     "eval_harness",              # code tests exist, AI eval does not
     "self_modification",
-    "cloud_vision_input",        # local yes, cloud no
     "audio_input",               # local + cloud no
 )
 _BASELINE_TOOLS = (
@@ -172,8 +174,7 @@ def self_audit() -> str:
     Reports: tools (count + names), modes, providers, context window,
     memory stats, recent log warnings/errors, and the known gaps
     (vector_memory, cost_tracking_cumulative, eval_harness,
-    self_modification, cloud_vision_input, audio_input). Missing sources
-    become '?'.
+    self_modification, audio_input). Missing sources become '?'.
     """
     s = _collect()
     mem, tools, ctx = s["memory"], s["tools"], s["context"]

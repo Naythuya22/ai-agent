@@ -6,7 +6,8 @@ which then failed only at message time with ``model_not_found``) and ship
 new ones the list never learns about. This module normalises each
 provider's live ``/models`` answer into one shape —
 
-    {"id", "name", "context" (int|None), "kind", "free" (True|False|None)}
+    {"id", "name", "context" (int|None), "kind", "free" (True|False|None),
+     "image_input" (bool)}
 
 with ``kind`` in ``chat | embed | audio | image | other`` — and keeps a
 per-provider on-disk cache so Settings stays fast and works offline.
@@ -21,6 +22,12 @@ Honesty rules, mirroring the other stores:
 * ``free`` is only ever True/False when the provider actually reported
   pricing (OpenRouter); everywhere else it stays None — unknown, never
   guessed.
+* ``image_input`` (Release 29) follows the same doctrine: True from
+  OpenRouter's modality INPUT side, or from a provider-controlled id
+  family whose chat models accept images as a documented platform
+  property (Gemini ``gemini-*``, Anthropic ``claude-*``). Unknown ⇒
+  False — never flagged, so an image turn is never routed to a model
+  on a guess.
 * the cache is a convenience, never a source of truth failures: a
   corrupt cache file is ignored, a failed save is logged, and neither
   ever raises into a request.
@@ -105,7 +112,8 @@ def _kind_from_modality(modality: str) -> str | None:
     return None
 
 
-def _entry(mid, name=None, context=None, kind="chat", free=None):
+def _entry(mid, name=None, context=None, kind="chat", free=None,
+           image_input=False):
     return {
         "id": mid,
         "name": name or mid,
@@ -113,7 +121,39 @@ def _entry(mid, name=None, context=None, kind="chat", free=None):
                    and not isinstance(context, bool) and context > 0 else None,
         "kind": kind if kind in KINDS else "chat",
         "free": free if isinstance(free, bool) else None,
+        "image_input": bool(image_input),
     }
+
+
+def _image_input_from_modality(modality: str) -> bool:
+    """True when OpenRouter's ``architecture.modality`` lists ``image``
+    among the model's INPUTS (``text+image->text``). The input side is
+    the whole question here — the output side decides ``kind`` (see
+    :func:`_kind_from_modality`); a ``text->image`` generator cannot
+    read a photo just because "image" appears in its modality."""
+    if "->" not in modality:
+        return False
+    inputs = [t.strip() for t in modality.split("->", 1)[0].split("+")]
+    return "image" in inputs
+
+
+# Provider-controlled chat families whose models accept image input as
+# a documented platform property (Release 29). Applied only when the
+# entry is a chat model: an embedding or TTS id in the same namespace
+# is not a vision model. Everywhere else the flag stays False unless
+# real metadata (OpenRouter modality) says otherwise.
+_FAMILY_IMAGE_INPUT = (("gemini", "gemini-"), ("anthropic", "claude-"))
+_FAMILY_IMAGE_EXCLUDE = ("tts", "audio", "transcribe", "embed")
+
+
+def _family_image_input(provider: str, mid: str) -> bool:
+    low = (mid or "").lower()
+    if any(x in low for x in _FAMILY_IMAGE_EXCLUDE):
+        return False
+    for prov, prefix in _FAMILY_IMAGE_INPUT:
+        if provider == prov:
+            return low.startswith(prefix)
+    return False
 
 
 def _openrouter_free(entry: dict):
@@ -136,16 +176,20 @@ def _normalise_list_entry(provider: str, entry) -> dict | None:
     kind = kind_from_id(mid)
     free = None
     context = entry.get("context_length")
+    image_input = False
     arch = entry.get("architecture")
     if isinstance(arch, dict):
         modality = str(arch.get("modality") or "").lower()
         by_modality = _kind_from_modality(modality)
         if by_modality is not None:
             kind = by_modality
+        image_input = _image_input_from_modality(modality)
+    if not image_input and kind == "chat":
+        image_input = _family_image_input(provider, mid)
     if provider == "openrouter":
         free = _openrouter_free(entry)
     return _entry(mid, name=entry.get("name"), context=context,
-                  kind=kind, free=free)
+                  kind=kind, free=free, image_input=image_input)
 
 
 def _normalise_gemini_entry(entry) -> dict | None:
@@ -163,8 +207,10 @@ def _normalise_gemini_entry(entry) -> dict | None:
         kind = "embed"
     else:
         kind = kind_from_id(mid)
+    image_input = kind == "chat" and _family_image_input("gemini", mid)
     return _entry(mid, name=entry.get("displayName"),
-                  context=entry.get("inputTokenLimit"), kind=kind)
+                  context=entry.get("inputTokenLimit"), kind=kind,
+                  image_input=image_input)
 
 
 def normalise(provider: str, data) -> list:

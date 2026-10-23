@@ -290,7 +290,8 @@ def api_settings_models(provider):
         payload = {
             "provider": provider,
             "models": [{"id": m, "name": m, "context": None,
-                        "kind": "chat", "free": None}
+                        "kind": "chat", "free": None,
+                        "image_input": False}
                        for m in MODELS.get(provider, [])],
             "source": "fallback", "fetched_at": None,
             "stored_model": "", "stored_model_status": "unknown",

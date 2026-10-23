@@ -31,14 +31,19 @@ bootstrap()
 import config  # noqa: E402
 from core.agent_backend import AgentBackend  # noqa: E402
 from core.key_manager import KeyManager  # noqa: E402
-from modes.agent import AgentMode, _SUMMARY_MARKER  # noqa: E402
+from modes.agent import (  # noqa: E402
+    AgentMode, _SUMMARY_MARKER, _TRIM_MARKER, _TRIM_NOTE)
 
 ALPHA = "<redacted>"
 CLOUD_TEXT = "CLOUD_REPLY_OK"
 LOCAL_TEXT = "LOCAL_MODEL_ANSWER"
-KNOWN = "KNOWN_SUMMARY_TEXT"
-KNOWN2 = "SECOND_SUMMARY_TEXT"
-BACKEND_SUMMARY = "BACKEND_SUMMARY_TEXT"
+# Release 29: the stub summaries carry "seed-0" — a faithful summary
+# keeps at least one salient token of the dropped seed entries, which
+# is exactly what the new compaction fact check asks for. A summary
+# without it would now (correctly) read as a lossy one.
+KNOWN = "KNOWN_SUMMARY_TEXT seed-0"
+KNOWN2 = "SECOND_SUMMARY_TEXT seed-0"
+BACKEND_SUMMARY = "BACKEND_SUMMARY_TEXT seed-0"
 SUMMARY_PHRASE = "Summarize the following conversation"
 CAP = 40
 
@@ -154,6 +159,15 @@ def expected_plain_trim(full):
     return s._messages
 
 
+def expected_marked_trim(full):
+    """Release 29: what a FAILED compaction keeps — the same newest
+    raw history the plain trim would keep, with two slots given to
+    the visible trim-marker pair so the loss is never silent."""
+    return ([{"role": "user", "text": _TRIM_MARKER},
+             {"role": "assistant", "text": _TRIM_NOTE}]
+            + expected_plain_trim(full)[2:])
+
+
 class AutoCompactBase(unittest.TestCase):
     def setUp(self):
         self.km = KeyManager()
@@ -255,7 +269,8 @@ class AutoCompactCloudCase(AutoCompactBase):
 
     def test_backend_summarizer_failure_falls_back_to_plain_trim(self):
         """(b) The backend summary step raises → the turn still lands
-        and the result is identical to the v1.15.0 trim."""
+        and the raw history kept is the v1.15.0 trim — Release 29 adds
+        only the visible trim-marker pair in front of it."""
         transport = SummaryTransport(fail_summary=True)
         self.prep(mode="cloud", transport=transport)
         seed = pairs(44)
@@ -269,16 +284,17 @@ class AutoCompactCloudCase(AutoCompactBase):
         # …and its failure cost nothing but the summary itself.
         msgs = self.mode._messages
         full = seed + [{"role": "user", "text": "hello"}, msgs[-1]]
-        self.assertEqual(msgs, expected_plain_trim(full))
+        self.assertEqual(msgs, expected_marked_trim(full))
         self.assertEqual(len(self.markers(msgs)), 0)
 
     def test_empty_summary_falls_back_to_plain_trim(self):
-        """(c2) An empty summary is a failure, not a pair worth keeping."""
+        """(c2) An empty summary is a failure, not a pair worth keeping.
+        Release 29: the fallback trim carries the visible marker."""
         self.mode._messages = pairs(44)
         self.llm.ask_reply = "   "
         before = list(self.mode._messages)
         self.mode._cap_history()
-        self.assertEqual(self.mode._messages, expected_plain_trim(before))
+        self.assertEqual(self.mode._messages, expected_marked_trim(before))
         self.assertEqual(len(self.markers(self.mode._messages)), 0)
 
     def test_opt_out_uses_plain_trim_and_never_asks(self):
@@ -377,13 +393,14 @@ class AutoCompactLocalCase(AutoCompactBase):
         self.assertEqual(msgs[-1]["text"], LOCAL_TEXT)
 
     def test_local_summarizer_failure_falls_back_to_plain_trim(self):
-        """(c-local) The local summarizer raises → result identical
-        to the v1.15.0 trim, transcript otherwise untouched."""
+        """(c-local) The local summarizer raises → the v1.15.0 trim,
+        transcript otherwise untouched — Release 29 adds only the
+        visible trim-marker pair in front of it."""
         self.mode._messages = pairs(44)
         self.llm.ask_error = RuntimeError("engine gone")
         before = list(self.mode._messages)
         self.mode._cap_history()
-        self.assertEqual(self.mode._messages, expected_plain_trim(before))
+        self.assertEqual(self.mode._messages, expected_marked_trim(before))
         self.assertEqual(len(self.markers(self.mode._messages)), 0)
 
 

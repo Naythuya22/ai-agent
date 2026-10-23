@@ -1,7 +1,9 @@
 """Agent mode — native tool calling (LiteRT automatic loop)."""
 from __future__ import annotations
 
+import base64
 import json
+import re
 import sys
 import time
 from pathlib import Path
@@ -220,8 +222,26 @@ _VERIFY_SYSTEM = (
 # compressed transcript (manual or automatic) always opens with this
 # marker entry followed by an assistant entry holding the summary text.
 # Auto-compaction (Release 18) writes the same pair, so a transcript the
-# two paths produced is indistinguishable downstream.
-_SUMMARY_MARKER = "[Earlier conversation — summary]"
+# two paths produced is indistinguishable downstream. Release 29: the
+# marker carries the condensed framing in Burmese too — the summary it
+# introduces is a compression, and both the user reading the history
+# and the model answering later turns should know detail may be gone.
+_SUMMARY_MARKER = (
+    "[Earlier conversation — summary] "
+    "(အကျဉ်းချုပ်: အစောပိုင်း စကားဝိုင်း ကို ချုံ့ထားတာ ဖြစ်လို့ "
+    "အသေးစိတ် အချို့ မပါနိုင်ပါ)")
+
+# Release 29: the pair _cap_history writes when auto-compaction could
+# not summarize (summarizer failed, or its summary failed the fact
+# check) and the plain trim dropped entries instead. Before R29 that
+# loss was silent — the transcript simply started later. The pair
+# makes it visible in the history itself, in the same shape as the
+# summary pair so nothing downstream has to special-case it.
+_TRIM_MARKER = "[Earlier conversation — trimmed without summary]"
+_TRIM_NOTE = (
+    "🗂️ မှတ်ချက်: မှတ်တမ်း ရှည်လာလို့ အစောပိုင်း စကားဝိုင်း အချို့ကို "
+    "အကျဉ်းချုပ် မလုပ်နိုင်ဘဲ ဖြတ်လိုက်ရပါတယ် — အဲ့ဒီ အပိုင်းတွေ "
+    "အကုန် မမှတ်မိနိုင်တော့ပါ။ လိုအပ်တာရှိရင် ပြန် ပြောပြပေးပါ။")
 
 # System prompt for the cloud summarizer step (Release 18): a cloud
 # turn's summary is written by the backend that served the turn, under
@@ -358,6 +378,85 @@ def _summary_prompt(msgs: list) -> str:
         "Preserve key facts, user questions, decisions, and context needed to continue.\n\n"
         f"{convo}\n\nSummary:"
     )
+
+
+# ── Release 29: compaction fact check + live-turn image payload ──
+#
+# Round 5 (P4) proved the machinery worked but nothing checked WHAT a
+# summarizer handed back: a lossy one ("various topics") replaced the
+# head and the early facts vanished inside a "successful" compaction.
+# The check below is deliberately cheap and deterministic — salient
+# tokens only, no second model call: numbers (3+ digits), Latin words,
+# hyphenated codenames (Zebra-42) and long Burmese tokens found in the
+# dropped entries must mostly survive into the summary. It is a floor
+# against pathological loss, NOT a quality judge; a fluent summary
+# that keeps the checkable facts passes untouched.
+#
+# Tokenisation notes: a codename like "Zebra-42" is checked through
+# its alpha part ("zebra", from the Latin rule) — a dedicated
+# codename token would make every member of a numbered series
+# (seed-0, seed-1, …) a distinct must-keep token no summary could
+# ever carry, and the 3-digit floor keeps dates' fragments and small
+# counts out of the number rule the same way.
+
+_SALIENT_MIN_OVERLAP = 0.2
+
+
+def _salient_tokens(text: str) -> set:
+    """The checkable tokens of one text (see the note above)."""
+    text = str(text or "")
+    out = set()
+    for num in re.findall(r"\d{3,}(?:,\d{3})*", text):
+        out.add(num.replace(",", ""))
+    for word in re.findall(r"[A-Za-z]{3,}", text):
+        out.add(word.lower())
+    for token in re.split(r"\s+", text):
+        burmese = sum(1 for ch in token if "\u1000" <= ch <= "\u109f")
+        if burmese >= 5:
+            out.add(token.strip(".,;:!?()[]\"'"))
+    return {t for t in out if t}
+
+
+def _summary_keeps_facts(dropped: list, summary: str) -> bool:
+    """True when ``summary`` keeps a sane share of the dropped facts.
+
+    No salient tokens in the dropped entries ⇒ nothing checkable ⇒
+    pass (the summarizer is trusted, as before R29). Otherwise at
+    least ``_SALIENT_MIN_OVERLAP`` of them must appear in the summary;
+    below that the summary is treated as a compaction failure, so the
+    caller falls back to raw history + the visible trim marker rather
+    than entombing the loss inside a plausible-looking summary.
+    """
+    salient = set()
+    for m in dropped or []:
+        salient |= _salient_tokens((m or {}).get("text", ""))
+    if not salient:
+        return True
+    flat = str(summary or "").lower().replace(",", "")
+    kept = sum(1 for t in salient if t in flat)
+    return kept / len(salient) >= _SALIENT_MIN_OVERLAP
+
+
+def _wire_image(image) -> dict:
+    """The live-turn image payload stored on the user entry.
+
+    Accepts {"data", "mime"} ready-made or {"path", "mime"} (read and
+    base64-encoded here, once, so later steps of the turn reuse the
+    same bytes). The payload NEVER persists: _save_turn and
+    _save_checkpoint write _durable() copies without it — stored
+    sessions keep the text-only design, so a replay never needs the
+    staged file back (Release 29).
+    """
+    if not isinstance(image, dict):
+        raise ValueError("image must be a dict")
+    data = image.get("data")
+    mime = image.get("mime") or "image/png"
+    if not data:
+        path = image.get("path")
+        if not path:
+            raise ValueError("image carries neither data nor path")
+        data = base64.b64encode(Path(path).read_bytes()).decode("ascii")
+    return {"data": data, "mime": mime}
 
 
 class AgentMode:
@@ -1134,6 +1233,15 @@ class AgentMode:
         summary = summarize(msgs[:cut])
         if not summary:
             return False
+        if not _summary_keeps_facts(msgs[:cut], summary):
+            # Release 29: a summary that drops the checkable facts is
+            # a failed compaction, not a successful one — return False
+            # so _cap_history keeps the newest raw history and marks
+            # the loss visibly instead of entombing it in the summary.
+            log.warning("auto-compact: summary failed the fact check "
+                        "(salient tokens of %d dropped entries mostly "
+                        "absent) — falling back to raw trim", cut)
+            return False
         self._messages = (
             [{"role": "user", "text": _SUMMARY_MARKER},
              {"role": "assistant", "text": summary}]
@@ -1153,14 +1261,32 @@ class AgentMode:
         _trim_messages always runs last with its unchanged behaviour —
         after a successful compaction it is a no-op by construction.
         ``summarize`` is threaded to _auto_compact unchanged.
+
+        Release 29: when compaction was on and attempted but did NOT
+        produce a summary pair, the fallback trim no longer drops the
+        head silently — it keeps two slots for a visible marker pair
+        (_TRIM_MARKER + _TRIM_NOTE) saying the early conversation was
+        cut without a summary. With compaction disabled by the user
+        the trim is the designed behaviour and stays unmarked, exactly
+        as before.
         """
+        compacted = False
         if (len(self._messages) > max_entries
                 and config.AUTO_COMPACT_ENABLED):
             try:
-                self._auto_compact(max_entries, summarize)
+                compacted = self._auto_compact(max_entries, summarize)
             except Exception as e:
                 log.warning("auto-compact failed, plain trim instead "
                             "(%s: %s)", type(e).__name__, e)
+            if not compacted:
+                before = len(self._messages)
+                self._trim_messages(max(max_entries - 2, 1))
+                if len(self._messages) < before:
+                    self._messages = (
+                        [{"role": "user", "text": _TRIM_MARKER},
+                         {"role": "assistant", "text": _TRIM_NOTE}]
+                        + self._messages)
+                    return
         self._trim_messages(max_entries)
 
     # ── hybrid backend (cloud when WiFi + keys, local otherwise) ──
@@ -1227,9 +1353,13 @@ class AgentMode:
         "exhausted": "Cloud provider အားလုံး မအောင်မြင်တော့ဘူး",
         # Release 24: every key merely parked — temporary, with a wait.
         "cooling": "Provider key တွေ အကုန် cooldown ထဲမှာ ရှိတယ်",
+        # Release 29: Cloud Only and no routed model can read images.
+        "vision_unavailable":
+            "ရွေးထားတဲ့ cloud model တွေက ပုံကို မဖတ်နိုင်ဘူး — "
+            "Settings → Models မှာ 📷 တံဆိပ် ပါတဲ့ model ပြောင်းရွေးပါ",
     }
 
-    def _try_cloud(self, user_input: str, system: str = ""):
+    def _try_cloud(self, user_input: str, system: str = "", image=None):
         """One cloud attempt for this turn; None → answer locally.
 
         Every failure path rolls the transcript back to exactly where it was,
@@ -1284,7 +1414,8 @@ class AgentMode:
                     if classified["park_only"]:
                         return self._cloud_only_reply(
                             user_input, "cooling",
-                            causes=classified["lines"])
+                            causes=classified["lines"], be=be,
+                            classified=classified)
                 return self._cloud_only_reply(user_input, reason)
             return None
         before = len(self._messages)
@@ -1293,8 +1424,44 @@ class AgentMode:
         locked_provider = ""
         locked_detail = ""
         failure_exc = None
+        turn_only = None
+        if image is not None:
+            # Release 29: an image turn may only run where the model
+            # can actually read the image. Locked mode: the pin alone
+            # decides — incapable means the guidance reply below, never
+            # a silent text-only answer that drops the photo, and never
+            # a quiet switch away from the chosen pin. Auto / Cloud
+            # Only: the turn's route narrows to the vision-capable
+            # providers; with none capable, Cloud Only says so and
+            # Auto declines (None) to the local engine, whose own
+            # vision gate decides there — the same shape as a text
+            # turn the cloud cannot serve.
+            try:
+                pin = be.locked_pin()
+            except Exception:
+                pin = None
+            if pin is not None:
+                try:
+                    capable = be.model_image_input(pin)
+                except Exception:
+                    capable = False
+                if not capable:
+                    return self._locked_vision_reply(user_input, pin)
+            else:
+                try:
+                    capable = be.cloud_vision_providers()
+                except Exception:
+                    capable = []
+                if capable:
+                    turn_only = capable
+                elif mode == "cloud":
+                    return self._cloud_only_reply(
+                        user_input, "vision_unavailable")
+                else:
+                    return None
         try:
-            return self._handle_cloud(user_input, be, system=system)
+            return self._handle_cloud(user_input, be, system=system,
+                                      image=image, turn_only=turn_only)
         except Exception as e:
             from core.agent_backend import BackendExhausted
             from core.key_manager import redact
@@ -1341,7 +1508,7 @@ class AgentMode:
         del self._messages[before:]
         if locked_reason:
             return self._locked_reply(user_input, locked_provider,
-                                      locked_reason, locked_detail)
+                                      locked_reason, locked_detail, be=be)
         if mode == "cloud":
             # Release 24: the reply is composed from the classified
             # failure records — never from the exception's raw text
@@ -1349,9 +1516,11 @@ class AgentMode:
             classified = self._classify_failure(be, failure_exc)
             if classified["park_only"]:
                 return self._cloud_only_reply(
-                    user_input, "cooling", causes=classified["lines"])
+                    user_input, "cooling", causes=classified["lines"],
+                    be=be, classified=classified)
             return self._cloud_only_reply(
-                user_input, reason, causes=classified["lines"])
+                user_input, reason, causes=classified["lines"],
+                be=be, classified=classified)
         return None
 
     # ── failure replies (Release 24) ───────────────────────────────
@@ -1440,7 +1609,8 @@ class AgentMode:
         except Exception as e:
             log.warning("failure classification failed (%s: %s)",
                         type(e).__name__, e)
-            return {"lines": [], "park_only": False, "wait": None}
+            return {"lines": [], "park_only": False, "wait": None,
+                    "reasons": set()}
         from core.key_manager import PROVIDER_LABELS
         lines = []
         for p in order:
@@ -1460,7 +1630,11 @@ class AgentMode:
             merged[p]["reason"] in ("cooling", "rate_limited")
             and merged[p]["wait"] for p in order)
         return {"lines": lines, "park_only": park_only,
-                "wait": min(known) if known else None}
+                "wait": min(known) if known else None,
+                # Release 29: the raw reason vocabulary, so reply
+                # builders can react to a class (quota_exhausted)
+                # without re-parsing the rendered Burmese lines.
+                "reasons": {merged[p]["reason"] for p in order}}
 
     # Args that name what a tool call acted on, in preference order.
     _TARGET_KEYS = ("path", "file", "filename", "filepath", "directory",
@@ -1564,7 +1738,7 @@ class AgentMode:
         return out
 
     def _failure_turn_text(self, mode: str, classified: dict,
-                           summary: str) -> str:
+                           summary: str, hint: str = "") -> str:
         """The failure reply closing a preserved cloud turn."""
         lines = []
         if mode == "cloud":
@@ -1579,6 +1753,8 @@ class AgentMode:
         if mode == "cloud":
             lines.append("⚙️ Settings → Backend Mode ကနေ Auto ပြောင်းရင် "
                          "Local Gemma 4B ကို အလိုအလျောက် fallback ဖြစ်မယ်။")
+        if hint:
+            lines.append(hint)
         lines.append("ဆက်လုပ်စေချင်ရင် \"ဆက်လုပ်ပါ\" လို့ ပြန်ပြောပါ — "
                      "ကျန်နေတဲ့ အလုပ်ကို ဆက်လုပ်ပေးပါမယ်။")
         return "\n".join(lines)
@@ -1610,25 +1786,50 @@ class AgentMode:
         already in the Release 17 ledger via meter_usage).
         """
         summary = self._work_summary(turn_entries)
+        # NB for the hint lookups below: this method's ``be`` is the
+        # BackendExhausted exception (the _classify_failure input), so
+        # _second_key_hint is called bare — it resolves the mode's real
+        # backend itself.
         if locked is not None:
             provider, reason, detail = locked
-            text = self._locked_text(provider, reason, detail)
+            text = self._locked_text(provider, reason, detail,
+                                     hint=self._second_key_hint())
             if summary:
                 text += "\n" + summary
         else:
+            classified = self._classify_failure(be, exc)
+            hint = (self._second_key_hint()
+                    if "quota_exhausted" in classified["reasons"] else "")
             text = self._failure_turn_text(
-                mode, self._classify_failure(be, exc), summary)
+                mode, classified, summary, hint=hint)
         self._messages.append({"role": "assistant", "text": text})
         self._trim_messages()
         self._save_turn()
         record_usage("")
         return text
 
+    @staticmethod
+    def _durable(messages) -> list:
+        """The transcript as durable stores may keep it (Release 29).
+
+        Identical to the live transcript except that a user entry's
+        live-turn image payload is stripped: the image serves the one
+        turn that carried it, and a stored session must never need the
+        staged file (or hold megabytes of base64) to replay. Entries
+        without an image pass through as the same objects.
+        """
+        out = []
+        for m in messages or []:
+            if isinstance(m, dict) and "image" in m:
+                m = {k: v for k, v in m.items() if k != "image"}
+            out.append(m)
+        return out
+
     def _save_turn(self) -> None:
         if not self._store:
             return
         try:
-            self._store.save_mode("agent", self._messages)
+            self._store.save_mode("agent", self._durable(self._messages))
         except Exception as e:
             log.error("could not save agent turn (session %s): %s: %s",
                       getattr(self, "session_id", None), type(e).__name__, e)
@@ -1671,7 +1872,7 @@ class AgentMode:
         try:
             from core import checkpoint_store
             checkpoint_store.save_checkpoint(
-                sid, user_text, list(self._messages), steps)
+                sid, user_text, self._durable(self._messages), steps)
         except Exception as e:
             log.warning("checkpoint save failed (session %s): %s: %s",
                         sid, type(e).__name__, e)
@@ -1760,27 +1961,66 @@ class AgentMode:
         "server_error": "Provider ဘက်က ပြဿနာ ရှိနေတယ်",
     }
 
+    # Release 29 (round-5 finding F3): when the user's whole cloud
+    # life is ONE provider, a locked stop or a dead daily quota leaves
+    # them with nothing — and the old replies only said "switch
+    # provider", never that a second free key is what makes switching
+    # possible on a day like that. The line is deterministic text (no
+    # provider call), appended only when exactly one provider is
+    # usable; with two or more it would be noise. It extends the
+    # Release 28 Settings steering (item I) into the failure reply
+    # itself, where the user actually meets the dead end.
+    SECOND_KEY_HINT = (
+        "💡 အခမဲ့ key နောက်တစ်ခု (ဥပမာ Groq) ထည့်ထားရင် ဒီလို "
+        "အခြေအနေမျိုးမှာ အဲ့ဒီ key နဲ့ ဆက် သုံးနိုင်ပါတယ် — "
+        "Settings မှာ ထည့်နိုင်ပါတယ်။")
+
+    def _second_key_hint(self, be=None) -> str:
+        """The F3 steering line, or "" when it does not apply.
+
+        Applies only when the user has exactly ONE live provider
+        (backend.live_providers: a non-dead key exists; the failure
+        being reported has usually just parked that key, so the
+        cooldown-aware usable() would undercount exactly here). Any
+        doubt — no backend, uncountable state — answers "": a
+        steering line printed on a guess would be worse than none.
+        """
+        if be is None:
+            be = self._backend_obj()
+        if be is None:
+            return ""
+        try:
+            live = be.live_providers()
+        except Exception:
+            return ""
+        return self.SECOND_KEY_HINT if len(live) == 1 else ""
+
     def _locked_text(self, provider: str, reason: str,
-                     detail: str = "") -> str:
-        """The locked-mode stop text (Release 9 wording, unchanged)."""
+                     detail: str = "", hint: str = "") -> str:
+        """The locked-mode stop text (Release 9 wording, unchanged —
+        Release 29 only appends the optional F3 hint line)."""
         from core.key_manager import PROVIDER_LABELS
         label = PROVIDER_LABELS.get(provider, provider or "provider")
         why = self.LOCKED_REASONS.get(reason, reason or "server_error")
         if detail:
             why = why + " — " + detail
-        return ("🔒 Lock ချထားတဲ့ " + label + " က မဖြေနိုင်ဘူး: " + why +
+        text = ("🔒 Lock ချထားတဲ့ " + label + " က မဖြေနိုင်ဘူး: " + why +
                 "\nAuto switch ပိတ်ထားလို့ တခြား model ကို အလိုအလျောက် "
                 "မပြောင်းဘူး။ ပြောင်းသုံးချင်ရင် model chip ကို နှိပ်ပြီး "
                 "ရွေးပါ၊ ဒါမှမဟုတ် Settings → Backend မှာ Auto switch "
                 "ပြန်ဖွင့်ပါ။")
+        if hint:
+            text += "\n" + hint
+        return text
 
     def _locked_reply(self, user_input: str, provider: str,
-                      reason: str, detail: str = "") -> str:
+                      reason: str, detail: str = "", be=None) -> str:
         """Locked mode (Release 9): the pinned provider failed and auto
         switch is off, so the turn stops here with the reason — the user
         pinned that model on purpose and asked to decide themselves,
         not to be switched quietly."""
-        text = self._locked_text(provider, reason, detail)
+        text = self._locked_text(provider, reason, detail,
+                                 hint=self._second_key_hint(be))
         self._messages.append({"role": "user", "text": user_input})
         self._messages.append({"role": "assistant", "text": text})
         self._trim_messages()
@@ -1789,8 +2029,30 @@ class AgentMode:
         record_usage("")
         return text
 
+    def _locked_vision_reply(self, user_input: str, provider: str) -> str:
+        """Locked mode + an image turn the pinned model cannot read
+        (Release 29): stop with the limitation and the ways out. The
+        image is never sent somewhere the user did not choose, and the
+        turn never degrades to a text-only answer that silently drops
+        the photo. Same transcript contract as _locked_reply."""
+        from core.key_manager import PROVIDER_LABELS
+        label = PROVIDER_LABELS.get(provider, provider or "provider")
+        text = ("🔒 Lock ချထားတဲ့ " + label + " ရဲ့ model က ပုံကို "
+                "မဖတ်နိုင်လို့ ဒီအလှည့်မှာ ပုံကို မပို့လိုက်ပါ။\n"
+                "ပုံ မေးခွန်း သုံးချင်ရင် — Settings → Models မှာ 📷 "
+                "တံဆိပ် ပါတဲ့ model တစ်ခု ရွေးပါ၊ ဒါမှမဟုတ် Auto "
+                "switch ပြန်ဖွင့်ပါ၊ ဒါမှမဟုတ် local vision model "
+                "ရှိရင် Backend Mode ကို Auto/Local ပြောင်းပါ။")
+        self._messages.append({"role": "user", "text": user_input})
+        self._messages.append({"role": "assistant", "text": text})
+        self._trim_messages()
+        self._save_turn()
+        record_usage("")
+        return text
+
     def _cloud_only_reply(self, user_input: str, reason: str,
-                          detail: str = "", causes=None) -> str:
+                          detail: str = "", causes=None, be=None,
+                          classified=None) -> str:
         """Cloud Only mode with no usable provider: say so instead of
         quietly answering from the local 4B model the user just switched off.
 
@@ -1798,6 +2060,11 @@ class AgentMode:
         _classify_failure, printed under the headline in place of the
         old raw ``detail``. With neither, the output is exactly the
         pre-R24 shape every simple-reason caller relies on.
+
+        Release 29: when the classified failure includes a dead daily
+        quota and the user has exactly one usable provider, the F3
+        second-key steering line joins the reply (before the Settings
+        line, with the causes it explains).
         """
         why = self.CLOUD_ONLY_REASONS.get(reason, reason or "exhausted")
         if detail:
@@ -1805,6 +2072,11 @@ class AgentMode:
         text = "☁️ Cloud Only mode ဖြစ်နေလို့ မဖြေရတော့ဘူး: " + why
         if causes:
             text += "\n" + "\n".join(causes)
+        if classified is not None \
+                and "quota_exhausted" in classified.get("reasons", set()):
+            hint = self._second_key_hint(be)
+            if hint:
+                text += "\n" + hint
         text += ("\n⚙️ Settings → Backend Mode ကနေ Auto ပြောင်းရင် "
                  "Local Gemma 4B ကို အလိုအလျောက် fallback ဖြစ်မယ်။")
         self._messages.append({"role": "user", "text": user_input})
@@ -1925,12 +2197,25 @@ class AgentMode:
                  max_iter, order)
         return "\n".join(lines)
 
-    def _handle_cloud(self, user_input: str, be, system: str = "") -> str:
-        """Mirror of the local tool loop, but every step goes to the provider."""
+    def _handle_cloud(self, user_input: str, be, system: str = "",
+                      image=None, turn_only=None) -> str:
+        """Mirror of the local tool loop, but every step goes to the provider.
+
+        ``image`` (Release 29): the live turn's image payload source —
+        {"path"/"data", "mime"} — attached to the appended user entry
+        for this turn only. ``turn_only``: the vision-capable route
+        subset _try_cloud resolved; the step closure applies it to
+        every step that does not narrow the route itself, so the whole
+        turn (image in history throughout) stays on models that can
+        read the image.
+        """
         import json as _json
 
         mode = self._mode()
-        self._messages.append({"role": "user", "text": user_input})
+        entry = {"role": "user", "text": user_input}
+        if image is not None:
+            entry["image"] = _wire_image(image)
+        self._messages.append(entry)
         self.turns += 1
         system = self._with_memory(system or self._system_prompt()[0])
 
@@ -1938,7 +2223,7 @@ class AgentMode:
             step = be.step(system=system, messages=self._messages,
                            tools=self._tools if tools is None else tools,
                            max_tokens=config.agent_max_tokens(self.name),
-                           only=only)
+                           only=only if only is not None else turn_only)
             # Recorded per successful step, not once at the end: the provider
             # can change mid-turn when a key runs out, and the chip must show
             # the model that produced the answer the user is reading.
@@ -2036,11 +2321,18 @@ class AgentMode:
         else:
             final_text = self._verify_cloud(be, final_text, _step)
         if not exhausted:
-            # Release 26: Burmese quality gate on the final text (the
-            # budget notice is generated text — never gated, like the
-            # verify skip above).
-            final_text = self._quality_retry(
-                be, final_text, _step, answerer=step.provider or "")
+            if image is not None:
+                # Release 29: the quality retry re-asks on the NEXT
+                # route provider — for an image turn that may be a
+                # text-only model, which would receive a photo it
+                # cannot read. Image turns keep their single pass.
+                log.info("quality retry skipped: image turn")
+            else:
+                # Release 26: Burmese quality gate on the final text
+                # (the budget notice is generated text — never gated,
+                # like the verify skip above).
+                final_text = self._quality_retry(
+                    be, final_text, _step, answerer=step.provider or "")
         self._messages.append({"role": "assistant", "text": final_text,
                                "reasoning": step.reasoning})
         # A cloud turn's history is summarized by this same backend
@@ -2615,9 +2907,12 @@ class AgentMode:
         """
         be = self._backend_obj()
         mode = self._mode()
+        classified = self._classify_failure(be, None)
+        hint = (self._second_key_hint(be)
+                if "quota_exhausted" in classified["reasons"] else "")
         text = self._failure_turn_text(
-            mode, self._classify_failure(be, None),
-            self._work_summary(turn_entries))
+            mode, classified, self._work_summary(turn_entries),
+            hint=hint)
         self.turns += 1
         self._messages.append({"role": "assistant", "text": text})
         self._trim_messages()
@@ -2625,7 +2920,11 @@ class AgentMode:
         record_usage("")
         return text
 
-    def handle(self, user_input: str) -> str:
+    def handle(self, user_input: str, image=None) -> str:
+        """One user turn. ``image`` (Release 29) is the live turn's
+        image payload source for the CLOUD path; the on-device vision
+        path lives on the v1 SSE route (build_vision_message), so an
+        image the cloud declines is not re-attached here."""
         if not user_input or not user_input.strip():
             raise ValueError("user_input must be non-empty")
         self._clear_turn_cache()   # a new user turn starts a new cache
@@ -2660,7 +2959,8 @@ class AgentMode:
         # The prompt is resolved here, once, and handed to both branches: a
         # turn that falls back mid-way keeps the prompt it started with.
         system = self._system_prompt()[0]
-        cloud_text = self._try_cloud(user_input, system=system)
+        cloud_text = self._try_cloud(user_input, system=system,
+                                     image=image)
         if cloud_text is not None:
             self._finish_turn(user_input, cloud_text)
             return cloud_text

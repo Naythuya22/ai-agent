@@ -901,7 +901,21 @@ def normalize(messages: list) -> list:
             content = m.get("text")
             if content is None:
                 content = m.get("content", "")
-            if isinstance(content, list):
+            image = m.get("image") if role == "user" else None
+            if isinstance(image, dict) and image.get("data"):
+                # Release 29: the live turn's image rides as one
+                # canonical part — {"type": "image", "mime", "data"
+                # (base64)} — and each adapter renders its own wire
+                # shape from it. Only the live turn carries the field:
+                # durable stores strip it (see AgentMode._durable), so
+                # a replayed session is text-only, exactly as before.
+                out.append({"role": role, "content": [
+                    {"type": "text", "text": content or ""},
+                    {"type": "image",
+                     "mime": image.get("mime") or "image/png",
+                     "data": image["data"]},
+                ]})
+            elif isinstance(content, list):
                 out.append({"role": role, "content": content})
             else:
                 entry = {"role": role, "content": content or ""}
@@ -1036,6 +1050,34 @@ def _tool_calls_from_openai(message: dict) -> list:
 
 # ─────────────────────────── adapters ───────────────────────────
 
+def _openai_image_part(part: dict) -> dict:
+    """One canonical image part → the OpenAI dialect's image_url part
+    (a base64 data URI — the staged upload never leaves the device as
+    a URL, so there is nothing for the provider to fetch)."""
+    return {"type": "image_url", "image_url": {"url": "data:%s;base64,%s" % (
+        part.get("mime") or "image/png", part.get("data") or "")}}
+
+
+def _openai_wire(message: dict) -> dict:
+    """Translate canonical multi-part content for the OpenAI dialect.
+
+    Text parts and string content pass through byte-identical; only
+    the canonical image part changes shape. Applied per message in
+    OpenAIAdapter.request — the one place every OpenAI-dialect
+    provider (OpenAI, OpenRouter, DeepSeek, Groq, SiliconFlow,
+    Custom) is funnelled through, streaming included."""
+    content = message.get("content")
+    if not isinstance(content, list):
+        return message
+    parts = []
+    for part in content:
+        if isinstance(part, dict) and part.get("type") == "image":
+            parts.append(_openai_image_part(part))
+        else:
+            parts.append(part)
+    return {**message, "content": parts}
+
+
 class Adapter:
     provider = ""
 
@@ -1077,7 +1119,7 @@ class OpenAIAdapter(Adapter):
                 {"Authorization": "Bearer %s" % key})
 
     def request(self, *, key, model, system, messages, tools, max_tokens):
-        msgs = list(messages or [])
+        msgs = [_openai_wire(m) for m in (messages or [])]
         # OpenAI-compatible APIs take the system prompt as a message;
         # dropping it made every cloud reply lose the ညီ persona (and
         # the "reply in Burmese" rule) — English answers only.
@@ -1151,7 +1193,20 @@ class GeminiAdapter(Adapter):
         for m in messages:
             role = "model" if m["role"] == "assistant" else "user"
             parts = []
-            if m["role"] == "assistant" and m.get("tool_calls"):
+            if isinstance(m.get("content"), list):
+                # Release 29: canonical multi-part content (a user
+                # turn carrying an image) → Gemini parts: text stays
+                # text, the image becomes inline_data.
+                for part in m["content"]:
+                    if not isinstance(part, dict):
+                        continue
+                    if part.get("type") == "image":
+                        parts.append({"inline_data": {
+                            "mime_type": part.get("mime") or "image/png",
+                            "data": part.get("data") or ""}})
+                    elif part.get("type") == "text":
+                        parts.append({"text": part.get("text", "")})
+            elif m["role"] == "assistant" and m.get("tool_calls"):
                 for tc in m["tool_calls"]:
                     fn = tc.get("function") or {}
                     parts.append({"functionCall": {
@@ -1283,6 +1338,23 @@ class AnthropicAdapter(Adapter):
                     "tool_use_id": m.get("tool_call_id") or "call_x",
                     "content": m.get("content", ""),
                 }]})
+            elif isinstance(m.get("content"), list):
+                # Release 29: canonical multi-part content → Anthropic
+                # blocks: text stays a text block, the image becomes a
+                # base64 source block.
+                blocks = []
+                for part in m["content"]:
+                    if not isinstance(part, dict):
+                        continue
+                    if part.get("type") == "image":
+                        blocks.append({"type": "image", "source": {
+                            "type": "base64",
+                            "media_type": part.get("mime") or "image/png",
+                            "data": part.get("data") or ""}})
+                    elif part.get("type") == "text":
+                        blocks.append({"type": "text",
+                                       "text": part.get("text", "")})
+                out.append({"role": "user", "content": blocks})
             else:
                 out.append({"role": "user",
                             "content": m.get("content", "")})
@@ -1701,6 +1773,56 @@ class AgentBackend:
         if pin is None:
             return self.usable()
         return [pin] if pin in self.usable() else []
+
+    def model_image_input(self, provider: str) -> bool:
+        """Can the provider's configured model accept an image?
+
+        Reads the flag discovery recorded for the exact configured
+        model id (live catalogue → cache → presets, via list_models,
+        which never raises). Anything unknown — no list, model absent
+        from it, flag missing on an older cache entry — answers False:
+        an image turn is only ever routed on positive evidence
+        (Release 29).
+        """
+        try:
+            cfg = self.keys.load()
+            model = ((cfg.get("providers") or {}).get(provider)
+                     or {}).get("model") or ""
+            if not model:
+                return False
+            for entry in self.list_models(provider).get("models") or []:
+                if isinstance(entry, dict) and entry.get("id") == model:
+                    return bool(entry.get("image_input"))
+        except Exception as e:
+            log.warning("image-input check for %s failed: %s",
+                        provider, e)
+        return False
+
+    def cloud_vision_providers(self) -> list:
+        """The providers an image turn may use right now, in route
+        order: the route step() would take (the pin alone when locked)
+        filtered to those whose configured model accepts images."""
+        return [p for p in self.route_providers()
+                if self.model_image_input(p)]
+
+    def live_providers(self) -> list:
+        """Providers the user HAS, in fallback order: enabled, with at
+        least one key that is not dead. Cooldowns are ignored on
+        purpose — a parked key still belongs to the user and works
+        again soon; only a dead key (or none) makes a provider truly
+        absent. Release 29's steering count uses this, not usable():
+        the failure being reported has usually just parked the very
+        key usable() would then refuse to count."""
+        cfg = self.keys.load()
+        out = []
+        for p in self.fallback_order():
+            pcfg = (cfg.get("providers") or {}).get(p) or {}
+            if not pcfg.get("enabled", True):
+                continue
+            if any(e.get("status") != "dead"
+                   for e in self.keys.entries(p)):
+                out.append(p)
+        return out
 
     def pin_block_reason(self, pin: str) -> str:
         """Why the pinned provider cannot take a turn right now:

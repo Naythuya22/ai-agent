@@ -149,7 +149,7 @@ class _CloudishMode(agent_mod.AgentMode):
     def _is_http(self):
         return False
 
-    def _try_cloud(self, user_input, system=None):
+    def _try_cloud(self, user_input, system=None, image=None):
         return "answered"
 
 

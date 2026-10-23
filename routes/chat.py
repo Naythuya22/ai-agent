@@ -176,6 +176,50 @@ def _model_path_for_vision() -> str:
         return ""
 
 
+def _cloud_vision_available() -> bool:
+    """Release 29: could a cloud route read an image right now?
+
+    The route the turn would actually take (the locked pin alone when
+    locked), filtered to providers whose configured model discovery
+    flags as image-capable. Any failure answers False — the local
+    vision gate remains the authority it always was.
+    """
+    try:
+        ensure_modes()
+        be = get_agent_mode()._backend_obj()
+        if be is None:
+            return False
+        return bool(be.cloud_vision_providers())
+    except Exception as e:
+        log.debug("cloud vision check failed: %s: %s",
+                  type(e).__name__, e)
+        return False
+
+
+def _vision_unavailable_response(reason: str):
+    """The neither-local-nor-cloud refusal (Release 29): Burmese
+    guidance first — what is missing and the two ways to fix it — with
+    the local engine's reason kept for diagnosis and the OCR
+    suggestion the pre-R29 shape carried."""
+    return jsonify({
+        "error": "ပုံ မေးခွန်း မရနိုင်သေးပါ — local vision model "
+                 "မရှိသလို ရွေးထားတဲ့ cloud model ကလည်း ပုံ "
+                 "မဖတ်နိုင်ပါ။ Settings → Models မှာ 📷 တံဆိပ် "
+                 "ပါတဲ့ model တစ်ခု ရွေးပါ၊ ဒါမှမဟုတ် local vision "
+                 "model ထည့်ပါ။ (vision unavailable — %s)" % reason,
+        "suggestion": VISION_OCR_SUGGESTION,
+    }), 400
+
+
+def _image_mime(path) -> str:
+    """The staged file's mime, from its extension (upload wrote it)."""
+    suffix = Path(path).suffix.lower()
+    for mime, ext in IMAGE_MIMES.items():
+        if ext == suffix:
+            return mime
+    return "image/png"
+
+
 @bp.route("/api/agent/upload", methods=["POST"])
 def api_agent_upload():
     """Validate + stage an image for vision input (Agent mode only)."""
@@ -198,12 +242,12 @@ def api_agent_upload():
     if not data:
         return jsonify({"error": "empty file"}), 400
 
+    # Release 29: the gate is "some vision route exists", not "the
+    # local engine can see" — a cloud-only phone (no local model file)
+    # may stage an image whenever a routed cloud model can read it.
     ok, reason = supports_vision(_model_path_for_vision())
-    if not ok:
-        return jsonify({
-            "error": "vision unavailable — %s" % reason,
-            "suggestion": VISION_OCR_SUGGESTION,
-        }), 400
+    if not ok and not _cloud_vision_available():
+        return _vision_unavailable_response(reason)
 
     image_id = secrets.token_hex(16) + IMAGE_MIMES[mimetype]
     (_uploads_dir() / image_id).write_bytes(data)
@@ -231,12 +275,12 @@ def api_agent_stream():
         if image_path is None:
             return jsonify({"error": "uploaded image not found — upload it again"}), 400
         vision_model_path = _model_path_for_vision()
+        # Release 29: same gate as the upload route — refuse up front
+        # only when NEITHER the local engine nor a cloud route can
+        # read the image; otherwise the turn decides (cloud first).
         ok, reason = supports_vision(vision_model_path)
-        if not ok:
-            return jsonify({
-                "error": "vision unavailable — %s" % reason,
-                "suggestion": VISION_OCR_SUGGESTION,
-            }), 400
+        if not ok and not _cloud_vision_available():
+            return _vision_unavailable_response(reason)
     ensure_modes()
     remembered = extract_and_apply(msg)
     agent_mode = get_agent_mode()
@@ -344,52 +388,59 @@ def api_agent_stream():
                 msgs[-1]["text"] = text
                 agent_mode._save_turn()
 
-        # Cloud backend first (Auto / Cloud Only). A turn carrying an image
-        # stays local: per-provider image payloads are not wired up yet.
-        if image_path is None:
-            cloud_text = None
+        # Cloud backend first (Auto / Cloud Only). Release 29: an
+        # image turn may go cloud too — _try_cloud narrows the route
+        # to vision-capable providers and declines (None) when no
+        # cloud route can read the image, leaving the local engine's
+        # own vision gate below to decide, exactly like a text turn
+        # the cloud declines.
+        image_arg = None
+        if image_path is not None:
+            image_arg = {"path": str(image_path),
+                         "mime": _image_mime(image_path)}
+        cloud_text = None
+        try:
+            cloud_text = agent_mode._try_cloud(msg, image=image_arg)
+        except Exception as e:
+            log.error("cloud attempt failed (%s: %s)", type(e).__name__, e)
+            # _try_cloud rolls its own failures back; this covers anything
+            # raised before it took a checkpoint.
+            del agent_mode._messages[before_len:]
+        if cloud_text is None:
             try:
-                cloud_text = agent_mode._try_cloud(msg)
-            except Exception as e:
-                log.error("cloud attempt failed (%s: %s)", type(e).__name__, e)
-                # _try_cloud rolls its own failures back; this covers anything
-                # raised before it took a checkpoint.
-                del agent_mode._messages[before_len:]
-            if cloud_text is None:
-                try:
-                    mode = agent_mode._mode()
-                except Exception:
-                    mode = ""
-                if mode == "cloud":
-                    # Belt and braces, as in AgentMode.handle(): Cloud Only
-                    # never reaches the local engine below.
-                    cloud_text = agent_mode._cloud_only_reply(msg, "exhausted")
-            if cloud_text is not None:
-                events, trace = _tool_events(agent_mode._messages[before_len:])
-                for ev in events:
-                    yield _sse(ev)
-                # Same order as the local path: filter per chunk, validate,
-                # then the whole-string sanitiser on what survived.
-                vcloud = BurmeseValidator()
-                text, cut_now = vcloud.feed(filter_scripts(cloud_text))
-                held = vcloud.flush()
-                if held:
-                    text += held
-                truncated = bool(cut_now or vcloud.cut)
-                if not truncated:
-                    is_loop, cut = is_repetition_loop(text)
-                    if is_loop:
-                        text, truncated = text[:cut], True
-                text = sanitize_text(text)
-                _sync_reply(text)
-                if text:
-                    yield _sse({"type": "chunk", "text": text})
-                # Frame first: last_usage()/ctx_of() must describe this turn, not
-                # whatever reflection records while it runs.
-                end_frame = _end(text, trace, last_usage(), truncated)
-                _finish(text)
-                yield end_frame
-                return
+                mode = agent_mode._mode()
+            except Exception:
+                mode = ""
+            if mode == "cloud":
+                # Belt and braces, as in AgentMode.handle(): Cloud Only
+                # never reaches the local engine below.
+                cloud_text = agent_mode._cloud_only_reply(msg, "exhausted")
+        if cloud_text is not None:
+            events, trace = _tool_events(agent_mode._messages[before_len:])
+            for ev in events:
+                yield _sse(ev)
+            # Same order as the local path: filter per chunk, validate,
+            # then the whole-string sanitiser on what survived.
+            vcloud = BurmeseValidator()
+            text, cut_now = vcloud.feed(filter_scripts(cloud_text))
+            held = vcloud.flush()
+            if held:
+                text += held
+            truncated = bool(cut_now or vcloud.cut)
+            if not truncated:
+                is_loop, cut = is_repetition_loop(text)
+                if is_loop:
+                    text, truncated = text[:cut], True
+            text = sanitize_text(text)
+            _sync_reply(text)
+            if text:
+                yield _sse({"type": "chunk", "text": text})
+            # Frame first: last_usage()/ctx_of() must describe this turn, not
+            # whatever reflection records while it runs.
+            end_frame = _end(text, trace, last_usage(), truncated)
+            _finish(text)
+            yield end_frame
+            return
 
         # Local engine — unchanged from here down.
         try:
@@ -603,8 +654,9 @@ def api_agent_stream_v2():
     msg = (body.get("message") or "").strip()
     if not msg:
         return jsonify({"error": "message required"}), 400
-    # mirrors api_agent_stream at L336 — keep in sync. A staged image has no
-    # cloud payload wired up yet, so that turn belongs to v1.
+    # mirrors api_agent_stream at L336 — keep in sync. A staged image is
+    # served by v1 (Release 29: there it routes to a vision-capable
+    # cloud provider or the local engine); this route stays text-only.
     image_id = (body.get("image_id") or "").strip()
     if image_id:
         return jsonify({"error": "image turns are handled by v1"}), 404

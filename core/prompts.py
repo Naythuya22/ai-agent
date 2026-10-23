@@ -177,6 +177,25 @@ _FAST_PHRASES = (
 _LONG_INPUT = 1500     # chars — a pasted document is never a Fast task
 _SHORT_INPUT = 200     # chars — with a fast signal, a Fast task
 
+# Release 29: an intent-less vague request ("တစ်ခုခု လုပ်ပေးပါ" — "do
+# something") carries no task signal at all, so the length rules below
+# used to route it to Fast — whose overlay says "answer directly and
+# briefly", the exact opposite of what it needs. The base prompt's
+# clarify rule (ask ONE short question when acting means guessing the
+# intent) can only act if the turn is not rushed, so these route to the
+# balanced default instead. Deliberately narrow: a phrase must BE the
+# request (exact match) or be a bare do-something imperative; "help me
+# translate this" keeps its clear object and stays Fast.
+_VAGUE_PHRASES = ("တစ်ခုခု လုပ်", "တစ်ခုခုလုပ်", "do something")
+_VAGUE_EXACT = ("တစ်ခုခု", "something", "help", "help me", "ကူညီပါ")
+
+
+def _is_vague(text: str, low: str) -> bool:
+    """True for a request with no discernible intent (Release 29)."""
+    if low in _VAGUE_EXACT:
+        return True
+    return any(ph in low for ph in _VAGUE_PHRASES)
+
 
 def _word_in(text: str, word: str) -> bool:
     """True when `word` appears in `text` bounded by non-letters."""
@@ -209,6 +228,11 @@ def classify_effort(text: str, backend: str = "") -> str:
             or any(ph in low for ph in _PRO_PHRASES) \
             or any(_word_in(low, w) for w in _PRO_WORDS):
         return "balanced" if local else "pro"
+    if _is_vague(t, low):
+        # Release 29: no intent to act on — Balanced, where the base
+        # prompt's clarify rule asks one short question instead of the
+        # Fast overlay rushing a guessed answer out.
+        return EFFORT_DEFAULT
     if len(t) <= _SHORT_INPUT and any(ph in low for ph in _FAST_PHRASES):
         return "fast"
     if (len(t) <= 60 and "?" in t) or len(t) <= 40:
