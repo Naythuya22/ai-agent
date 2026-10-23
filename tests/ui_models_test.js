@@ -55,7 +55,7 @@ function texts(node) {
 // ═══════════════ (a) Settings: the live-fed dropdown ═══════════════
 console.log('--- markup ---');
 ['set-model-search', 'set-model-free', 'set-model-free-wrap',
- 'set-model-source', 'set-model-refresh', 'set-model-warn',
+ 'set-model-source', 'set-model-refresh', 'set-model-warn', 'set-model-list',
 ].forEach(id => ok(html.includes('id="' + id + '"'), 'element #' + id));
 
 const S_START = '// ── Settings (hybrid backend';
@@ -68,7 +68,7 @@ const IDS = ['settings-modal', 'settings-close', 'settings-body', 'set-modes',
   'backend-mode-hint', 'set-local-note', 'set-net', 'set-provider', 'set-enabled',
   'set-fallback', 'set-model', 'set-model-custom', 'set-model-search',
   'set-model-free', 'set-model-free-wrap', 'set-model-source',
-  'set-model-refresh', 'set-model-warn', 'set-base-url', 'set-cost',
+  'set-model-refresh', 'set-model-warn', 'set-model-list', 'set-base-url', 'set-cost',
   'set-ctx-limit', 'set-key-list', 'set-key-input', 'set-key-label',
   'set-key-add', 'set-msg', 'set-save', 'set-cancel', 'set-prompt-tier',
   'set-tier-auto', 'set-tier-cloud-strong', 'set-tier-cloud-fast',
@@ -123,9 +123,25 @@ const MODELS_PAYLOAD = {
 };
 
 const modelCalls = [];
+const settingsPosts = [];
 async function fetchStub(url, opts) {
   const o = opts || {};
   const jsonRes = obj => ({ status: 200, json: async () => obj, text: async () => JSON.stringify(obj) });
+  if (url === '/api/settings/agent' && o.method === 'POST') {
+    // A save lands in REMOTE, so the reload inside saveSettings reads
+    // the new state back — the full sequence, not just the paint.
+    const body = JSON.parse(o.body);
+    settingsPosts.push(body);
+    const saved = body.providers && body.providers.openai;
+    if (saved && typeof saved.model === 'string') {
+      REMOTE.config.providers.openai.model = saved.model;
+      MODELS_PAYLOAD.stored_model = saved.model;
+      MODELS_PAYLOAD.stored_model_status = 'ok';
+    }
+    return jsonRes({ ok: true, changed: ['providers.openai'],
+                     config: REMOTE.config, backend: REMOTE.backend,
+                     prompt_tier: REMOTE.prompt_tier });
+  }
   if (url === '/api/settings/agent' && (!o.method || o.method === 'GET')) {
     return jsonRes(JSON.parse(JSON.stringify(REMOTE)));
   }
@@ -288,6 +304,59 @@ vm.runInContext(indicatorBlock, pickerSandbox, { filename: 'indicator-block.js' 
   ok(modelCalls.length > before &&
      modelCalls[modelCalls.length - 1].includes('refresh=1'),
      'refresh button calls the endpoint with refresh=1');
+
+  // Release 27.1 — the source line carries the model count, so "the
+  // list arrived" is checkable at a glance (an empty arrival reads 0).
+  ok(registry['set-model-source'].textContent.includes('4 ခု'),
+     'source line shows the model count: ' +
+     registry['set-model-source'].textContent);
+
+  // Release 27.1 — tappable in-page rows mirror the dropdown: the
+  // selection path that does not depend on the native select popup.
+  console.log('--- settings model rows (27.1) ---');
+  const listBox = registry['set-model-list'];
+  eq(listBox.children.map(r => r.textContent),
+     ['gpt-4o · ctx 128K', 'gpt-4o-mini · ctx 128K · free',
+      'gpt-gone-1 (custom) ✓',
+      'text-embedding-3-small · ctx 8.2K — chat မဟုတ် (embed)',
+      'whisper-1 — chat မဟုတ် (audio)'],
+     'rows = chat models, stored (custom) row, then tagged non-chat');
+  const rowByText = {};
+  listBox.children.forEach(r => { rowByText[r.textContent] = r; });
+  ok(rowByText['gpt-gone-1 (custom) ✓'].className.includes('current'),
+     'the stored row is marked current');
+  ok(rowByText['text-embedding-3-small · ctx 8.2K — chat မဟုတ် (embed)']
+       .className.includes('off'),
+     'non-chat rows are marked off (not tappable)');
+  rowByText['gpt-4o-mini · ctx 128K · free'].fire('click');
+  eq(registry['set-model-custom'].value, 'gpt-4o-mini',
+     'tapping a row fills the custom field (what Save persists)');
+  eq(sel.value, 'gpt-4o-mini', 'tapping a row moves the select value');
+  ok(rowByText['gpt-4o-mini · ctx 128K · free'].className.includes('current'),
+     'the tapped row takes the current highlight');
+  ok(!rowByText['gpt-gone-1 (custom) ✓'].className.includes('current'),
+     'the stored row loses the highlight after a row tap');
+
+  // The full save sequence: pick in the select, fire its real change
+  // handler, click the real Save button, and read the state back after
+  // saveSettings' reload — the pick must survive the whole round trip.
+  console.log('--- settings save sequence (27.1) ---');
+  sel.value = 'gpt-4o'; sel.fire('change');
+  eq(registry['set-model-custom'].value, 'gpt-4o',
+     'select change mirrors the pick into the custom field');
+  registry['set-save'].fire('click');
+  for (let t = 0; t < 10; t++) await tick();
+  eq(settingsPosts.length, 1, 'Save posts the settings payload once');
+  eq(settingsPosts[0].providers.openai.model, 'gpt-4o',
+     'the POST carries the picked model');
+  const byVal2 = {};
+  sel.children.forEach(o => { byVal2[o.value] = o; });
+  eq(byVal2['gpt-4o'].selected, true,
+     'after the save reload the picked model is the selected option');
+  eq(registry['set-model-warn'].style.display, 'none',
+     'the missing warning clears once a listed model is saved');
+  eq(registry['set-model-custom'].value, 'gpt-4o',
+     'the custom field shows the saved model after reload');
 
   console.log('--- picker behaviour ---');
   await pickerSandbox.openModelPicker();

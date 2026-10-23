@@ -224,6 +224,10 @@ footer{position:relative;padding:12px 12px 16px;background:var(--bg);border-top:
 .set-modes label{display:flex;gap:5px;align-items:center;cursor:pointer}
 .set-line{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
 .set-input,.set-select{background:var(--select-bg);color:var(--select-text);border:1px solid var(--select-border);border-radius:4px;padding:6px 8px;font-size:12px;font-family:inherit}
+.set-model-list{max-height:190px;overflow-y:auto;margin-top:6px}
+.set-model-row{padding:7px 8px;border:1px solid var(--select-border);border-radius:4px;margin-top:4px;font-size:12px;cursor:pointer;word-break:break-all}
+.set-model-row.current{border-color:var(--accent);font-weight:700}
+.set-model-row.off{opacity:.55;cursor:default}
 .set-input{flex:1;min-width:120px}
 .set-check{display:flex;gap:6px;align-items:center;font-size:12px;color:var(--text)}
 .set-cost{font-size:12px;margin-top:6px;min-height:16px}
@@ -456,6 +460,7 @@ footer{position:relative;padding:12px 12px 16px;background:var(--bg);border-top:
 <input id="set-model-search" class="set-input" type="text" placeholder="🔍 model ရှာရန် (search)" autocomplete="off" spellcheck="false" style="flex:1">
 <label class="set-check" id="set-model-free-wrap" style="display:none"><input type="checkbox" id="set-model-free"> Free ပဲ</label>
 </div>
+<div id="set-model-list" class="set-model-list"></div>
 <div class="set-line" style="margin-top:6px">
 <span id="set-model-source" class="set-hint" style="flex:1"></span>
 <button id="set-model-refresh" type="button" class="set-btn">↻ Refresh</button>
@@ -2735,6 +2740,57 @@ function renderModelOptions(){
   for(i=0;i<rest.length;i++){
     addOpt(rest[i],rest[i].id!==cur,' — chat မဟုတ် ('+rest[i].kind+')');
   }
+  // Release 27.1 — the same filtered list as tappable in-page rows.
+  // The native <select> popup is the one selection path that cannot
+  // be exercised off-device, and with ~470 live models it opens as a
+  // wall of text scrolled to the stored entry at the very end; the
+  // rows render the choice in the page instead. Tapping a row lands
+  // the pick in the select + custom field exactly as a popup pick
+  // does (the select's change handler only mirrors into the custom
+  // field), so Save persists it unchanged.
+  var listBox=setq('set-model-list');
+  if(listBox){
+    listBox.innerHTML='';
+    var addRow=function(m,disabled,tag){
+      if(!passes(m))return;
+      var row=document.createElement('div');
+      row.className='set-model-row'+(m.id===cur?' current':'')+
+        (disabled?' off':'');
+      row.textContent=m.id+(m.context?' · ctx '+fmtTok(m.context):'')+
+        (m.free===true?' · free':'')+(m.id===cur?' ✓':'')+(tag||'');
+      if(!disabled){
+        (function(id){
+          row.addEventListener('click',function(){
+            var s2=setq('set-model'); if(s2)s2.value=id;
+            var mc2=setq('set-model-custom'); if(mc2)mc2.value=id;
+            // Move only the highlight: a repaint here would rebuild
+            // the options from the saved config and snap the select
+            // back to the stored value, while a native popup pick
+            // leaves the pending choice showing until Save.
+            var box2=setq('set-model-list');
+            if(box2){
+              for(var ri=0;ri<box2.children.length;ri++){
+                var rw=box2.children[ri];
+                rw.className=rw.className.replace(' current','');
+              }
+            }
+            row.className=row.className+' current';
+          });
+        })(m.id);
+      }
+      listBox.appendChild(row);
+    };
+    for(i=0;i<chat.length;i++)addRow(chat[i],false,'');
+    if(cur&&!storedEntry&&(!q||cur.toLowerCase().indexOf(q)>=0)){
+      var crow=document.createElement('div');
+      crow.className='set-model-row current';
+      crow.textContent=cur+' (custom) ✓';
+      listBox.appendChild(crow);
+    }
+    for(i=0;i<rest.length;i++){
+      addRow(rest[i],rest[i].id!==cur,' — chat မဟုတ် ('+rest[i].kind+')');
+    }
+  }
   var anyFree=false;
   for(i=0;i<list.length;i++){
     if(list[i].free!==null&&list[i].free!==undefined)anyFree=true;
@@ -2743,9 +2799,9 @@ function renderModelOptions(){
   if(fw)fw.style.display=anyFree?'':'none';
   var src=setq('set-model-source');
   if(src){
-    if(st.source==='live')src.textContent='🌐 Live စာရင်း'+(st.fetchedAt?' · '+st.fetchedAt:'');
-    else if(st.source==='cache')src.textContent='💾 Cache စာရင်း'+(st.fetchedAt?' · '+st.fetchedAt:'');
-    else if(st.source==='fallback')src.textContent='📋 Built-in စာရင်း (live စာရင်း မရလို့)';
+    if(st.source==='live')src.textContent='🌐 Live စာရင်း · '+list.length+' ခု'+(st.fetchedAt?' · '+st.fetchedAt:'');
+    else if(st.source==='cache')src.textContent='💾 Cache စာရင်း · '+list.length+' ခု'+(st.fetchedAt?' · '+st.fetchedAt:'');
+    else if(st.source==='fallback')src.textContent='📋 Built-in စာရင်း · '+list.length+' ခု (live စာရင်း မရလို့)';
     else src.textContent='';
   }
   var warn=setq('set-model-warn');
