@@ -2,7 +2,7 @@
 
 These tests cover the harness itself, offline, in stub mode only:
 the shipped cases.json loads + validates, the stub run passes every
-case through the REAL ChatMode/AgentMode paths, a deliberately
+case through the REAL AgentMode path, a deliberately
 failing check is reported by name with the score and exit code to
 match, and a malformed case file is rejected with a clear error.
 
@@ -28,16 +28,17 @@ class CasesFileTests(unittest.TestCase):
         cases = run_eval.load_cases()
         ids = [c["id"] for c in cases]
         self.assertEqual(len(ids), len(set(ids)), "case ids must be unique")
-        self.assertGreaterEqual(len(cases), 10)
-        self.assertLessEqual(len(cases), 14)
+        # Release 22: the 5 chat cases went with Chat Mode — 7 agent
+        # cases remain.
+        self.assertEqual(len(cases), 7)
         modes = {c["mode"] for c in cases}
-        self.assertEqual(modes, {"chat", "agent"})
+        self.assertEqual(modes, {"agent"})
 
     def test_validate_rejects_duplicate_ids(self):
         data = {"version": 1, "cases": [
-            {"id": "x", "mode": "chat", "prompt": "q",
+            {"id": "x", "mode": "agent", "prompt": "q",
              "checks": {"must_contain": ["a"]}},
-            {"id": "x", "mode": "chat", "prompt": "q",
+            {"id": "x", "mode": "agent", "prompt": "q",
              "checks": {"must_contain": ["a"]}},
         ]}
         with self.assertRaisesRegex(ValueError, "duplicate case id"):
@@ -45,7 +46,7 @@ class CasesFileTests(unittest.TestCase):
 
     def test_validate_rejects_unknown_check(self):
         data = {"version": 1, "cases": [
-            {"id": "x", "mode": "chat", "prompt": "q",
+            {"id": "x", "mode": "agent", "prompt": "q",
              "checks": {"vibes": ["good"]}},
         ]}
         with self.assertRaisesRegex(ValueError, "unknown check"):
@@ -53,7 +54,7 @@ class CasesFileTests(unittest.TestCase):
 
     def test_validate_rejects_bad_regex_and_wrong_version(self):
         bad_re = {"version": 1, "cases": [
-            {"id": "x", "mode": "chat", "prompt": "q",
+            {"id": "x", "mode": "agent", "prompt": "q",
              "checks": {"regex": "("}},
         ]}
         with self.assertRaisesRegex(ValueError, "bad regex"):
@@ -83,7 +84,7 @@ class StubRunTests(unittest.TestCase):
 
     def test_failing_check_is_named_and_scores_down(self):
         case = copy.deepcopy(
-            [c for c in run_eval.load_cases() if c["id"] == "chat-sum"][0])
+            [c for c in run_eval.load_cases() if c["id"] == "agent-no-tool-question"][0])
         case["checks"] = {"must_contain": ["IMPOSSIBLE_ANSWER_TEXT"]}
         results = run_eval.run_cases([case], stub=True)
         self.assertFalse(results[0]["passed"])
@@ -92,7 +93,7 @@ class StubRunTests(unittest.TestCase):
             any(n.startswith("must_contain:IMPOSSIBLE") for n in names), names)
         self.assertEqual(run_eval.summarize(results), (0, 1))
         self.assertEqual(run_eval.exit_code(results), 1)
-        self.assertIn("FAIL chat-sum", run_eval.render(results))
+        self.assertIn("FAIL agent-no-tool-question", run_eval.render(results))
         self.assertIn("score: 0/1", run_eval.render(results))
 
 

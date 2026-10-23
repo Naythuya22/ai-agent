@@ -57,7 +57,7 @@ function build(opts) {
   opts = opts || {};
   const cache = {};
   const documentStub = { getElementById: (id) => (cache[id] || (cache[id] = el())) };
-  const state = { mode: opts.mode || 'chat', busy: false, abort: null, listening: false };
+  const state = { mode: opts.mode || 'code', busy: false, abort: null, listening: false };
   const inputEl = el();
   const status = { text: '' };
   const setStatus = (t) => { status.text = t || ''; };
@@ -101,8 +101,8 @@ ok(/id="attach-chip"/.test(html) && /id="attach-label"/.test(html),
 {
   const t = build();
   t.api.syncAgentTools();
-  eq(t.els['add-btn'].hidden, true, '“+” hidden in chat mode');
-  eq(t.els['attach-btn'].hidden, true, 'attach button hidden in chat mode');
+  eq(t.els['add-btn'].hidden, true, '“+” hidden in code mode');
+  eq(t.els['attach-btn'].hidden, true, 'attach button hidden in code mode');
   t.state.mode = 'agent';
   t.api.syncAgentTools();
   eq(t.els['add-btn'].hidden, false, '“+” shown in agent mode');
@@ -157,9 +157,9 @@ async function rejects(name, size, text, why) {
     eq(t.els['attach-chip'].hidden, false, 'chip visible in agent mode');
     eq(t.els['attach-label'].textContent, 'notes.py · 2.0 KB',
        'chip reads "filename · size"');
-    t.state.mode = 'chat';
+    t.state.mode = 'code';
     t.api.syncAgentTools();
-    eq(t.els['attach-chip'].hidden, true, 'chip hidden in chat mode');
+    eq(t.els['attach-chip'].hidden, true, 'chip hidden in code mode');
     ok(t.api.pendingFile !== null, 'attachment survives a mode switch');
     t.state.mode = 'agent';
     t.api.syncAgentTools();
@@ -223,8 +223,8 @@ async function rejects(name, size, text, why) {
   {
     const t = build({ mode: 'agent', FileReader: readerFor('secret') });
     await t.api.attachFile({ name: 's.txt', size: 6, __text: 'secret' });
-    eq(t.api.fileMessageFor('hello', 'chat'), 'hello', 'chat mode never gets the file');
-    ok(t.api.pendingFile, 'chat send keeps the attachment for later');
+    eq(t.api.fileMessageFor('hello', 'code'), 'hello', 'code mode never gets the file');
+    ok(t.api.pendingFile, 'code send keeps the attachment for later');
     eq(t.api.fileMessageFor('hello', 'agent'),
        '[File: s.txt]\nsecret\n\nhello', 'agent send builds the file prompt');
     eq(t.api.pendingFile, null, 'agent send clears the chip');

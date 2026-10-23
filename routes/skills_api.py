@@ -16,7 +16,7 @@ from routes._helpers import json_body
 from routes._state import (
     agent_turn_guard,
     get_agent_mode,
-    get_chat_mode,
+    get_llm,
     ensure_modes,
     inference_guard,
 )
@@ -72,31 +72,28 @@ def api_skills_get(name):
 
 @bp.route("/api/skills/<name>/run", methods=["POST"])
 def api_skills_run(name):
-    """Run a skill with args. Body: {args: str, mode?: 'chat'|'agent'}."""
+    """Run a skill with args. Body: {args: str, mode?: 'agent'}."""
     body = json_body()
     args = (body.get("args") or "").strip()
     mode = (body.get("mode") or "agent").strip().lower()
 
     if not args:
         return jsonify({"error": "args required"}), 400
-    if mode not in ("chat", "agent"):
-        return jsonify({"error": "mode must be chat or agent"}), 400
+    if mode != "agent":
+        return jsonify({"error": "mode must be agent"}), 400
 
     sk = load_skill(name)
     if not sk:
         return jsonify({"error": f"skill not found: {name}"}), 404
 
-    target = get_agent_mode() if mode == "agent" else get_chat_mode()
+    target = get_agent_mode()
     prompt = render(sk, args)
 
     try:
-        # An Agent skill run goes through the same cloud-or-local loop as a
-        # chat turn, so it takes the agent-turn lock before the engine lock.
-        if mode == "agent":
-            with agent_turn_guard():
-                with inference_guard():
-                    reply = target.handle(prompt)
-        else:
+        # A skill run goes through the same cloud-or-local loop as an
+        # agent turn, so it takes the agent-turn lock before the
+        # engine lock.
+        with agent_turn_guard():
             with inference_guard():
                 reply = target.handle(prompt)
     except Exception as e:
@@ -137,10 +134,12 @@ def api_skills_create():
     ensure_modes()
     llm_source = "fallback"
     try:
-        chat_mode = get_chat_mode()
+        # Release 22: generation only ever wanted an LLM handle — it used
+        # to borrow the ChatMode object's. Ask the shared LLM directly.
+        llm = get_llm(load=False)
         prompt = SKILL_GEN_PROMPT.format(name=name, description=description)
         with inference_guard():
-            generated = chat_mode.llm.ask(prompt) if hasattr(chat_mode, "llm") else ""
+            generated = llm.ask(prompt)
         if generated and _validate_template(generated):
             save_skill(name, description, generated.strip())
             llm_source = "llm"

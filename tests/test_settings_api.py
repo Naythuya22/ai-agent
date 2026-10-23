@@ -511,9 +511,12 @@ class ModelIndicatorTests(SettingsApiCase):
         _, j = call("get", "/api/settings/model?mode=agent", expect=200)
         self.assertEqual(j["backend"], "local", j)
 
-    def test_chat_is_always_local(self):
+    def test_code_is_always_local(self):
+        # Release 22: was test_chat_is_always_local — Chat Mode is gone.
+        # The pinned behaviour survives: a non-agent mode never reads the
+        # backend config, so it always answers the local label.
         self.use_backend(mode="cloud")
-        _, j = call("get", "/api/settings/model?mode=chat", expect=200)
+        _, j = call("get", "/api/settings/model?mode=code", expect=200)
         self.assertEqual(j["backend"], "local")
         self.assertEqual(j["label"], "Model: Gemma 4 (Local)")
 

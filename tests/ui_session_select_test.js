@@ -103,7 +103,7 @@ function build(opts) {
   ['session-list', 'sel-bar', 'sel-count', 'sel-del', 'sel-all'].forEach(id => { cache[id] = el('div'); });
   const made = makeDocument(cache);
   const timers = makeTimers();
-  const state = { mode: opts.mode || 'chat' };
+  const state = { mode: opts.mode || 'agent' };
   const chatEl = el('div');
   const inputEl = el('div');
   const status = { text: '' };
@@ -145,9 +145,9 @@ function build(opts) {
 }
 
 const ROWS = [
-  { id: 'chat-1', mode: 'chat', title: 'one', count: 2, active: true },
-  { id: 'chat-2', mode: 'chat', title: 'two', count: 4, active: false },
-  { id: 'chat-3', mode: 'chat', title: 'three', count: 0, active: false },
+  { id: 'sess-1', mode: 'agent', title: 'one', count: 2, active: true },
+  { id: 'sess-2', mode: 'agent', title: 'two', count: 4, active: false },
+  { id: 'sess-3', mode: 'agent', title: 'three', count: 0, active: false },
 ];
 
 (async () => {
@@ -165,7 +165,7 @@ const ROWS = [
   t.api.renderSessions(ROWS);
   const list = t.els['session-list'];
   eq(list.children.length, 3, 'one row per session');
-  eq(list.children.map(r => r.getAttribute('data-id')), ['chat-1', 'chat-2', 'chat-3'],
+  eq(list.children.map(r => r.getAttribute('data-id')), ['sess-1', 'sess-2', 'sess-3'],
      'rows carry their session id');
   eq(list.children.map(r => r.children[0].className), ['check', 'check', 'check'],
      'checkbox is the first child of every row');
@@ -195,7 +195,7 @@ const ROWS = [
   eq(t.api.selMode, false, 'Cancel leaves selection mode');
   eq(Object.keys(t.api.selIds).length, 0, 'Cancel clears the selection');
   list.children[2].onclick();
-  eq(t.spies.activate, ['chat-3'], 'normal click still activates the session');
+  eq(t.spies.activate, ['sess-3'], 'normal click still activates the session');
 
   // ── Select All / Deselect All ──────────────────────────────────────
   t.api.selectAll();
@@ -211,9 +211,9 @@ const ROWS = [
   row.listeners.pointerdown({ target: row, clientX: 10, clientY: 10 });
   lp.runTimers();
   eq(lp.api.selMode, true, 'long-press enters selection mode');
-  eq(Object.keys(lp.api.selIds), ['chat-2'], 'long-press selects the pressed session');
+  eq(Object.keys(lp.api.selIds), ['sess-2'], 'long-press selects the pressed session');
   row.onclick();   // the click that follows a long-press must not undo it
-  eq(Object.keys(lp.api.selIds), ['chat-2'], 'the click after a long-press does not deselect');
+  eq(Object.keys(lp.api.selIds), ['sess-2'], 'the click after a long-press does not deselect');
 
   // ── Long-press cancelled by a 10px+ move (scroll) ──────────────────
   const mv = build();
@@ -236,7 +236,7 @@ const ROWS = [
   const del = build({
     fetchResult: {
       ok: true, status: 200,
-      body: { ok: true, deleted: ['chat-1', 'chat-2', 'chat-3'], missing: [] },
+      body: { ok: true, deleted: ['sess-1', 'sess-2', 'sess-3'], missing: [] },
     },
   });
   del.api.renderSessions(ROWS);
@@ -247,7 +247,7 @@ const ROWS = [
   eq(del.calls.length, 1, 'one request only (no per-id DELETE loop)');
   eq(del.calls[0].url, '/api/sessions/bulk_delete', 'bulk endpoint is used');
   eq(del.calls[0].init.method, 'POST', 'bulk delete is a POST');
-  eq(JSON.parse(del.calls[0].init.body).ids, ['chat-1', 'chat-2', 'chat-3'],
+  eq(JSON.parse(del.calls[0].init.body).ids, ['sess-1', 'sess-2', 'sess-3'],
      'payload carries every selected id');
   eq(del.api.selMode, false, 'selection mode closed after a successful delete');
   eq(del.spies.sessions >= 1, true, 'session list refreshed after delete');
@@ -263,7 +263,7 @@ const ROWS = [
 
   // ── Deleting a non-active selection leaves the transcript alone ────
   const other = build();
-  other.state.mode = 'agent';
+  other.state.mode = 'code';   // viewing Code: the agent rows are not its thread
   other.api.renderSessions(ROWS);
   other.api.selectAll();
   await other.api.deleteSelected();
@@ -281,7 +281,7 @@ const ROWS = [
   keep.api.renderSessions(ROWS);
   keep.api.selectAll();
   keep.api.renderSessions([ROWS[1]]);
-  eq(Object.keys(keep.api.selIds), ['chat-2'], 'selection pruned to the visible rows');
+  eq(Object.keys(keep.api.selIds), ['sess-2'], 'selection pruned to the visible rows');
   keep.api.renderSessions([]);
   eq(keep.api.selMode, false, 'selection mode exits when nothing is listed');
 

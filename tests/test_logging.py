@@ -77,10 +77,10 @@ class TestLogFile(LogCase):
 
     def test_child_loggers_share_the_one_file(self):
         get_logger("sessions").error("from-sessions")
-        get_logger("mode.chat").error("from-chat")
+        get_logger("mode.agent").error("from-agent")
         text = _log_text()
         self.assertIn("from-sessions", text)
-        self.assertIn("from-chat", text)
+        self.assertIn("from-agent", text)
 
     def test_an_unusable_log_dir_never_raises(self):
         """Read-only or nonsensical HOME must not break the app on import."""
@@ -168,7 +168,7 @@ class TestSaveFailuresAreLogged(LogCase):
 
     def test_a_failing_repl_save_is_visible_in_the_log(self):
         """The path app.py's /logs command reads must contain the failure."""
-        from modes import chat as chat_mod  # noqa: F401  (ensures import works)
+        from modes import agent as agent_mod  # noqa: F401  (ensures import works)
         from memory import Memory
 
         blocker = current_home() / "blocker3"

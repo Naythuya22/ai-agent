@@ -24,7 +24,7 @@ offline-first setup that upgrades to the cloud once you add keys.
   tool output marked untrusted.
 - **Self-awareness** — `BLOCKED:` / `PARTIAL:` / `UNSURE:` replies plus a live
   `[BUDGET: ctx …% iter …/…]` line in the system prompt.
-- Chat / Agent / Code modes with native tool calling (file, shell, search,
+- Agent / Code modes with native tool calling (file, shell, search,
   Android intents); memory (facts + profile); Burmese sanitizer + validator;
   PWA (installable, dark / light); opencode integration for Code mode.
 
@@ -134,11 +134,11 @@ in `core/auth.py`, `core/log.py` and `routes/safety.py`.
 ## Commands
 
     /help              Show help
-    /chat  /agent      Switch mode
+    /agent             Switch mode
     /code [dir]        Launch opencode in a project dir
     /clear             Clear history
     /mode  /ctx        Mode + context / context usage detail
-    /new  /sessions    Fresh chat (archive) / list sessions
+    /new  /sessions    Fresh conversation (archive) / list sessions
     /switch <id>  /delete <id>   Jump to / remove a session
     /history  /summary Recent messages / compress session
     /skills  /skill <n> <args>   List / run a skill
@@ -195,7 +195,7 @@ attempt; anything else fails fast.
 
     core/      — logic (agent_backend, model_registry, context_trim, prompts,
                  safety, key_manager, burmese, opencode)
-    modes/     — chat + agent loops         routes/ — Flask blueprints
+    modes/     — the agent loop              routes/ — Flask blueprints
     tools/     — read/write/shell/web tools
     prompts/   — 3-tier prompt files (_base + agent_<tier>)
     web/       — PWA UI                     tests/  — unittest + node UI tests

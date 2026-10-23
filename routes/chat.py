@@ -1,4 +1,9 @@
-"""Chat + agent mode endpoints (context, summarisation, sync and SSE streams)."""
+"""Agent mode endpoints (context, summarisation, sync and SSE streams).
+
+The blueprint keeps its historical name ("chat") — it has always hosted
+the agent endpoints too, and Release 22 removed the chat-mode endpoints
+that shared the file.
+"""
 from __future__ import annotations
 
 import json
@@ -27,14 +32,13 @@ from routes._helpers import (
     is_repetition_loop,
     json_body,
     run_agent,
-    run_chat,
     sanitize_text,
 )
 from routes._state import (
     agent_turn_guard,
     ensure_modes,
     get_agent_mode,
-    get_chat_mode,
+    get_llm,
     get_memory,
     inference_guard,
     rebuild_modes,
@@ -44,13 +48,13 @@ bp = Blueprint("chat", __name__)
 
 log = get_logger("routes.chat")
 
-# Read-only, always "chat": no code path assigns to it (pre-existing).
-_current_mode = "chat"
+# Read-only, always "agent": no code path assigns to it (pre-existing).
+_current_mode = "agent"
 
 
 @bp.route("/api/ctx", methods=["GET"])
 def api_ctx():
-    mode = request.args.get("mode", "chat")
+    mode = request.args.get("mode", "agent")
     return jsonify(ctx_of(mode))
 
 
@@ -79,11 +83,13 @@ def api_context_size(size):
     # so the whole check-unload-save-rebuild cycle runs exclusively.
     with inference_guard():
         ensure_modes()
-        chat_mode = get_chat_mode()
+        # Release 22: this lifecycle used to hold the engine through the
+        # ChatMode object; it now uses the shared LLM handle directly.
+        llm = get_llm(load=False)
 
         # Already at target?
         try:
-            current = chat_mode.llm.config.context_size
+            current = llm.config.context_size
         except Exception:
             current = None
         if current == n:
@@ -91,25 +97,20 @@ def api_context_size(size):
 
         # Unload engine + close modes (session data on disk)
         try:
-            chat_mode.close()
-        except Exception as e:
-            log.warning("chat_mode.close() failed during ctx resize: %s: %s",
-                        type(e).__name__, e)
-        try:
             get_agent_mode().close()
         except Exception as e:
             log.warning("agent_mode.close() failed during ctx resize: %s: %s",
                         type(e).__name__, e)
         try:
-            chat_mode.llm.unload()
+            llm.unload()
         except Exception as e:
             log.warning("llm.unload() failed during ctx resize: %s: %s",
                         type(e).__name__, e)
 
         # Update config
         try:
-            chat_mode.llm.config.context_size = n
-            chat_mode.llm.config.save()
+            llm.config.context_size = n
+            llm.config.save()
         except Exception as e:
             return jsonify({"error": f"save failed: {e}"}), 500
 
@@ -124,129 +125,16 @@ def api_context_size(size):
 
 @bp.route("/api/summary", methods=["POST"])
 def api_summary():
-    body = json_body()
-    mode = (body.get("mode") or "chat").strip()
+    # Release 22: Agent Mode is the only mode with a session to compress;
+    # a `mode` field in the body is accepted and ignored.
     try:
         with inference_guard():
-            if mode == "agent":
-                r = get_agent_mode().compress_session()
-            else:
-                r = get_chat_mode().compress_session()
+            r = get_agent_mode().compress_session()
     except Exception as e:
         return jsonify({"error": f"{type(e).__name__}: {e}"}), 500
     if "error" in r:
         return jsonify(r), 400
     return jsonify(r)
-
-
-@bp.route("/api/chat", methods=["POST"])
-def api_chat():
-    msg = (json_body().get("message") or "").strip()
-    if not msg:
-        return jsonify({"error": "message required"}), 400
-    remembered = extract_and_apply(msg)
-    try:
-        r = run_chat(msg)
-        r["reply"] = sanitize_text(r.get("reply") or "")
-        r["remembered"] = remembered
-        r["status"] = "ready"
-        r["ctx"] = ctx_of("chat")
-        return jsonify(r)
-    except Exception as e:
-        return jsonify({"error": f"{type(e).__name__}: {e}"}), 500
-
-
-@bp.route("/api/chat/stream", methods=["POST"])
-def api_chat_stream():
-    msg = (json_body().get("message") or "").strip()
-    if not msg:
-        return jsonify({"error": "message required"}), 400
-    ensure_modes()
-    remembered = extract_and_apply(msg)
-    chat_mode = get_chat_mode()
-
-    def generate():
-        if remembered:
-            yield "data: " + json.dumps({"type": "remembered", "items": remembered}) + "\n\n"
-        try:
-            session = chat_mode.session
-        except Exception as e:
-            yield "data: " + json.dumps({"type": "error", "error": f"{type(e).__name__}: {e}"}) + "\n\n"
-            return
-        # Held for the whole stream: the session owns a cached Conversation
-        # object, so a second client must not start generating on it mid-stream.
-        # The `with` releases on normal completion and on GeneratorExit (client
-        # disconnect), so an aborted stream cannot wedge the lock.
-        with inference_guard():
-            # Per-response sequence validator. Chunks split syllables, so the
-            # validator holds a trailing mark run back until the next chunk (or
-            # the final `end`) settles it — a bad boundary never cuts good text.
-            # A cut must not break out of the loop: the generator is drained
-            # first (F7b — a mid-stream break trips LiteRT sig11), and `end`
-            # then carries the truncated text, which is what the client renders.
-            vseq = BurmeseValidator()
-            seq_cut = False
-            skip = False
-            streamed = ""
-            try:
-                for kind, data in session.send_stream(msg):
-                    if skip and kind != "end":
-                        continue
-                    if kind == "text":
-                        safe, cut = vseq.feed(filter_scripts(data))
-                        streamed += safe
-                        if safe:
-                            yield "data: " + json.dumps({"type": "chunk", "text": safe}) + "\n\n"
-                        if cut:
-                            seq_cut = True
-                            skip = True
-                    elif kind == "error":
-                        yield "data: " + json.dumps({"type": "error", "error": str(data)}) + "\n\n"
-                        return
-                    elif kind == "tool_calls":
-                        yield "data: " + json.dumps({"type": "error", "error": "tool_calls not allowed in chat stream"}) + "\n\n"
-                        return
-                    elif kind == "end":
-                        # Settle the held-back mark run so the chunks add up to
-                        # the whole message instead of stopping short of it.
-                        held = vseq.flush()
-                        if held:
-                            streamed += held
-                            yield "data: " + json.dumps({"type": "chunk", "text": held}) + "\n\n"
-                        if vseq.cut:
-                            seq_cut = True
-                        # The client replaces the streamed text with end.text,
-                        # so the whole message gets one full validation pass.
-                        full = data if isinstance(data, str) else ""
-                        if seq_cut:
-                            fin = vseq.accepted
-                        elif full:
-                            filtered = filter_scripts(full)
-                            fin = sanitize_text(filtered)
-                            seq_cut = fin != filtered
-                        else:
-                            fin = vseq.accepted
-                        ctx = ctx_of("chat")
-                        yield "data: " + json.dumps({"type": "end", "text": fin, "truncated": seq_cut, "ctx": ctx, "status": "ready"}) + "\n\n"
-                        return
-                # Drained after a cut, or the stream ended without `end`.
-                vseq.flush()
-                fin = vseq.accepted or sanitize_text(streamed)
-                ctx = ctx_of("chat")
-                yield "data: " + json.dumps({"type": "end", "text": fin, "truncated": seq_cut, "ctx": ctx, "status": "ready"}) + "\n\n"
-            except GeneratorExit:
-                return
-            except Exception as e:
-                yield "data: " + json.dumps({"type": "error", "error": f"{type(e).__name__}: {e}"}) + "\n\n"
-
-    return Response(
-        stream_with_context(generate()),
-        mimetype="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache, no-transform",
-            "X-Accel-Buffering": "no",
-        },
-    )
 
 
 # ---------- Agent-mode image upload (vision input) ----------
@@ -416,7 +304,7 @@ def api_agent_stream():
         # One Agent turn at a time, cloud or local: AgentMode._messages must
         # not interleave with a concurrent /api/agent or skill run. This is
         # deliberately NOT inference_lock — a provider call can block for 30s
-        # and Chat mode must keep running while it does.
+        # and unrelated engine work must keep running while it does.
         with agent_turn_guard():
             try:
                 for ev in _turn():
@@ -713,7 +601,7 @@ def api_agent_stream_v2():
     def generate():
         # mirrors api_agent_stream at L420 — keep in sync: one Agent turn at
         # a time (deliberately NOT inference_lock — a cloud call can block
-        # for 30s and Chat mode must keep running while it does).
+        # for 30s and unrelated engine work must keep running while it does).
         with agent_turn_guard():
             try:
                 # mirrors api_agent_stream at L435 — keep in sync: open the
@@ -851,7 +739,6 @@ def api_clear():
     ensure_modes()
     try:
         with inference_guard():
-            get_chat_mode().reset()
             get_agent_mode().reset()
         return jsonify({"ok": True})
     except Exception as e:

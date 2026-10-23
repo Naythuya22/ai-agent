@@ -3,8 +3,8 @@
 
 The unit suite (1156 tests) proves the code does what the code says.
 This harness asks the other question: do real answers stay good when
-prompts, models or code change? It drives the REAL ChatMode /
-AgentMode paths headlessly over a fixed case set (``cases.json``)
+prompts, models or code change? It drives the REAL AgentMode path
+headlessly over a fixed case set (``cases.json``)
 and scores each answer with deterministic checks only — substrings,
 a regex, which tools really ran, and what really landed in the
 sandbox. No LLM judge: a judge is neither repeatable nor free, and
@@ -106,8 +106,8 @@ def validate_cases(data) -> list[dict]:
             raise ValueError(f"duplicate case id: {cid}")
         seen.add(cid)
         where = f"case {cid}"
-        if c.get("mode") not in ("chat", "agent"):
-            raise ValueError(f"{where}: 'mode' must be 'chat' or 'agent'")
+        if c.get("mode") != "agent":
+            raise ValueError(f"{where}: 'mode' must be 'agent'")
         if not isinstance(c.get("prompt"), str) or not c["prompt"]:
             raise ValueError(f"{where}: 'prompt' must be a non-empty string")
         checks = c.get("checks")
@@ -270,37 +270,14 @@ class _ScriptedTransport:
         return None
 
 
-class _FakeChatSession:
-    """ChatSession stand-in: send() replays the scripted answers."""
-
-    def __init__(self, answers):
-        self._answers = list(answers)
-        self._messages = []
-
-    def send(self, text):
-        self._messages.append({"role": "user", "text": text})
-        ans = self._answers.pop(0) if self._answers else ""
-        self._messages.append({"role": "assistant", "text": ans})
-        return ans
-
-    def get_messages(self):
-        return list(self._messages)
-
-    def clear(self):
-        self._messages = []
-
-
 class _FakeLLM:
     """core.llm.LLM stand-in for stub mode (the tests' FakeLocalLLM
     pattern). Agent stub turns are pinned to the cloud backend, so
-    the local engine is never driven; chat turns replay the script."""
+    the local engine is never driven."""
 
     def __init__(self, answers):
         self._answers = list(answers)
         self.touched = []
-
-    def create_chat(self, system_provider=None, initial_messages=None):
-        return _FakeChatSession(self._answers)
 
     def ask(self, prompt):
         return self._answers[0] if self._answers else ""
@@ -393,13 +370,6 @@ def _isolated_env(seed_files=None):
 
 # ---------------------------------------------------------------- drivers
 
-def _run_stub_chat(case):
-    from modes.chat import ChatMode
-    answers = [s["answer"] for s in case.get("stub") or [] if "answer" in s]
-    mode = ChatMode(_FakeLLM(answers), None)
-    return mode.handle(case["prompt"]), []
-
-
 def _run_stub_agent(case):
     from core.agent_backend import AgentBackend
     from core.key_manager import KeyManager
@@ -431,9 +401,6 @@ def _run_live(case):
     """Real engine + real configured backend. Manual use only."""
     from core.llm import LLM
     llm = LLM()
-    if case["mode"] == "chat":
-        from modes.chat import ChatMode
-        return ChatMode(llm, None).handle(case["prompt"]), []
     from modes.agent import AgentMode
     mode = AgentMode(llm, None)
     answer = mode.handle(case["prompt"])
@@ -459,9 +426,7 @@ def run_case(case: dict, stub: bool = True, seed_files=None) -> dict:
             os.chdir(sandbox)
             try:
                 if stub:
-                    answer, tools = (_run_stub_chat(case)
-                                      if case["mode"] == "chat"
-                                      else _run_stub_agent(case))
+                    answer, tools = _run_stub_agent(case)
                 else:
                     answer, tools = _run_live(case)
             finally:

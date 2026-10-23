@@ -3,8 +3,8 @@
 A small, deterministic eval for answer quality — the companion to the
 unit suite. The unit tests prove the code does what the code says;
 this harness checks that real answers stay good when prompts, models
-or code change, by driving the **real** `ChatMode` / `AgentMode`
-paths over a fixed set of cases and scoring the outcomes.
+or code change, by driving the **real** `AgentMode`
+path over a fixed set of cases and scoring the outcomes.
 
 ```bash
 python3 eval/run_eval.py --stub          # offline, fake backend (default)
@@ -27,8 +27,7 @@ Exit code is `0` only when every case passes (`1` = a case failed,
 
 - **Stub mode** uses a scripted fake backend (the same test-seam
   pattern as the unit tests: `KeyManager` + `AgentBackend` + a fake
-  transport for agent cases, a scripted chat session for chat
-  cases). The script only decides what the "model" asks for — tools
+  transport). The script only decides what the "model" asks for — tools
   really execute in the sandbox, the file jail and the secret
   redactor really run, and the checks judge the real outcome. It
   must pass 100%; the unit suite asserts exactly that
@@ -67,7 +66,8 @@ real data, keys, sessions or usage ledger.
 }
 ```
 
-- `mode`: `"chat"` (ChatMode) or `"agent"` (AgentMode).
+- `mode`: `"agent"` (AgentMode) — the only conversation mode
+  since Release 22.
 - `setup`: files seeded into the sandbox before the turn
   (relative paths only).
 - `stub`: the fake model's script, replayed in order — one step is

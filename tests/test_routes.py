@@ -42,7 +42,7 @@ CASES = [
     ("GET", "/api/memory", None, None, 200),
     ("GET", "/api/profile", None, None, 200),
     ("GET", "/api/sessions", None, None, 200),
-    ("GET", "/api/sessions", {"mode": "chat"}, None, 200),
+    ("GET", "/api/sessions", {"mode": "agent"}, None, 200),
     ("GET", "/api/sessions/nope", None, None, 404),
     ("GET", "/api/history", None, None, 200),
     ("GET", "/api/skills", None, None, 200),
@@ -58,11 +58,11 @@ CASES = [
     ("GET", "/nope-does-not-exist", None, None, 404),
 
     # Missing / empty payload must be a clean 400, never a 500.
-    ("POST", "/api/chat", None, {}, 400),
-    ("POST", "/api/chat", {"message": "   "}, None, 400),
+    # Release 22: the chat endpoints are gone — a clean 404, never a 500.
+    ("POST", "/api/chat", None, {}, 404),
+    ("POST", "/api/chat/stream", None, {}, 404),
     ("POST", "/api/agent", None, {}, 400),
     ("POST", "/api/agent/stream", None, {}, 400),
-    ("POST", "/api/chat/stream", None, {}, 400),
     ("POST", "/api/remember", None, {}, 400),
     ("POST", "/api/profile", None, {}, 400),
     ("POST", "/api/code", None, {}, 400),
@@ -73,7 +73,7 @@ CASES = [
     ("POST", "/api/skills/create", {"name": "x"}, None, 400),
     ("POST", "/api/skills/x/run", None, {}, 400),
     ("POST", "/api/skills/x/run", None, {"args": "a", "mode": "bogus"}, 400),
-    ("POST", "/api/skills/x/run", None, {"args": "a", "mode": "chat"}, 404),
+    ("POST", "/api/skills/x/run", None, {"args": "a", "mode": "chat"}, 400),  # retired mode rejected
     ("POST", "/api/context/1234", None, None, 400),
     ("POST", "/api/context/abc", None, None, 400),
     ("POST", "/v1/chat/completions", None, {}, 400),
@@ -423,7 +423,7 @@ class TestVisionEngineLoad(unittest.TestCase):
 class TestSessionBulkDelete(unittest.TestCase):
     """POST /api/sessions/bulk_delete — one round trip for the multi-select."""
 
-    def _create(self, mode="chat", title="bulk"):
+    def _create(self, mode="agent", title="bulk"):
         with closing(client.post("/api/sessions",
                                  json={"mode": mode, "title": title})) as r:
             self.assertEqual(r.status_code, 200, r.get_data(as_text=True))
@@ -462,29 +462,29 @@ class TestSessionBulkDelete(unittest.TestCase):
         self.assertEqual(body["missing"], [])
 
     def test_active_thread_moves_to_a_live_session(self):
-        from routes._state import get_chat_mode
+        from routes._state import get_agent_mode
 
         self._create(title="keep")
         gone = self._create(title="gone")  # last created == active
-        mode = get_chat_mode()
+        mode = get_agent_mode()
         self.assertEqual(mode.session_id, gone)
         body = self._bulk([gone])
-        self.assertNotEqual(body["active_chat"], gone)
+        self.assertNotEqual(body["active_agent"], gone)
         # the mode must be showing the session the store now calls active
-        self.assertEqual(mode.session_id, body["active_chat"])
+        self.assertEqual(mode.session_id, body["active_agent"])
 
     def test_deleting_the_last_session_resets_the_mode(self):
-        from routes._state import get_chat_mode
+        from routes._state import get_agent_mode
 
-        chat_ids = [s["id"] for s in _list_json("chat")]
-        if not chat_ids:
-            chat_ids = [self._create()]
-        body = self._bulk(chat_ids)
-        self.assertEqual(sorted(body["deleted"]), sorted(chat_ids))
-        # reset() creates a fresh thread, so active_chat is never None — what
+        agent_ids = [s["id"] for s in _list_json("agent")]
+        if not agent_ids:
+            agent_ids = [self._create()]
+        body = self._bulk(agent_ids)
+        self.assertEqual(sorted(body["deleted"]), sorted(agent_ids))
+        # reset() creates a fresh thread, so active_agent is never None — what
         # matters is that it never points at a session that no longer exists.
-        self.assertNotIn(body["active_chat"], chat_ids)
-        self.assertNotIn(get_chat_mode().session_id, chat_ids)
+        self.assertNotIn(body["active_agent"], agent_ids)
+        self.assertNotIn(get_agent_mode().session_id, agent_ids)
 
 
 def _list_json(mode):

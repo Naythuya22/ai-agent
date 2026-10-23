@@ -1,4 +1,4 @@
-"""Shared server singletons — the lazily-built LLM, memory, and chat/agent modes.
+"""Shared server singletons — the lazily-built LLM, memory, and agent mode.
 
 These were module globals in server.py. Blueprints cannot share module
 globals, so they live here and everything imports this one module — which
@@ -19,19 +19,17 @@ if str(_root) not in sys.path:
 from config import Config
 from core.llm import LLM
 from memory import Memory
-from modes.chat import ChatMode
 from modes.agent import AgentMode
 
 _llm = None
 _memory = None
-_chat_mode = None
 _agent_mode = None
 
 # Serialises model work: generation, tool loops, engine load/unload/rebuild.
 # The LiteRT-LM engine, its KV cache and the cached Conversation objects are
 # shared mutable state, and the server runs threaded=True — so without this two
 # clients would interleave turns on one conversation. Reentrant because the
-# locked paths call each other (get_llm -> ensure_modes -> run_chat).
+# locked paths call each other (get_llm -> ensure_modes -> run_agent).
 inference_lock = threading.RLock()
 
 # Guards lazy construction of the singletons. Deliberately separate from
@@ -44,10 +42,10 @@ code_lock = threading.Lock()
 
 # Serialises Agent turns that touch AgentMode._messages. Separate from
 # inference_lock on purpose: a cloud step blocks on a provider socket for up
-# to 30s per attempt, and holding the engine lock for that would stall Chat
-# mode even though no engine is involved. Lock order is always
-# agent_turn_lock -> inference_lock (the local branch takes both); nothing
-# takes it the other way round, so the pair cannot deadlock.
+# to 30s per attempt, and holding the engine lock for that would stall
+# unrelated engine work even though no engine is involved. Lock order is
+# always agent_turn_lock -> inference_lock (the local branch takes both);
+# nothing takes it the other way round, so the pair cannot deadlock.
 agent_turn_lock = threading.RLock()
 
 
@@ -85,20 +83,19 @@ def get_llm(load: bool = True):
 
 
 def ensure_modes() -> None:
-    """Build memory + chat/agent modes on first use. No-op afterwards.
+    """Build memory + the agent mode on first use. No-op afterwards.
 
-    The modes are built around an *unloaded* LLM: building them must not
+    The mode is built around an *unloaded* LLM: building it must not
     require a local model, or a device with only cloud keys could not
     serve the UI, Settings or the agent's cloud path at all. The engine
     loads on the first turn that actually needs it.
     """
-    global _chat_mode, _agent_mode, _memory
-    if _chat_mode is None:
+    global _agent_mode, _memory
+    if _agent_mode is None:
         with init_lock:
-            if _chat_mode is None:
+            if _agent_mode is None:
                 _memory = Memory.load()
                 llm = get_llm(load=False)
-                _chat_mode = ChatMode(llm, _memory)
                 _agent_mode = AgentMode(llm, _memory)
 
 
@@ -107,24 +104,18 @@ def get_memory():
     return _memory
 
 
-def get_chat_mode():
-    ensure_modes()
-    return _chat_mode
-
-
 def get_agent_mode():
     ensure_modes()
     return _agent_mode
 
 
 def rebuild_modes() -> None:
-    """Reconstruct chat/agent modes around the existing LLM + memory objects.
+    """Reconstruct the agent mode around the existing LLM + memory objects.
 
     Used after a context-size change: the engine is unloaded and the next
     request reloads it at the new size. Session data already lives on disk.
     """
-    global _chat_mode, _agent_mode
+    global _agent_mode
     with inference_guard():
         with init_lock:
-            _chat_mode = ChatMode(_chat_mode.llm, _chat_mode.memory)
             _agent_mode = AgentMode(_agent_mode.llm, _agent_mode.memory)

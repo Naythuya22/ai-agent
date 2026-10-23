@@ -24,7 +24,14 @@ WORKERS = 6
 
 
 class _OverlapDetector:
-    """Wraps ChatSession.send_stream to record concurrent entry."""
+    """Wraps the agent stream's conversation seam to record concurrent entry.
+
+    Release 22: this used to patch ChatSession.send_stream behind
+    /api/chat/stream; Chat Mode is gone, so the probe now patches
+    routes.chat.stream_conversation — the seam the agent stream's local
+    branch drives — behind /api/agent/stream. Same contract: if the
+    turn locks were removed, concurrent turns would overlap here.
+    """
 
     def __init__(self, delay=0.15):
         self.delay = delay
@@ -35,12 +42,12 @@ class _OverlapDetector:
         self._orig = None
 
     def install(self):
-        import modes.chat as mc
+        import routes.chat as rc
 
-        self._orig = mc.ChatSession.send_stream
-        me = self  # `session` is the ChatSession, not the detector
+        self._orig = rc.stream_conversation
+        me = self
 
-        def probe(session, msg, *a, **kw):
+        def probe(conv, msg, *a, **kw):
             with me._lock:
                 me.active += 1
                 me.peak = max(me.peak, me.active)
@@ -50,19 +57,19 @@ class _OverlapDetector:
                 time.sleep(me.delay)
                 for i in range(3):
                     yield ("text", f"tok{i} ")
-                yield ("end", f"reply to {msg}")
+                yield ("end", {"text": f"reply to {msg}", "tool_calls": None})
             finally:
                 with me._lock:
                     me.active -= 1
 
-        mc.ChatSession.send_stream = probe
+        rc.stream_conversation = probe
         return self
 
     def remove(self):
-        import modes.chat as mc
+        import routes.chat as rc
 
         if self._orig is not None:
-            mc.ChatSession.send_stream = self._orig
+            rc.stream_conversation = self._orig
             self._orig = None
 
 
@@ -75,7 +82,7 @@ class TestInferenceSerialisation(unittest.TestCase):
     def tearDown(self):
         self.detector.remove()
 
-    def _fire(self, n=WORKERS, path="/api/chat/stream", key="message"):
+    def _fire(self, n=WORKERS, path="/api/agent/stream", key="message"):
         def hit(i):
             try:
                 r = client.post(path, json={key: f"msg-{i}"})
@@ -121,11 +128,11 @@ class TestInferenceSerialisation(unittest.TestCase):
                     f"request {i} also contains request {j}'s answer",
                 )
 
-    def test_non_stream_chat_does_not_deadlock(self):
-        """The non-SSE path shares the same lock."""
+    def test_non_stream_agent_does_not_deadlock(self):
+        """The non-SSE path shares the same locks (Release 22: was /api/chat)."""
         def hit(i):
             try:
-                r = client.post("/api/chat", json={"message": f"n{i}"})
+                r = client.post("/api/agent", json={"message": f"n{i}"})
                 self.results[i] = r.status_code
             except Exception as e:  # noqa: BLE001
                 self.errors[i] = f"{type(e).__name__}: {e}"
@@ -135,7 +142,7 @@ class TestInferenceSerialisation(unittest.TestCase):
             t.start()
         for t in threads:
             t.join(timeout=30)
-        self.assertFalse(any(t.is_alive() for t in threads), "deadlock on /api/chat")
+        self.assertFalse(any(t.is_alive() for t in threads), "deadlock on /api/agent")
         self.assertEqual(self.errors, {})
         self.assertEqual(sorted(self.results.values()), [200] * WORKERS)
 
@@ -161,7 +168,7 @@ class TestNoDeadlock(unittest.TestCase):
         self.assertFalse(any(t.is_alive() for t in threads), "init deadlocked")
         self.assertEqual(errors, {})
         self.assertIsNotNone(_state._llm)
-        self.assertIsNotNone(_state._chat_mode)
+        self.assertIsNotNone(_state._agent_mode)
 
     def test_lock_is_released_after_use(self):
         from routes._state import inference_lock, inference_guard
@@ -171,15 +178,19 @@ class TestNoDeadlock(unittest.TestCase):
         self.assertFalse(inference_lock._is_owned(), "lock left held")
 
     def test_lock_is_released_after_client_disconnect(self):
-        """An aborted stream must not wedge the lock for the next client."""
+        """An aborted stream must not wedge the lock for the next client.
+
+        Release 22: re-pointed from /api/chat/stream + /api/chat to the
+        agent stream + sync agent endpoint (the chat endpoints are gone).
+        """
         from routes._state import inference_lock
 
-        r = client.post("/api/chat/stream", json={"message": "x"}, buffered=False)
+        r = client.post("/api/agent/stream", json={"message": "x"}, buffered=False)
         next(r.iter_encoded(), None)
         r.close()
         self.assertFalse(inference_lock._is_owned())
         self.assertEqual(
-            client.post("/api/chat", json={"message": "after"}).status_code, 200
+            client.post("/api/agent", json={"message": "after"}).status_code, 200
         )
 
     def test_nested_guard_is_reentrant(self):
@@ -193,16 +204,20 @@ class TestNoDeadlock(unittest.TestCase):
 
 class TestContextResize(unittest.TestCase):
     def test_resize_works_and_is_restorable(self):
+        # Release 22: /api/ctx now reports the AGENT context, whose "total"
+        # is the window that would answer next (a provider's, when cloud
+        # is configured). The resize changes the LOCAL engine's window,
+        # which the meter reports as "local_total" — assert on that.
         original = None
         try:
-            original = client.get("/api/ctx").get_json()["total"]
+            original = client.get("/api/ctx").get_json()["local_total"]
         except Exception:  # noqa: BLE001
             original = None
 
         r = client.post("/api/context/16384")
         self.assertEqual(r.status_code, 200, r.get_data(as_text=True))
         self.assertTrue(r.get_json()["ok"])
-        self.assertEqual(client.get("/api/ctx").get_json()["total"], 16384)
+        self.assertEqual(client.get("/api/ctx").get_json()["local_total"], 16384)
 
         client.post(f"/api/context/{original or 8192}")
 
@@ -212,10 +227,28 @@ class TestContextResize(unittest.TestCase):
             self.assertEqual(r.status_code, 400, f"/api/context/{bad}")
 
     def test_same_size_is_a_noop(self):
-        before = client.get("/api/ctx").get_json()["total"]
+        before = client.get("/api/ctx").get_json()["local_total"]
         r = client.post(f"/api/context/{before}")
         self.assertEqual(r.status_code, 200)
         self.assertEqual(r.get_json().get("note"), "already set")
+
+    def test_local_total_reads_the_engine_config(self):
+        """Release 22 pin: _local_total() comes off the shared LLM handle.
+
+        Agent Mode's context meter depends on this value; it used to be
+        read through the ChatMode object, so the pin is that the number
+        tracks the engine config directly.
+        """
+        from routes._helpers import _local_total
+        from routes._state import get_llm
+
+        llm = get_llm(load=False)
+        saved = llm.config.context_size
+        try:
+            llm.config.context_size = 12288
+            self.assertEqual(_local_total(), 12288)
+        finally:
+            llm.config.context_size = saved
 
 
 if __name__ == "__main__":

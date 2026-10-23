@@ -295,8 +295,7 @@ footer{position:relative;padding:12px 12px 16px;background:var(--bg);border-top:
 <header>
 <div class="brand">ai-agent</div>
 <div class="modes">
-<button class="mode-btn active" data-mode="chat">Chat</button>
-<button class="mode-btn" data-mode="agent">Agent</button>
+<button class="mode-btn active" data-mode="agent">Agent</button>
 <button class="mode-btn" data-mode="code">Code</button>
 </div>
 <button id="theme-btn" type="button" title="Toggle theme" aria-label="Toggle theme">☀️</button>
@@ -572,7 +571,8 @@ window.fetch=function(input,init){
     return _realFetch(input,init);
   });
 };
-var state={mode:'chat',busy:false,abort:null,listening:false};
+var state={mode:'agent',busy:false,abort:null,listening:false};
+if(state.mode!=='agent'&&state.mode!=='code')state.mode='agent';
 var chatEl=document.getElementById('chat');
 var inputEl=document.getElementById('input');
 var formEl=document.getElementById('input-form');
@@ -758,7 +758,7 @@ function setStatus(t){statusTextEl.textContent=t||''}
   }
   // The API key the backend is on right now — masked, and painted from the
   // same /api/agent/status answer as the model chip (one request, two chips).
-  // Selection, not usage: Chat Mode has no key and shows nothing.
+  // Selection, not usage: it names the key the backend would use next.
   var keyInfoEl=document.getElementById('key-info');
   function renderKeyInfo(label){
     if(!keyInfoEl)return;
@@ -1014,7 +1014,7 @@ function syncAgentTools(){
     addBtn.hidden=!on;
     addBtn.setAttribute('aria-expanded',toolsExpanded?'true':'false');
   }
-  // Prominent send button only in Agent mode (Chat/Code look untouched).
+  // Prominent send button only in Agent mode (the Code look is untouched).
   var sb=document.getElementById('send-btn');
   if(sb)sb.classList.toggle('send-accent',on);
   if(voiceBtn){
@@ -1421,7 +1421,7 @@ async function sendStream(text,mode){
   if(state.listening)stopListening(true);
   var message=fileMessageFor(text,mode);
   appendMsg(text,'user');
-  var ep=mode==='agent'?'/api/agent/stream':(mode==='code'?'/api/code/web/run/stream':'/api/chat/stream');
+  var ep=mode==='code'?'/api/code/web/run/stream':'/api/agent/stream';
   var payload={message:message};
   if(mode==='agent'&&pendingImage){
     payload.image_id=pendingImage.id;
@@ -1632,7 +1632,7 @@ async function sendStream(text,mode){
     setBusy(false);inputEl.focus();
   }
 }
-async function runCreateSkill(arg){var sp=arg.indexOf(' ');if(sp<0){appendMsg('Usage: /create-skill <name> <description>','system');return}var name=arg.slice(0,sp).trim().toLowerCase();var desc=arg.slice(sp+1).trim();if(!name||!desc){appendMsg('Usage: /create-skill <name> <description>','system');return}appendMsg('/create-skill '+name+' "'+desc+'"','user');var typing=appendTyping();setBusy(true);setStatus('creating skill...');setActivity('thinking','Creating skill…');try{var r=await fetch('/api/skills/create',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:name,description:desc})});var j=await r.json();typing.remove();if(!r.ok){appendMsg('Create failed: '+(j.error||('HTTP '+r.status)),'error');setStatus('error');return}var src=j.source||'fallback';var msg='✅ Skill created: **/'+name+'**\n'+'Description: '+desc+'\n'+'Source: '+src+'\n\nRun it: /skill '+name+' <args>';appendMsg(msg,'assistant');setStatus('ready');}catch(e){typing.remove();appendMsg('Network error: '+e.message,'error');setStatus('offline')}finally{setBusy(false);inputEl.focus()}}async function runSkill(arg){var trimmed=arg.trim();var sp=trimmed.indexOf(' ');var name=sp<0?trimmed:trimmed.slice(0,sp);var args=sp<0?'':trimmed.slice(sp+1).trim();if(!name){appendMsg('Usage: /skill <name> <args>','system');return}if(!args){appendMsg('Usage: /skill '+name+' <args>','system');return}appendMsg('/skill '+name+' '+args,'user');var typing=appendTyping();setBusy(true);setStatus('running skill...');setActivity('running','Running skill');try{var skMode=(state.mode==='agent')?'agent':'chat';var r=await fetch('/api/skills/'+encodeURIComponent(name)+'/run',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({args:args,mode:skMode})});var j=await r.json();typing.remove();if(!r.ok){appendMsg('Skill error: '+(j.error||('HTTP '+r.status)),'error');setStatus('error');return}appendMsg(j.reply||'(no reply)','assistant');setStatus('ready');}catch(e){typing.remove();appendMsg('Network error: '+e.message,'error');setStatus('offline')}finally{setBusy(false);inputEl.focus()}}async function send(text){if(state.mode==='chat'||state.mode==='agent'||state.mode==='code'){return sendStream(text,state.mode)}appendMsg(text,'user');var typing=appendTyping();setBusy(true);setStatus('thinking...');setActivity('thinking','Thinking…');try{var ep=state.mode==='code'?'/api/code/web/run':(state.mode==='agent'?'/api/agent':'/api/chat');var r=await fetch(ep,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({message:text})});var j=await r.json();typing.remove();if(!r.ok){appendMsg(j.error||('HTTP '+r.status),'error');setStatus('error');return}if(state.mode==='code'){
+async function runCreateSkill(arg){var sp=arg.indexOf(' ');if(sp<0){appendMsg('Usage: /create-skill <name> <description>','system');return}var name=arg.slice(0,sp).trim().toLowerCase();var desc=arg.slice(sp+1).trim();if(!name||!desc){appendMsg('Usage: /create-skill <name> <description>','system');return}appendMsg('/create-skill '+name+' "'+desc+'"','user');var typing=appendTyping();setBusy(true);setStatus('creating skill...');setActivity('thinking','Creating skill…');try{var r=await fetch('/api/skills/create',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:name,description:desc})});var j=await r.json();typing.remove();if(!r.ok){appendMsg('Create failed: '+(j.error||('HTTP '+r.status)),'error');setStatus('error');return}var src=j.source||'fallback';var msg='✅ Skill created: **/'+name+'**\n'+'Description: '+desc+'\n'+'Source: '+src+'\n\nRun it: /skill '+name+' <args>';appendMsg(msg,'assistant');setStatus('ready');}catch(e){typing.remove();appendMsg('Network error: '+e.message,'error');setStatus('offline')}finally{setBusy(false);inputEl.focus()}}async function runSkill(arg){var trimmed=arg.trim();var sp=trimmed.indexOf(' ');var name=sp<0?trimmed:trimmed.slice(0,sp);var args=sp<0?'':trimmed.slice(sp+1).trim();if(!name){appendMsg('Usage: /skill <name> <args>','system');return}if(!args){appendMsg('Usage: /skill '+name+' <args>','system');return}appendMsg('/skill '+name+' '+args,'user');var typing=appendTyping();setBusy(true);setStatus('running skill...');setActivity('running','Running skill');try{var skMode='agent';var r=await fetch('/api/skills/'+encodeURIComponent(name)+'/run',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({args:args,mode:skMode})});var j=await r.json();typing.remove();if(!r.ok){appendMsg('Skill error: '+(j.error||('HTTP '+r.status)),'error');setStatus('error');return}appendMsg(j.reply||'(no reply)','assistant');setStatus('ready');}catch(e){typing.remove();appendMsg('Network error: '+e.message,'error');setStatus('offline')}finally{setBusy(false);inputEl.focus()}}async function send(text){if(state.mode==='agent'||state.mode==='code'){return sendStream(text,state.mode)}appendMsg(text,'user');var typing=appendTyping();setBusy(true);setStatus('thinking...');setActivity('thinking','Thinking…');try{var ep=state.mode==='code'?'/api/code/web/run':'/api/agent';var r=await fetch(ep,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({message:text})});var j=await r.json();typing.remove();if(!r.ok){appendMsg(j.error||('HTTP '+r.status),'error');setStatus('error');return}if(state.mode==='code'){
   var fr=(j.files||[]).map(function(f){return (f.op==='create'?'+ ':'~ ')+f.path}).join('\n');
   var cm=(j.commits||[]).map(function(c){return '\u2022 '+c.hash+' '+c.message}).join('\n');
   var parts=[];

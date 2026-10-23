@@ -71,7 +71,7 @@ function build(opts) {
     getElementById: (id) => (cache[id] || (cache[id] = el())),
     addEventListener: (ev, fn) => { docListeners[ev] = fn; },
   };
-  const state = { mode: opts.mode || 'chat', busy: false, abort: null, listening: false };
+  const state = { mode: opts.mode || 'code', busy: false, abort: null, listening: false };
   const inputEl = el();
   const status = { text: '' };
   const setStatus = (t) => { status.text = t || ''; };
@@ -121,8 +121,8 @@ const pngFile = { name: 'pic.png', type: 'image/png', size: 1024 };
   {
     const t = build();
     t.api.syncAgentTools();
-    eq(t.els['add-btn'].hidden, true, '“+” hidden in chat mode');
-    eq(t.els['image-btn'].hidden, true, 'image button hidden in chat mode');
+    eq(t.els['add-btn'].hidden, true, '“+” hidden in code mode');
+    eq(t.els['image-btn'].hidden, true, 'image button hidden in code mode');
     eq(t.els['image-chip'].hidden, true, 'image chip hidden with nothing attached');
     t.state.mode = 'agent';
     t.api.syncAgentTools();
@@ -138,9 +138,9 @@ const pngFile = { name: 'pic.png', type: 'image/png', size: 1024 };
     ok(t.api.pendingImage, 'valid png attaches');
     t.api.syncAgentTools();
     eq(t.els['image-chip'].hidden, false, 'image chip visible in agent mode');
-    t.state.mode = 'chat';
+    t.state.mode = 'code';
     t.api.syncAgentTools();
-    eq(t.els['image-chip'].hidden, true, 'image chip hidden in chat mode');
+    eq(t.els['image-chip'].hidden, true, 'image chip hidden in code mode');
     t.state.mode = 'agent';
     t.api.syncAgentTools();
     t.els['image-remove'].click();
@@ -225,21 +225,21 @@ const pngFile = { name: 'pic.png', type: 'image/png', size: 1024 };
     eq(t.api.pendingImage, null, 'image cleared after send');
   }
   {
-    // An image staged in agent mode must never leak into a chat turn.
+    // An image staged in agent mode must never leak into a code turn.
     const t = build({
       mode: 'agent',
       fetchResult: uploadThenFail,
     });
     await t.api.attachImage(pngFile);
-    t.state.mode = 'chat';
-    await t.api.sendStream('plain chat text', 'chat');
+    t.state.mode = 'code';
+    await t.api.sendStream('plain code text', 'code');
     const call = streamCall(t);
-    eq(call.url, '/api/chat/stream', 'chat turn still hits the chat stream');
+    eq(call.url, '/api/code/web/run/stream', 'code turn still hits the code stream');
     const body = JSON.parse(call.init.body);
     eq(Object.prototype.hasOwnProperty.call(body, 'image_id'), false,
-       'chat payload carries no image_id');
-    eq(body.message, 'plain chat text', 'chat message is untouched');
-    eq(t.api.pendingImage.id, 'a1b2.png', 'image survives a chat send');
+       'code payload carries no image_id');
+    eq(body.message, 'plain code text', 'code message is untouched');
+    eq(t.api.pendingImage.id, 'a1b2.png', 'image survives a code send');
   }
   {
     // Image + typed text together: message and image_id side by side.
@@ -291,9 +291,9 @@ const pngFile = { name: 'pic.png', type: 'image/png', size: 1024 };
 
   // ── Send button prominence (Agent only) ────────────────────────────
   {
-    const t = build({ mode: 'chat' });
+    const t = build({ mode: 'code' });
     t.api.syncAgentTools();
-    eq(t.els['send-btn'].classes.has('send-accent'), false, 'send button plain in chat mode');
+    eq(t.els['send-btn'].classes.has('send-accent'), false, 'send button plain in code mode');
     t.state.mode = 'agent';
     t.api.syncAgentTools();
     eq(t.els['send-btn'].classes.has('send-accent'), true, 'send button prominent in agent mode');

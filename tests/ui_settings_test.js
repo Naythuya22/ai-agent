@@ -64,7 +64,7 @@ console.log('--- existing features ---');
 ['id="voice-btn"', 'id="attach-btn"', 'id="image-btn"', 'id="add-btn"',
  'id="send-btn"', 'id="sel-bar"', 'id="sel-all"', 'id="session-list"',
  'id="proj-modal"', 'id="drawer"', 'id="viewer"', 'id="image-chip"',
- 'id="attach-chip"', 'data-mode="chat"', 'data-mode="agent"', 'data-mode="code"'
+ 'id="attach-chip"', 'data-mode="agent"', 'data-mode="code"'
 ].forEach(s => has(s, 'still present: ' + s));
 
 // ─────────────────────── (b) ES5 guard ────────────────────────

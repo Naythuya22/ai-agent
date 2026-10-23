@@ -60,7 +60,7 @@ function build(windowStub) {
   const voiceBtn = el();
   const inputEl = el();
   const status = { text: '' };
-  const state = { mode: 'chat', busy: false, abort: null, listening: false };
+  const state = { mode: 'code', busy: false, abort: null, listening: false };
   const documentStub = { getElementById: (id) => (id === 'voice-btn' ? voiceBtn : el()) };
   const setStatus = (t) => { status.text = t || ''; };
   const api = new Function(
@@ -77,8 +77,8 @@ function build(windowStub) {
 // ── Mode sync: the button exists for Agent only ────────────────────────
 {
   const t = build({ SpeechRecognition: FakeSR });
-  t.api.syncAgentTools();   // what the page runs on init (mode is 'chat')
-  eq(t.voiceBtn.hidden, true, 'voice button hidden by default (chat mode)');
+  t.api.syncAgentTools();   // what the page runs on init (mode is 'code')
+  eq(t.voiceBtn.hidden, true, 'voice button hidden by default (code mode)');
   t.state.mode = 'agent';
   t.api.syncAgentTools();
   eq(t.voiceBtn.hidden, true, 'voice button collapsed by default in agent mode');
@@ -101,7 +101,7 @@ function build(windowStub) {
   eq(FakeSR.last.lang, 'my-MM', 'recognition language is my-MM');
   eq(FakeSR.last.interimResults, true, 'interim results enabled');
   eq(t.voiceBtn.classes.has('listening'), true, 'red listening indicator on');
-  t.state.mode = 'chat';
+  t.state.mode = 'code';
   t.api.syncAgentTools();
   eq(t.state.listening, false, 'leaving agent mode stops listening');
   eq(t.voiceBtn.classes.has('listening'), false, 'listening indicator off after mode switch');

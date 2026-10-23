@@ -59,7 +59,7 @@ ok(!main.includes('/api/settings/model'),
 
 console.log('--- existing features ---');
 ['id="voice-btn"', 'id="attach-btn"', 'id="image-btn"', 'id="send-btn"',
- 'data-mode="chat"', 'data-mode="agent"', 'id="settings-btn"', 'id="sel-bar"'
+ 'data-mode="code"', 'data-mode="agent"', 'id="settings-btn"', 'id="sel-bar"'
 ].forEach(s => ok(html.includes(s), 'still present: ' + s));
 
 // ───────────────────── (b) ES5 guard ─────────────────────
@@ -151,12 +151,12 @@ vm.runInContext(block, sandbox, { filename: 'indicator-block.js' });
   await sandbox.updateModelInfo();
   eq(chip.textContent, '', 'no label means no model has run');
 
-  // chat mode: no indicator at all (Chat Mode must stay untouched)
-  sandbox.state.mode = 'chat';
+  // non-agent mode: no indicator at all (only Agent Mode has a backend)
+  sandbox.state.mode = 'code';
   chip.textContent = 'Model: Gemma 4 (Local, fallback)';
   await sandbox.updateModelInfo();
-  eq(chip.textContent, '', 'no chip in Chat Mode');
-  eq(calls.length, 3, 'no request made for Chat Mode');
+  eq(chip.textContent, '', 'no chip in Code Mode');
+  eq(calls.length, 3, 'no request made for Code Mode');
 
   // back to agent: an error answer must not blank the chip wrongly
   sandbox.state.mode = 'agent';
@@ -297,10 +297,10 @@ vm.runInContext(block, sandbox, { filename: 'indicator-block.js' });
      'a pin move never reorders the fallback chain');
   eq(picker.hidden, true, 'picker closes after pinning');
 
-  sandbox.state.mode = 'chat';
+  sandbox.state.mode = 'code';
   const callsBefore = calls.length;
   await sandbox.openModelPicker();
-  eq(calls.length, callsBefore, 'picker never opens in Chat Mode');
+  eq(calls.length, callsBefore, 'picker never opens in Code Mode');
   sandbox.state.mode = 'agent';
 
   console.log(failures ? `\n${failures} FAILURES` : '\nALL PASS');

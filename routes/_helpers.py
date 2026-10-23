@@ -16,15 +16,15 @@ from memory_extract import extract as extract_profile
 from routes._state import (
     agent_turn_guard,
     get_agent_mode,
-    get_chat_mode,
+    get_llm,
     get_memory,
     inference_guard,
 )
 
 log = get_logger("routes.helpers")
 
-# Only used when the config itself cannot be read — the value Chat Mode has
-# always fallen back to.
+# Only used when the config itself cannot be read — the value the local
+# context meter has always fallen back to.
 LOCAL_TOTAL_FALLBACK = 8192
 
 # Invisible / bidi / zero-width characters that must never reach the UI.
@@ -345,12 +345,6 @@ def run_agent(user_msg: str) -> dict:
             }
 
 
-def run_chat(user_msg: str) -> dict:
-    with inference_guard():
-        mode = get_chat_mode()
-        return {"reply": mode.handle(user_msg), "turns": mode.turns}
-
-
 def extract_and_apply(user_msg: str) -> list:
     # memory_extract runs its own LLM pass over the message.
     with inference_guard():
@@ -371,9 +365,14 @@ def extract_and_apply(user_msg: str) -> list:
 
 
 def _local_total() -> int:
-    """The on-device engine's window — the only answer Chat Mode can give."""
+    """The on-device engine's window, read off the shared LLM handle.
+
+    Release 22: this used to go through the ChatMode object
+    (``get_chat_mode().llm``) — the same singleton, but Agent Mode's own
+    context meter must not depend on a chat mode existing.
+    """
     try:
-        return int(get_chat_mode().llm.config.context_size) or LOCAL_TOTAL_FALLBACK
+        return int(get_llm(load=False).config.context_size) or LOCAL_TOTAL_FALLBACK
     except Exception:
         return LOCAL_TOTAL_FALLBACK
 
@@ -389,7 +388,7 @@ def agent_context() -> dict:
     comes from `AgentBackend.planned_context()` (the provider that would answer
     next) and the usage from a fresh estimate. With no cloud backend at all —
     Local Only, or the backend module missing — this is the local engine's own
-    `Config.context_size`, which is exactly what Chat Mode has always reported.
+    `Config.context_size`.
     """
     out = {"used": 0, "total": LOCAL_TOTAL_FALLBACK, "pct": 0.0, "model": "",
            "provider": "", "source": "local", "endpoint": "local",
@@ -490,23 +489,7 @@ def _friendly_local() -> str:
 
 
 def ctx_of(mode: str) -> dict:
-    if mode == "agent":
-        return agent_context()
-    try:
-        chat_mode = get_chat_mode()
-        msgs = chat_mode.get_messages()
-        used = estimate_messages_tokens(msgs)
-        total = chat_mode.llm.config.context_size
-        pct = round(used / total * 100, 1) if total else 0
-        return {"used": used, "total": total, "pct": pct,
-                "model": _friendly_local(), "source": "local",
-                "endpoint": "local", "trimmed": False, "dropped": 0,
-                "summarized": 0, "over_budget": False, "at": 0.0,
-                "local_total": total}
-    except Exception as e:
-        log.warning("context estimate unavailable: %s: %s", type(e).__name__, e)
-        return {"used": 0, "total": LOCAL_TOTAL_FALLBACK, "pct": 0.0,
-                "model": "", "source": "local", "endpoint": "local",
-                "trimmed": False, "dropped": 0, "summarized": 0,
-                "over_budget": False, "at": 0.0,
-                "local_total": LOCAL_TOTAL_FALLBACK}
+    # Release 22: Agent Mode is the only conversation mode, so every
+    # caller gets the agent context. The `mode` argument is still
+    # accepted — older callers pass it — and ignored.
+    return agent_context()

@@ -46,27 +46,29 @@ class CloudOnlyCase(unittest.TestCase):
         _no_model_home()
         import routes._state as st
         self._st = st
-        self._saved = (st._llm, st._memory, st._chat_mode, st._agent_mode)
-        st._llm = st._memory = st._chat_mode = st._agent_mode = None
+        self._saved = (st._llm, st._memory, st._agent_mode)
+        st._llm = st._memory = st._agent_mode = None
 
     def tearDown(self):
         st = self._st
-        st._llm, st._memory, st._chat_mode, st._agent_mode = self._saved
+        st._llm, st._memory, st._agent_mode = self._saved
         bootstrap()  # leave a sane dummy-model config for later suites
 
 
 class TestModesWithoutModel(CloudOnlyCase):
     def test_modes_build_without_a_model(self):
-        from routes._state import ensure_modes, get_agent_mode, get_chat_mode
+        from routes._state import ensure_modes, get_agent_mode
         ensure_modes()  # must not raise
         self.assertIsNotNone(get_agent_mode())
-        self.assertIsNotNone(get_chat_mode())
 
     def test_local_turn_reports_the_model_unavailable(self):
+        # Release 22: re-pointed from ChatMode's lazy session build to the
+        # agent's own conversation builder — the same seam a local agent
+        # turn goes through. It must surface the actionable LLMError.
         from core.llm import LLMError
-        from routes._state import get_chat_mode
+        from routes._state import get_agent_mode
         with self.assertRaises(LLMError) as ctx:
-            get_chat_mode().session.send("hello")
+            get_agent_mode()._ensure_conv()
         self.assertIn("Model not found", str(ctx.exception))
 
     def test_get_llm_default_still_loads_eagerly(self):

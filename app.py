@@ -22,7 +22,6 @@ try:
     from sessions import SessionStore
 except ImportError:
     SessionStore = None
-from modes.chat import ChatMode
 from modes.agent import AgentMode
 
 # Command menu (for / trigger)
@@ -30,7 +29,6 @@ COMMAND_MENU = [
     ("/help",     "Show help"),
     ("/skills",   "List available skills"),
     ("/skill",    "Run a skill — /skill <name> <args>"),
-    ("/chat",     "Switch to chat mode"),
     ("/agent",    "Switch to agent mode (tools)"),
     ("/clear",    "Clear current mode's history"),
     ("/mode",     "Show current mode + context"),
@@ -69,17 +67,16 @@ C_RESET = "\033[0m"
 
 
 class App:
-    """REPL app with mode switching (chat, agent)."""
+    """REPL app with mode switching (agent, code)."""
 
     def __init__(self):
         self.config = Config.load()
         self.memory = Memory.load()
         self.llm = HTTPLLM(self.config)
         self.modes = {
-            "chat": ChatMode(self.llm, self.memory),
             "agent": AgentMode(self.llm, self.memory),
         }
-        self.mode_name = "chat"
+        self.mode_name = "agent"
         self.running = True
 
     @property
@@ -96,7 +93,6 @@ class App:
 
     def _cmd_help(self) -> None:
         print(f"\n{C_GREEN}Commands:{C_RESET}")
-        print("  /chat             Switch to chat mode")
         print("  /agent            Switch to agent mode (tools)")
         print("  /new              Start fresh chat (archive current)")
         print("  /sessions         List sessions (current mode)")
@@ -641,8 +637,6 @@ class App:
         cmd = stripped.lower()
         if cmd == "/help":
             self._cmd_help(); return True
-        if cmd == "/chat":
-            self._cmd_switch("chat"); return True
         if cmd == "/agent":
             self._cmd_switch("agent"); return True
         if cmd == "/clear":

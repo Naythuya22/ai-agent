@@ -1,8 +1,8 @@
 """Settings endpoints for the agent's hybrid backend.
 
 Agent Mode only: which cloud provider/model to use, how many keys to rotate
-through, and whether a turn should go to the cloud at all. Chat Mode has no
-endpoints here and never reads this config.
+through, and whether a turn should go to the cloud at all. Only Agent Mode
+reads this config.
 
 No response from this file ever contains a raw key — `KeyManager.public()` /
 `_public()` hand back `key_masked` only, and error strings pass through
@@ -265,9 +265,8 @@ def api_model_info():
     setting with no usable key used to print a cloud model name that nothing
     ever called.
 
-    Chat Mode is always local and never reads this config, so a `mode=chat`
-    request (or the default when the caller is unsure) always answers the
-    local label.
+    Only Agent Mode reads this config, so a non-agent `mode` request
+    always answers the local label.
     """
     which = (request.args.get("mode") or "agent").lower()
     km = _keys()
