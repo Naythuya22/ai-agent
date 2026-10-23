@@ -104,6 +104,16 @@ class Memory:
     def __init__(self, path: Path | None = None):
         self.path = path or MEMORY_FILE
         self.data = self._empty()
+        # (mtime_ns, size) of the file as this instance last saw it —
+        # the Release 26 freshness stamp behind refresh().
+        self._stamp: tuple[int, int] | None = None
+
+    def _file_stamp(self) -> tuple[int, int] | None:
+        try:
+            st = self.path.stat()
+        except OSError:
+            return None
+        return (st.st_mtime_ns, st.st_size)
 
     @staticmethod
     def _empty() -> dict:
@@ -132,13 +142,52 @@ class Memory:
             log.error("memory store unreadable (%s: %s) — starting empty",
                       type(e).__name__, e)
             _quarantine(m.path)
+            m._stamp = m._file_stamp()
             return m
         merged = m._empty()
         for k in merged:
             if k in raw:
                 merged[k] = raw[k]
         m.data = merged
+        m._stamp = m._file_stamp()
         return m
+
+    def refresh(self) -> bool:
+        """Re-read the store when another instance changed it on disk.
+
+        Release 26 (tester evaluation #3): the memory *tools* load a
+        fresh Memory per call and save through it, while the routes
+        layer holds one long-lived instance — facts saved in a turn
+        reached memory.json but /api/memory and later turns kept
+        serving the stale singleton. Every public read and mutation
+        below calls this first, so any instance converges on the file
+        before it speaks — and, just as important, before it saves:
+        a stale instance's save() would otherwise silently drop the
+        facts the other instance just wrote.
+
+        A vanished file keeps the in-memory data (deleting the store
+        is the reset flow's business, and it recreates instances); an
+        unparsable file keeps it too and is not retried until it
+        changes again — load()'s quarantine stays a load-time act.
+        Returns True when the data was replaced.
+        """
+        stamp = self._file_stamp()
+        if stamp is None or stamp == self._stamp:
+            return False
+        try:
+            raw = json.loads(self.path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError) as e:
+            log.warning("memory refresh skipped (%s: %s)",
+                        type(e).__name__, e)
+            self._stamp = stamp
+            return False
+        merged = self._empty()
+        for k in merged:
+            if k in raw:
+                merged[k] = raw[k]
+        self.data = merged
+        self._stamp = stamp
+        return True
 
     def save(self) -> None:
         try:
@@ -150,6 +199,7 @@ class Memory:
                 encoding="utf-8",
             )
             tmp.replace(self.path)
+            self._stamp = self._file_stamp()
         except OSError as e:
             # Callers of add_fact/set_profile ignore the return value, so this
             # log line is the only trace that the write was lost.
@@ -167,6 +217,7 @@ class Memory:
         ``tool limitation``, ``exact duplicate``, ``near-duplicate``.
         Callers that only need success/failure use the bool half.
         """
+        self.refresh()
         text = text.strip()
         if not text:
             return False, "empty"
@@ -198,6 +249,7 @@ class Memory:
         return True, ""
 
     def set_identity(self, key: str, value: str) -> None:
+        self.refresh()
         key = key.strip()
         value = value.strip()
         if not key or not value:
@@ -219,6 +271,7 @@ class Memory:
         self.save()
 
     def forget(self, keyword: str) -> int:
+        self.refresh()
         keyword = keyword.strip().lower()
         if not keyword:
             return 0
@@ -278,6 +331,7 @@ class Memory:
         ``unknown key``, ``too long``, ``negative self``. Callers that only
         need success/failure use the bool half.
         """
+        self.refresh()
         key = (key or "").strip()
         value = (value or "").strip()
         if not key or not value:
@@ -295,6 +349,7 @@ class Memory:
         return True, ""
 
     def unset_profile(self, key: str) -> bool:
+        self.refresh()
         key = (key or "").strip()
         if not key:
             return False
@@ -306,10 +361,12 @@ class Memory:
         return False
 
     def get_profile(self) -> dict:
+        self.refresh()
         return dict(self.data.get("profile", {}))
 
     def get_profile_prompt(self) -> str:
         """Return profile formatted as natural system-prompt text."""
+        self.refresh()
         prof = self.data.get("profile", {})
         if not prof:
             return ""
@@ -354,6 +411,7 @@ class Memory:
 
     def get_context(self, max_chars: int = MAX_CONTEXT_CHARS) -> str:
         """Compact context for system prompt injection."""
+        self.refresh()
         parts = []
 
         ident = self.data.get("identity", {})
@@ -385,6 +443,7 @@ class Memory:
         return text
 
     def show(self) -> str:
+        self.refresh()
         lines = []
 
         prof = self.data.get("profile", {})
@@ -424,6 +483,7 @@ class Memory:
         return "\n".join(lines)
 
     def stats(self) -> dict:
+        self.refresh()
         return {
             "profile": len(self.data.get("profile", {})),
             "identity": len(self.data.get("identity", {})),

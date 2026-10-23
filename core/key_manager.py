@@ -138,7 +138,16 @@ DEFAULT_CONFIG: dict = {
         # OpenAI adapter; base_url + model are user-editable in Settings,
         # so this one `custom` slot can front any other compatible API.
         "groq": {
-            "model": "llama-3.3-70b-versatile",
+            # Release 26: evidence-based default (live Burmese battery,
+            # 2026-10-23, the project owner's own Groq key): the account
+            # lists no Llama chat models at all — qwen/qwen3.8-27b,
+            # openai/gpt-oss-120b and openai/gpt-oss-20b are what it
+            # serves — and qwen passed all five eval prompts (clean EV
+            # explanation, correct change and sum-of-squares, natural
+            # translations) at 0.8–1.5s per reply, where gpt-oss-20b
+            # degenerated into a repetition loop. Fresh installs start
+            # on qwen; existing configs keep the model they stored.
+            "model": "qwen/qwen3.8-27b",
             "base_url": "https://api.groq.com/openai/v1",
             "enabled": True,
         },

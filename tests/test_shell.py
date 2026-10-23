@@ -128,7 +128,14 @@ class TestRunCommand(unittest.TestCase):
         self.assertTrue(Path(shell._cwd()).is_dir())
 
     def test_stderr_of_the_last_stage_is_reported(self):
-        out = shell.run_command("cat /nonexistent-ai-agent-file")
+        # Release 26: an absolute path outside the allowed roots is
+        # refused by the jail gate before it can produce stderr (see
+        # test_shell_jail.py), so this uses a missing file under the
+        # temp dir — an allowed root — to pin the stderr reporting.
+        import tempfile
+        missing = str(Path(tempfile.gettempdir())
+                      / "nonexistent-ai-agent-file")
+        out = shell.run_command(f"cat {missing}")
         self.assertIn("No such file", out)
 
 

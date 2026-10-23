@@ -15,7 +15,7 @@ from core.log import get_logger
 # this". Bumped once per release; surfaced in Settings → System (via
 # GET /api/settings/agent) so a tester can report exactly what they run.
 # (Data-file versions are separate: Config.DATA_VERSION et al.)
-VERSION = "1.23.0"
+VERSION = "1.24.1"
 
 # Paths
 PROJECT_ROOT = Path(__file__).resolve().parent

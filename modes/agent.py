@@ -1342,6 +1342,7 @@ class AgentMode:
         "key_invalid": "API key က အလုပ်မလုပ်တော့ဘူး",
         "no_balance": "အကောင့်မှာ ဘေ/credit မရှိတော့ဘူး",
         "rate_limited": "Limit ပြည့်သွားပြီ (429)",
+        "quota_exhausted": "ဒီနေ့ အတွက် quota ကုန်သွားပြီ (429)",
         "cooling": "Key က cooldown ထဲမှာ ရှိတယ်",
         "model_unavailable": "အဲဒီ model ကို အခု မရနိုင်ဘူး",
         "no_keys": "Key မရှိဘူး",
@@ -1353,6 +1354,7 @@ class AgentMode:
         "key_invalid": "Settings မှာ key ကို ပြန်စစ်ပါ",
         "no_balance": "credit ဖြည့်ပါ၊ ဒါမှမဟုတ် free model ပြောင်းသုံးပါ",
         "rate_limited": "ခဏ စောင့်ပြီး ပြန်စမ်းပါ",
+        "quota_exhausted": "မနက်ဖြန် ပြန်စမ်းပါ၊ ဒါမှမဟုတ် တခြား provider/model ပြောင်းသုံးပါ",
         "cooling": "ခဏ စောင့်ပြီး ပြန်စမ်းပါ",
         "model_unavailable": "Settings မှာ model ပြောင်းရွေးပါ",
         "no_keys": "Settings မှာ key ထည့်ပါ",
@@ -1679,6 +1681,7 @@ class AgentMode:
         "key_invalid": "API key က အလုပ်မလုပ်တော့ဘူး (key invalid)",
         "no_balance": "အကောင့်မှာ ဘေ/credit မရှိတော့ဘူး",
         "rate_limited": "Limit ပြည့်သွားပြီ (429) — ခဏစောင့်ပြီး ပြန်စမ်းပါ",
+        "quota_exhausted": "ဒီနေ့ အတွက် quota ကုန်သွားပြီ (429) — မနက်ဖြန် ပြန်စမ်းပါ၊ ဒါမှမဟုတ် တခြား provider/model ပြောင်းသုံးပါ",
         "model_unavailable": "အဲဒီ model ကို အခု မရနိုင်ဘူး",
         "cooling": "Key တွေ အကုန် cooldown ထဲမှာ ရှိတယ် — ခဏစောင့်ပါ",
         "no_keys": "အဲဒီ provider မှာ key မရှိဘူး",
@@ -1760,20 +1763,40 @@ class AgentMode:
         "Local model ဖိုင် (.litertlm) ထည့်ထားရင်လည်း "
         "key မလိုဘဲ သုံးနိုင်ပါတယ်။")
 
+    # Release 26: the key exists but the one-time cost acknowledgement
+    # was never completed. Adding a key in Settings posts to the keys
+    # route alone; the acknowledgement is the Settings Save (the UI
+    # shows the price line first, then Save sends cost_ack) — a fresh
+    # user who only tapped "Add" landed on the raw local-model error
+    # instead (tester evaluation #2). The guidance names the exact
+    # taps; the gate itself is unchanged.
+    COST_ACK_GUIDANCE = (
+        "💰 API key ထည့်ပြီးပေမယ့် cloud model သုံးဖို့ "
+        "ကုန်ကျစရိတ် အတည်ပြုချက် မလုပ်ရသေးလို့ အခုတော့ မဖြေနိုင်သေးပါ။\n"
+        "Settings ကို ဖွင့်ပြီး Model အောက်မှာ ပြထားတဲ့ "
+        "ကုန်ကျစရိတ် စာကြောင်းကို ကြည့်ပြီးရင် Save ခလုတ်ကို "
+        "တစ်ချက် နှိပ်ပေးပါ — အဲဒါဆိုရင် cloud model နဲ့ "
+        "ချက်ချင်း သုံးနိုင်ပါပြီ။")
+
     def _key_guidance(self, user_input: str):
-        """The NO_KEY_GUIDANCE reply, or None when keys are not the
-        blocker (offline, local-only, backend unavailable…)."""
+        """The guidance reply for a settings blocker, or None when the
+        blocker is not a settings state (offline, local-only, backend
+        unavailable…). Covers both fresh-install states: no usable key
+        (Release 25) and key-present-but-cost-not-acknowledged
+        (Release 26)."""
         be = self._backend_obj()
         if be is None:
             return None
         try:
-            if be.why_not_cloud() != "no_usable_key":
-                return None
+            blocker = be.why_not_cloud()
         except Exception as e:
             log.debug("key guidance check failed: %s: %s",
                       type(e).__name__, e)
             return None
-        text = self.NO_KEY_GUIDANCE
+        text = {"no_usable_key": self.NO_KEY_GUIDANCE,
+                "cost_not_acknowledged": self.COST_ACK_GUIDANCE}.get(blocker)
+        if text is None:
+            return None
         self._messages.append({"role": "user", "text": user_input})
         self._messages.append({"role": "assistant", "text": text})
         self._trim_messages()
@@ -1830,10 +1853,11 @@ class AgentMode:
         self.turns += 1
         system = self._with_memory(system or self._system_prompt()[0])
 
-        def _step():
+        def _step(only=None, tools=None):
             step = be.step(system=system, messages=self._messages,
-                           tools=self._tools,
-                           max_tokens=config.agent_max_tokens(self.name))
+                           tools=self._tools if tools is None else tools,
+                           max_tokens=config.agent_max_tokens(self.name),
+                           only=only)
             # Recorded per successful step, not once at the end: the provider
             # can change mid-turn when a key runs out, and the chip must show
             # the model that produced the answer the user is reading.
@@ -1930,6 +1954,12 @@ class AgentMode:
             log.info("verify skipped: capability nudge turn (tool-grounded)")
         else:
             final_text = self._verify_cloud(be, final_text, _step)
+        if not exhausted:
+            # Release 26: Burmese quality gate on the final text (the
+            # budget notice is generated text — never gated, like the
+            # verify skip above).
+            final_text = self._quality_retry(
+                be, final_text, _step, answerer=step.provider or "")
         self._messages.append({"role": "assistant", "text": final_text,
                                "reasoning": step.reasoning})
         # A cloud turn's history is summarized by this same backend
@@ -2028,6 +2058,70 @@ class AgentMode:
             return (getattr(step, "text", "") or "").strip() or candidate
         return candidate
 
+    def _quality_retry(self, be, final_text: str, step_fn,
+                       answerer: str = "") -> str:
+        """Release 26: one retry when a Burmese answer fails the gate.
+
+        The free-model roulette (tester evaluation #1/#7): whichever
+        model the free router picks this turn may answer in script
+        salad. core.burmese.reply_quality judges the FINAL text only —
+        never a tool-using turn mid-flight — and when it fails, the
+        answer is re-asked ONCE through the next provider in the live
+        route (tools=[], so the retry can only produce text; it is
+        metered like any step because it goes through the callers'
+        _step closure). A retry that also fails yields the
+        better-scored of the two; any error yields the original. The
+        gate is deterministic and script-level: well-formed Burmese
+        that means the wrong thing is beyond it, and it does not
+        pretend otherwise. AI_AGENT_QUALITY_GATE=off disables it.
+        """
+        import os as _os
+        if _os.environ.get("AI_AGENT_QUALITY_GATE", "").lower() == "off":
+            return final_text
+        if not final_text:
+            return final_text
+        from core import burmese
+        user_text = ""
+        for m in reversed(self._messages):
+            if m.get("role") == "user":
+                user_text = m.get("text") or ""
+                break
+        if not burmese.has_myanmar(user_text):
+            return final_text   # the turn was not asked in Burmese
+        ok, score = burmese.reply_quality(final_text)
+        if ok:
+            return final_text
+        try:
+            route = be.route_providers()
+        except Exception as e:
+            log.debug("quality gate: route unavailable (%s: %s)",
+                      type(e).__name__, e)
+            return final_text
+        candidates = [p for p in route if p and p != answerer]
+        if not candidates:
+            log.info("quality gate failed (score %.2f) but the route "
+                     "has no other provider — keeping the original", score)
+            return final_text
+        target = candidates[0]
+        log.warning("burmese quality gate failed (score %.2f) — one "
+                    "retry via %s", score, target)
+        try:
+            step = step_fn(only=[target], tools=[])
+        except Exception as e:
+            log.info("quality retry failed (%s: %s) — keeping the "
+                     "original", type(e).__name__, e)
+            return final_text
+        cand = (getattr(step, "text", "") or "").strip()
+        if not cand:
+            return final_text
+        ok2, score2 = burmese.reply_quality(cand)
+        if ok2:
+            log.info("quality retry via %s passed the gate", target)
+            return cand
+        log.info("quality retry also failed the gate (score %.2f) — "
+                 "keeping the better of the two", score2)
+        return cand if score2 > score else final_text
+
     # ── streaming cloud attempt (Batch 2b) ────────────────────────────────
     #
     # The same cloud turn _try_cloud/_handle_cloud run; only the answer is
@@ -2117,6 +2211,7 @@ class AgentMode:
         # it back as reasoning_content — without it the NEXT turn's first
         # DeepSeek thinking request dies with a 400.
         self._stream_reasoning = ""
+        self._stream_provider = ""
         # Release 15: read back by _handle_cloud_stream at commit time,
         # the same way _stream_reasoning is — True when the end frame
         # carries the budget notice instead of a model answer.
@@ -2144,6 +2239,9 @@ class AgentMode:
                     yield ("delta", payload)     # forwarded verbatim
                 elif kind == "done":
                     info = payload
+                    # Release 26: remember who answered — the quality
+                    # gate's retry must go to a DIFFERENT provider.
+                    self._stream_provider = info.get("provider") or ""
                     # mirrors _handle_cloud at L697 — keep in sync on any
                     # change. Metered inside the pump, so even the round
                     # refreshed after the last tools (the L736 step) is
@@ -2323,11 +2421,12 @@ class AgentMode:
                     mode = self._mode()
                     system = self._with_memory(self._system_prompt()[0])
 
-                    def _step():
+                    def _step(only=None, tools=None):
                         # mirrors _handle_cloud at L690 — keep in sync on any change
                         step = be.step(system=system, messages=self._messages,
-                                       tools=self._tools,
-                                       max_tokens=config.agent_max_tokens(self.name))
+                                       tools=self._tools if tools is None else tools,
+                                       max_tokens=config.agent_max_tokens(self.name),
+                                       only=only)
                         record_usage("cloud", step.model or "", step.provider or "",
                                      mode)
                         meter_usage("cloud", step.model or "",
@@ -2347,6 +2446,15 @@ class AgentMode:
                         log.info("verify skipped: capability nudge turn (tool-grounded)")
                     else:
                         final_text = self._verify_cloud(be, final_text, _step)
+                if not getattr(self, "_stream_budget_exhausted", False):
+                    # Release 26: Burmese quality gate on the final
+                    # text — mirrors _handle_cloud. The ("end", ...)
+                    # frame below REPLACES the streamed buffer in the
+                    # UI, so a retry here is what the user ends up
+                    # reading even though deltas already flowed.
+                    final_text = self._quality_retry(
+                        be, final_text, _step,
+                        answerer=getattr(self, "_stream_provider", ""))
                 # Sanitize + commit, the mechanism _handle_cloud uses at L744-747:
                 # tool output was already banner-ed and redacted inside
                 # _execute_tool/_guard_result on the way in, so there is nothing
@@ -2485,8 +2593,10 @@ class AgentMode:
         except Exception:
             # Release 25: fresh install (no keys, no model file) — the
             # raw "Model not found" error never told the user the real
-            # fix is a key. Guidance applies only when keys are the
-            # blocker; anything else keeps the original error.
+            # fix is a key. Release 26: the same applies when a key
+            # exists but the cost acknowledgement is missing. Guidance
+            # applies only for those settings blockers; anything else
+            # keeps the original error.
             guide = self._key_guidance(user_input)
             if guide is None:
                 raise

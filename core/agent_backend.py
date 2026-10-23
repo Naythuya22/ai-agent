@@ -89,8 +89,9 @@ MODELS: dict = {
     "anthropic": ["claude-3-5-haiku-latest", "claude-3-5-sonnet-latest",
                   "claude-3-opus-latest"],
     "deepseek": ["deepseek-chat", "deepseek-reasoner"],
-    "groq": ["llama-3.3-70b-versatile", "llama-3.1-8b-instant",
-             "openai/gpt-oss-120b", "openai/gpt-oss-20b"],
+    "groq": ["qwen/qwen3.8-27b", "openai/gpt-oss-120b",
+             "openai/gpt-oss-20b", "llama-3.3-70b-versatile",
+             "llama-3.1-8b-instant"],
     "siliconflow": ["Qwen/Qwen2.5-7B-Instruct", "deepseek-ai/DeepSeek-V3",
                     "deepseek-ai/DeepSeek-R1", "Qwen/Qwen3-32B"],
     "custom": [],
@@ -166,14 +167,36 @@ class BackendExhausted(Exception):
     failures: list = []
 
 
+_QUOTA_DAY_MARKERS = ("per day", "perday", "daily", "per_day",
+                      "resource_exhausted", "resource-exhausted")
+
+
+def _is_quota_exhaustion(msg: str) -> bool:
+    """True when a (lowercased) provider error body says a quota — in
+    practice the daily free-tier quota — is used up, as opposed to a
+    short rate limit. Gemini's payload names the quota metric
+    (``GenerateRequestsPerDayPerProjectPerModel`` /
+    ``quotaId: ...PerDay...``) or ``RESOURCE_EXHAUSTED``; OpenAI-style
+    bodies say "exceeded your current quota". Both shapes need the
+    word "quota" or the RESOURCE_EXHAUSTED status plus a day/exhaustion
+    marker, so "Rate limit exceeded" alone never matches."""
+    if "resource_exhausted" in msg or "resource-exhausted" in msg:
+        return "quota" in msg or any(m in msg for m in _QUOTA_DAY_MARKERS)
+    if "quota" not in msg:
+        return False
+    if "exceeded your current quota" in msg or "exceeded the current quota" in msg:
+        return True
+    return any(m in msg for m in _QUOTA_DAY_MARKERS)
+
+
 def failure_reason(err) -> str:
     """One short code for why a provider attempt failed — the vocabulary
     the locked mode (Release 9) reports to the user instead of silently
     switching models, derived from the normalised CloudError the
     adapters already produce so every provider speaks the same words.
 
-    Codes: key_invalid | no_balance | rate_limited | model_unavailable |
-    network | server_error.
+    Codes: key_invalid | no_balance | rate_limited | quota_exhausted |
+    model_unavailable | network | server_error.
     """
     if err is None:
         return "server_error"
@@ -189,6 +212,13 @@ def failure_reason(err) -> str:
         return "key_invalid"
     if status == 402:
         return "no_balance"
+    # Release 26: a daily/quota exhaustion is also a 429, but telling the
+    # user to wait ~60 seconds for it is a lie (tester evaluation #5:
+    # Gemini's free daily quota 429s for hours). It is recognised by the
+    # provider's own words — "quota" plus an exhaustion/day marker —
+    # never by the bare 429, so a short rate limit keeps its own code.
+    if _is_quota_exhaustion(msg):
+        return "quota_exhausted"
     if kind == "rate_limit" or status == 429:
         return "rate_limited"
     if "insufficient" in msg or "balance" in msg or "billing" in msg:
@@ -1550,7 +1580,8 @@ class AgentBackend:
 
     # ---------- one step ----------
     def step(self, *, system: str, messages: list, tools: list,
-             max_tokens: int | None = None) -> Step:
+             max_tokens: int | None = None,
+             only: list | None = None) -> Step:
         # None means "whatever this install is configured to allow". A value
         # that is given is honoured only as far as the ceiling allows, so no
         # caller can quietly ask the provider for its maximum.
@@ -1575,6 +1606,19 @@ class AgentBackend:
         failures = []   # Release 24: per-provider classified records
         pin = self.locked_pin()
         providers = self.route_providers()
+        if only:
+            # Release 26: a caller may NARROW the route for one step
+            # (the Burmese quality retry asks the next provider), never
+            # widen it — the subset is intersected with the live route,
+            # so a locked route stays locked and an excluded provider
+            # is never reached through here.
+            wanted = {str(p) for p in only}
+            providers = [p for p in providers if p in wanted]
+            if not providers:
+                exc = BackendExhausted(
+                    "no provider from the requested subset is in the route")
+                exc.failures = []
+                raise exc
         if pin is not None and not providers:
             # Locked, and the one allowed provider cannot take a turn at
             # all (off / no keys / dead / cooling) — say which, and why.

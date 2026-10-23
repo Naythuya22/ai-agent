@@ -5,6 +5,12 @@ it runs WITHOUT a shell:
 
   - python / python3 / node / awk / sed are off the list (each one is
     arbitrary code execution); Python goes through tools.python_runner.
+    (Release 26: a bare `python3 --version` probe is the single
+    exception — it runs no code.)
+  - Release 26: commands run with cwd pinned to the file-tools jail
+    root, and path arguments resolving outside the allowed roots
+    (jail root, $PREFIX, temp dir, PATH dirs) are refused up front —
+    see the shell jail gate below.
   - segments are split into argv and executed with shell=False, so
     ; && || newlines $( ` > and friends never reach an interpreter.
   - the blocklist stays as a second line of defence.
@@ -136,7 +142,23 @@ def _validate(cmd: str):
         first = _first_word(seg)
         if not first:
             return f"Error: parse မရ: {seg[:40]}"
-        if first not in ALLOWED_BASE:
+        if first in ("python", "python3"):
+            # Release 26 narrow carve-out: a bare version probe
+            # (`python3 --version` / `-V`, nothing else) is not code
+            # execution — it prints one line and exits — and health
+            # checks ask for it. Every other interpreter use stays
+            # refused; real Python still goes through run_python.
+            try:
+                _toks = shlex.split(seg)
+            except ValueError:
+                return f"Error: bad syntax: {seg[:40]}"
+            _i = 0
+            while _i < len(_toks) and "=" in _toks[_i] \
+                    and not _toks[_i].startswith("-"):
+                _i += 1
+            if _toks[_i + 1:] not in (["--version"], ["-V"]):
+                return f"Error: command ခွင့်မပြု: {first}"
+        elif first not in ALLOWED_BASE:
             return f"Error: command ခွင့်မပြု: {first}"
 
         try:
@@ -167,6 +189,118 @@ def _cwd() -> str:
         return str(home_repo)
     # ဒီ machine မှာ repo က home ထဲ မဟုတ်ရင် package root ပဲ။
     return str(Path(__file__).resolve().parent.parent)
+
+
+# ─── Release 26: shell jail gate ────────────────────────────────────
+#
+# Release 16 jailed the *file* tools; run_command still executed with
+# the legacy cwd and happily read /etc/hostname (tester evaluation
+# #4). Full shell confinement is impossible — an allowlisted binary
+# can be argued into many shapes — so this is the same pragmatic gate
+# as R16, applied to the shell: the child runs with cwd pinned to the
+# current file-tools jail root, and any path-shaped argument that
+# resolves outside the allowed roots is refused BEFORE anything
+# executes. Allowed absolute roots: the jail root itself, $PREFIX
+# (Termux's usr — interpreters and binaries live there), the system
+# temp dir, and the directories on PATH (standard binary locations;
+# bare command names were always fine). Everything else absolute —
+# /etc, /storage, other apps' private dirs, ~ expanded outside the
+# jail — is refused. Relative paths resolve inside the jail root via
+# the cwd pin, so `../` escapes are caught by the same check. The
+# gate follows the file jail's switch: AI_AGENT_FILE_JAIL=off turns
+# both off, and the legacy cwd comes back with it.
+
+def _jail():
+    """(enabled, root) for the shell gate, mirroring tools.file's jail.
+
+    Read per call through tools.file's own helpers — the root is the
+    active Code-mode project when one is selected, exactly like the
+    file tools — and any failure degrades to the pre-Release-26
+    behaviour rather than breaking the tool.
+    """
+    try:
+        from tools.file import _jail_enabled, _jail_root
+        return bool(_jail_enabled()), str(_jail_root())
+    except Exception:
+        return False, ""
+
+
+def _allowed_roots(jail_root: str) -> list:
+    roots = [jail_root]
+    prefix = os.environ.get("PREFIX")
+    if prefix:
+        roots.append(prefix)
+    import tempfile
+    roots.append(tempfile.gettempdir())
+    for d in (os.environ.get("PATH") or "").split(os.pathsep):
+        if d:
+            roots.append(d)
+    return roots
+
+
+def _path_candidate(tok: str) -> str:
+    """The path spelling inside one argv token, or "" when the token
+    names no path (a bare word, a flag, a NAME=value with a non-path
+    value, a number…)."""
+    t = tok
+    if "=" in t:
+        _, _, val = t.partition("=")
+        if val.startswith(("/", "~", "$")) or "/" in val:
+            t = val
+        elif t.startswith("--"):
+            t = val
+        else:
+            return ""
+    if t.startswith(("/", "~", "$")) or "/" in t:
+        return t
+    return ""
+
+
+def _jail_gate_error(segments: list) -> str:
+    """BLOCKED error for the first out-of-roots path token, else "".
+
+    ``segments`` is the tokenised pipeline (argv lists). Runs only
+    when the file jail is enabled.
+    """
+    enabled, root = _jail()
+    if not enabled or not root:
+        return ""
+    from tools._fs_guard import is_safe_path
+    roots = _allowed_roots(root)
+    for toks in segments:
+        for tok in toks:
+            cand = _path_candidate(tok)
+            if not cand:
+                continue
+            exp = os.path.expanduser(os.path.expandvars(cand))
+            if exp.startswith("$"):
+                return ("Error: BLOCKED: path outside the allowed "
+                        f"roots: {cand} (unresolvable variable)")
+            p = Path(exp)
+            if not p.is_absolute() and ".." in p.parts:
+                # A traversal is judged against the jail root alone —
+                # the same rule tools.file._guard applies. Letting the
+                # wider roots judge it would wave `../` through
+                # whenever the jail happens to sit under the temp dir.
+                if not is_safe_path(str(Path(root) / p), root):
+                    return ("Error: BLOCKED: path outside the allowed "
+                            f"roots: {cand}")
+                continue
+            target = str(p if p.is_absolute() else Path(root) / p)
+            if not any(is_safe_path(target, r) for r in roots):
+                return ("Error: BLOCKED: path outside the allowed "
+                        f"roots: {cand}")
+    return ""
+
+
+def _run_cwd() -> str:
+    """Where commands execute: the jail root while the jail is on
+    (relative paths then resolve inside it), the legacy cwd when the
+    jail is off or the root is unusable."""
+    enabled, root = _jail()
+    if enabled and root and Path(root).is_dir():
+        return root
+    return _cwd()
 
 
 def _child_env() -> dict:
@@ -213,7 +347,7 @@ def _execute(segs: list, timeout: float) -> tuple[str, int] | str:
         for argv in segs:
             p = subprocess.Popen(
                 argv,
-                cwd=_cwd(),
+                cwd=_run_cwd(),
                 env=_child_env(),
                 stdin=prev if prev is not None else subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
@@ -276,8 +410,9 @@ def run_command(cmd: str, timeout: float = TIMEOUT_SEC) -> str:
              git log/status/diff/branch/show/config(read-only),
              pip list/show/freeze
 
-    ပိတ်: python, node, awk, sed, rm, mv, chmod, sudo, curl, wget,
-          ; && || newline, redirect, command substitution
+    ပိတ်: python (version probe ကလွဲ), node, awk, sed, rm, mv, chmod,
+          sudo, curl, wget, ; && || newline, redirect, substitution,
+          jail root အပြင်က absolute path (ဥပမာ /etc/...)
 
     Python script run ချင်ရင် tools.python_runner.run_python သုံးပါ။
 
@@ -300,6 +435,12 @@ def run_command(cmd: str, timeout: float = TIMEOUT_SEC) -> str:
         if not toks:
             return "Error: no command"
         segs.append(toks)
+
+    # Release 26: the jail gate runs on the tokenised pipeline BEFORE
+    # anything executes — a refused command has no side effects.
+    gate = _jail_gate_error(segs)
+    if gate:
+        return gate
 
     result = _execute(segs, timeout)
     if isinstance(result, str):

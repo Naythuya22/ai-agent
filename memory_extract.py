@@ -82,12 +82,34 @@ PATTERNS = [
 
 
 # Special values (fixed-string mappings)
+#
+# Release 26: a language *mention* is not a language *preference*.
+# This map used to also match the bare adverbs ("မြန်မာလို" /
+# "အင်္ဂလိပ်လို") anywhere in the message, so a one-off task —
+# "ဒီစာကြောင်းကို အင်္ဂလိပ်လို ဘာသာပြန်ပေးပါ" — was saved as the
+# standing profile fact language=… (tester evaluation #3). Only the
+# exclusive forms (…လိုပဲ / …လိုဘဲ) and explicit speak/reply
+# instructions count now, and the language block in extract() is
+# skipped entirely for a message that is itself a translation
+# request. Genuine preferences ("မြန်မာလိုပဲ ပြောပါ") still extract.
 LANGUAGE_MAP = {
     "မြန်မာလိုပဲ": "Burmese",
-    "မြန်မာလို": "Burmese",
+    "မြန်မာလိုဘဲ": "Burmese",
+    "မြန်မာလိုပြောပါ": "Burmese",
+    "မြန်မာလို ပြောပါ": "Burmese",
+    "မြန်မာလိုဖြေပါ": "Burmese",
+    "မြန်မာလို ဖြေပါ": "Burmese",
     "အင်္ဂလိပ်လိုပဲ": "English",
-    "အင်္ဂလိပ်လို": "English",
+    "အင်္ဂလိပ်လိုဘဲ": "English",
+    "အင်္ဂလိပ်လိုပြောပါ": "English",
+    "အင်္ဂလိပ်လို ပြောပါ": "English",
+    "အင်္ဂလိပ်လိုဖြေပါ": "English",
+    "အင်္ဂလိပ်လို ဖြေပါ": "English",
 }
+
+# One-off task markers: a message asking for a translation is about
+# the task's content, never about the user's standing preferences.
+_LANGUAGE_TASK_MARKERS = ("ဘာသာပြန်", "translate")
 
 
 class Extractor:
@@ -126,16 +148,20 @@ class Extractor:
         if "tone" in result:
             result["tone"] = result["tone"].replace("စွာ", "").strip()
 
-        # language (fixed map)
-        for kw, lang in LANGUAGE_MAP.items():
-            if kw in norm:
-                result["language"] = lang
-                break
+        # language (fixed map) — Release 26: never from a translation
+        # request, and only from an exclusive/preference form.
+        if not any(mk in norm or mk in norm.lower()
+                   for mk in _LANGUAGE_TASK_MARKERS):
+            for kw, lang in LANGUAGE_MAP.items():
+                if kw in norm:
+                    result["language"] = lang
+                    break
 
-        # English "speak in X"
-        m = re.search(r"speak in\s+(burmese|english|myanmar)", norm.lower())
-        if m:
-            result["language"] = m.group(1).capitalize()
+            # English "speak in X"
+            m = re.search(r"speak in\s+(burmese|english|myanmar)",
+                          norm.lower())
+            if m:
+                result["language"] = m.group(1).capitalize()
 
         return {"profile": result}
 
