@@ -257,6 +257,37 @@ def api_settings_post():
                     "prompt_tier": _prompt_tier_view(_backend())})
 
 
+@bp.route("/api/settings/models/<provider>", methods=["GET"])
+def api_settings_models(provider):
+    """Release 27 — the provider's live model catalogue for Settings.
+
+    Answers the freshest list the backend can produce (live fetch →
+    on-disk cache → built-in presets) and NEVER fails the page: every
+    fetch problem degrades one step and is reported in ``source``.
+    ``?refresh=1`` forces a refetch. No key material is ever in the
+    answer — ids and metadata only.
+    """
+    if provider not in PROVIDERS:
+        return _err("unknown provider: %s" % provider)
+    refresh = (request.args.get("refresh") or "").lower() in ("1", "true", "yes")
+    try:
+        payload = _backend().list_models(provider, refresh=refresh)
+    except Exception as e:  # list_models is built not to raise; belt+braces
+        log.warning("model list for %s failed: %s: %s",
+                    provider, type(e).__name__, e)
+        payload = {
+            "provider": provider,
+            "models": [{"id": m, "name": m, "context": None,
+                        "kind": "chat", "free": None}
+                       for m in MODELS.get(provider, [])],
+            "source": "fallback", "fetched_at": None,
+            "stored_model": "", "stored_model_status": "unknown",
+        }
+    out = {"ok": True}
+    out.update(payload)
+    return jsonify(out)
+
+
 @bp.route("/api/settings/model", methods=["GET"])
 def api_model_info():
     """Which model the *next* turn would use — a prediction read from config.

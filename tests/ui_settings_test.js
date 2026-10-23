@@ -975,6 +975,8 @@ function click(id, ev) { const e = registry[id]; if (e) e.fire(ev || 'click'); }
                    '/api/settings/doctor', '/api/settings/backup',
                    '/api/memory', '/api/remember', '/api/memory/forget',
                    '/api/settings/agent/reset',
+                   // Release 27: the live model list endpoint.
+                   /^\/api\/settings\/models\/[a-z]+(\?refresh=1)?$/,
                    /^\/api\/settings\/agent\/keys\/[a-z]+\/[A-Za-z0-9_]+$/,
                    /^\/api\/settings\/agent\/keys\/[a-z]+\/[A-Za-z0-9_]+\/activate$/];
   const bad = calls.filter(c => !allowed.some(a =>

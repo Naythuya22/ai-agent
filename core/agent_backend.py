@@ -33,6 +33,7 @@ from typing import Any, Callable
 import config
 import core.net as net
 from core import context_trim as CT
+from core import model_discovery as MD
 from core import model_registry as MR
 from core.key_manager import KeyManager, mask, redact
 from core.log import get_logger
@@ -295,6 +296,76 @@ def _status_error(status: int, raw: str, headers) -> CloudError:
     if status >= 500:
         return CloudError("server", msg, status)
     return CloudError("bad_response", msg, status)
+
+
+def _http_get_json(url: str, headers: dict,
+                   timeout: float = HTTP_TIMEOUT) -> dict:
+    """GET twin of :func:`_http_json` (Release 27 model discovery).
+
+    Same error mapping, so a failed /models fetch classifies exactly
+    like a failed chat call. The caller owns the headers (each adapter
+    authenticates its catalogue endpoint its own way).
+    """
+    hdrs = {"User-Agent": "ai-agent/1"}
+    hdrs.update(headers or {})
+    req = urllib.request.Request(url, headers=hdrs, method="GET")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            body = resp.read().decode("utf-8", "replace")
+    except urllib.error.HTTPError as e:
+        raw = ""
+        try:
+            raw = e.read().decode("utf-8", "replace")
+        except Exception:
+            pass
+        raise _status_error(e.code, raw, e.headers)
+    except urllib.error.URLError as e:
+        raise CloudError("network", str(getattr(e, "reason", e) or e))
+    except OSError as e:
+        raise CloudError("network", str(e))
+    try:
+        out = json.loads(body)
+    except ValueError:
+        raise CloudError("bad_response", _sanitize(body, 300))
+    if not isinstance(out, dict):
+        raise CloudError("bad_response", _sanitize(str(out), 300))
+    return out
+
+
+def _provider_message_oneline(body: str, max_len: int = 200) -> str:
+    """A provider error body reduced to one plain-text line (Release 27).
+
+    Locked-mode replies used to append the provider's raw body — a
+    phone screenshot showed the full ``{"error":{...}}`` JSON in the
+    error box. When the body parses as JSON with an ``error.message``,
+    that message is the detail; anything else is plain-truncated. Keys
+    are masked either way, JSON punctuation never survives, and the
+    result is capped at ``max_len`` chars.
+    """
+    raw = str(body or "").strip()
+    msg = ""
+    try:
+        parsed = json.loads(raw)
+    except ValueError:
+        parsed = None
+    if isinstance(parsed, dict):
+        err = parsed.get("error")
+        if isinstance(err, dict) and isinstance(err.get("message"), str):
+            msg = err["message"]
+        elif isinstance(err, str):
+            msg = err
+        elif isinstance(parsed.get("message"), str):
+            msg = parsed["message"]
+    if not msg:
+        msg = _sanitize(raw, 1000)
+        if msg.lstrip().startswith("{"):
+            # Truncated JSON that no longer parses: drop the punctuation
+            # rather than showing the user a brace salad.
+            msg = re.sub(r'[{}\[\]"]', " ", msg)
+    msg = " ".join(_sanitize(msg, 1000).split())
+    if len(msg) > max_len:
+        msg = msg[:max_len].rstrip()
+    return msg
 
 
 def _sse_events(lines):
@@ -832,6 +903,12 @@ class Adapter:
     def parse(self, data: dict, *, model: str, key_id: str) -> Step:
         raise NotImplementedError
 
+    def models_request(self, key: str) -> tuple[str, dict]:
+        """(url, headers) for this provider's GET model-catalogue call
+        (Release 27). The key is used for this one request only — it is
+        never logged or returned."""
+        raise NotImplementedError
+
     def request_stream(self, *, key: str, model: str, system: str,
                        messages: list, tools: list, max_tokens: int,
                        http=None, http_stream=None):
@@ -850,6 +927,10 @@ class OpenAIAdapter(Adapter):
 
     def __init__(self, base_url: str = ""):
         self.base_url = (base_url or "https://api.openai.com/v1").rstrip("/")
+
+    def models_request(self, key: str):
+        return (self.base_url + "/models",
+                {"Authorization": "Bearer %s" % key})
 
     def request(self, *, key, model, system, messages, tools, max_tokens):
         msgs = list(messages or [])
@@ -915,6 +996,11 @@ class GeminiAdapter(Adapter):
     def __init__(self, base_url: str = ""):
         self.base_url = (base_url or
                          "https://generativelanguage.googleapis.com/v1beta").rstrip("/")
+
+    def models_request(self, key: str):
+        # The key rides in the query string, exactly as generateContent
+        # does it; classification reads supportedGenerationMethods.
+        return (self.base_url + "/models?key=" + key, {})
 
     def request(self, *, key, model, system, messages, tools, max_tokens):
         contents = []
@@ -1027,6 +1113,10 @@ class AnthropicAdapter(Adapter):
 
     def __init__(self, base_url: str = ""):
         self.base_url = (base_url or "https://api.anthropic.com/v1").rstrip("/")
+
+    def models_request(self, key: str):
+        return (self.base_url + "/models",
+                {"x-api-key": key, "anthropic-version": self.VERSION})
 
     def request(self, *, key, model, system, messages, tools, max_tokens):
         out = []
@@ -1332,10 +1422,12 @@ class AgentBackend:
 
     def __init__(self, keys: KeyManager | None = None,
                  net_state: Callable[[], str] | None = None,
-                 http: Callable[..., dict] | None = None):
+                 http: Callable[..., dict] | None = None,
+                 http_get: Callable[..., dict] | None = None):
         self.keys = keys or KeyManager()
         self._net_state = net_state or (lambda: net.state())
         self._http = http or _http_json
+        self._http_get = http_get or _http_get_json
         # Live context accounting for the meter: what the last step resolved,
         # how much of it the transcript used, and whether it had to be trimmed.
         self._ctx: dict = {
@@ -1495,6 +1587,10 @@ class AgentBackend:
         and the reason as attributes, so the caller can show the user
         exactly which provider failed and why (Release 9) instead of
         dropping to the local model as if nothing was pinned."""
+        # Release 27 rider: the detail is shown to the user, so it is
+        # reduced to the provider's message as one plain line — never
+        # the raw JSON body a provider answered with.
+        detail = _provider_message_oneline(detail) if detail else ""
         exc = BackendExhausted(
             "locked provider %s unavailable: %s%s" % (
                 pin, reason, (" — " + detail) if detail else ""))
@@ -2133,6 +2229,94 @@ class AgentBackend:
         except Exception as e:
             return {"ok": False, "kind": "error",
                     "error": "%s: %s" % (type(e).__name__, e)}
+
+    # ---------- live model discovery (Release 27) ----------
+    def fetch_models_live(self, provider: str) -> list:
+        """The provider's real catalogue for a healthy key, normalised.
+
+        Raises CloudError on any failure (no key, network, bad payload)
+        — callers degrade to cache/fallback. Only ids and metadata ever
+        come back; the key itself is used for the request and dropped.
+        """
+        if provider not in ADAPTERS:
+            raise CloudError("bad_response", "unknown provider")
+        self.refresh()
+        cfg = self.keys.load()
+        prov_cfg = (cfg.get("providers") or {}).get(provider) or {}
+        adapter = ADAPTERS[provider]()
+        base = prov_cfg.get("base_url") or ""
+        if base and adapter.__class__.__name__ in _BASE_URL_ADAPTERS:
+            adapter = adapter.__class__(base)
+        entry = self.keys.next_key(provider)
+        if not entry or not entry.get("key"):
+            raise CloudError("auth", "no usable key for %s" % provider)
+        url, headers = adapter.models_request(entry.get("key", ""))
+        data = self._http_get(url, headers, 20)
+        models = MD.normalise(provider, data)
+        if not models:
+            # A valid key always lists at least one model; an empty
+            # result means the payload was not what the provider sends
+            # (proxy page, changed shape) — degrade, don't trust it.
+            raise CloudError("bad_response",
+                             "empty model list from %s" % provider)
+        return models
+
+    def list_models(self, provider: str, refresh: bool = False) -> dict:
+        """The model list Settings renders, from the freshest source.
+
+        Order: fresh cache → live fetch (which re-fills the cache) →
+        stale cache → the built-in MODELS presets. NEVER raises: any
+        failure degrades one step, so Settings always gets an answer.
+        ``stored_model_status`` is "missing" only when a real fetched
+        list (live or cache) does not contain the configured model.
+        """
+        stored = ""
+        try:
+            cfg = self.keys.load()
+            stored = ((cfg.get("providers") or {}).get(provider)
+                      or {}).get("model") or ""
+        except Exception:
+            pass
+        entry = None
+        try:
+            entry = MD.cached(provider)
+        except Exception:
+            entry = None
+        models, source, fetched_at = None, "fallback", None
+        if entry is not None and not refresh and MD.is_fresh(entry):
+            models, source = entry["models"], "cache"
+            fetched_at = MD.fetched_at_iso(entry)
+        if models is None:
+            try:
+                models = self.fetch_models_live(provider)
+                source = "live"
+                fetched_at = MD.fetched_at_iso({"fetched_at": time.time()})
+                try:
+                    MD.store(provider, models)
+                except Exception:
+                    pass
+            except Exception as e:
+                log.info("model fetch for %s failed (%s) — degrading",
+                         provider, type(e).__name__)
+                models = None
+        if models is None and entry is not None:
+            models, source = entry["models"], "cache"
+            fetched_at = MD.fetched_at_iso(entry)
+        if models is None:
+            models = MD.fallback_models(provider, MODELS)
+            source, fetched_at = "fallback", None
+        status = "unknown"
+        if source in ("live", "cache") and stored:
+            ids = {m.get("id") for m in models if isinstance(m, dict)}
+            status = "ok" if stored in ids else "missing"
+        return {
+            "provider": provider,
+            "models": models,
+            "source": source,
+            "fetched_at": fetched_at,
+            "stored_model": stored,
+            "stored_model_status": status,
+        }
 
     # ---------- parallel tools ----------
     def tools_are_parallel_safe(self, names):

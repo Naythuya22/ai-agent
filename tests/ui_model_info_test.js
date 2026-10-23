@@ -54,7 +54,11 @@ ok(main.includes("setStatus(evt.status||'ready');\n          try{updateModelInfo
    'refreshes after a streamed reply');
 ok(main.includes('try{applyModelUsage(evt)}catch(_mu){}'),
    'the stream end event paints the chip without a refetch');
-ok(!main.includes('/api/settings/model'),
+// Release 27: the live-discovery route /api/settings/models/<provider>
+// shares the old path as a prefix, so this pin now matches the old
+// endpoint's exact quoted path only — the chip still never reads it.
+ok(!main.includes("'/api/settings/model'") &&
+   !main.includes('"/api/settings/model"'),
    'the indicator no longer reads the settings config (the old static source)');
 
 console.log('--- existing features ---');

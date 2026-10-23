@@ -265,10 +265,13 @@ footer{position:relative;padding:12px 12px 16px;background:var(--bg);border-top:
 .mp[hidden]{display:none}
 .mp-head{display:flex;justify-content:space-between;align-items:center;color:var(--text-panel);font-size:13px;font-weight:600;margin-bottom:4px}
 .mp-x{background:transparent;border:0;color:var(--text-2);font-size:19px;cursor:pointer}
-.mp-row{display:flex;align-items:center;gap:8px;width:100%;text-align:left;background:var(--bg-4);border:1px solid var(--border-2);color:var(--text-panel);border-radius:9px;padding:9px 10px;margin-top:6px;cursor:pointer;font-family:inherit;font-size:13px}
+.mp-row{display:flex;flex-wrap:wrap;align-items:center;gap:8px;width:100%;text-align:left;background:var(--bg-4);border:1px solid var(--border-2);color:var(--text-panel);border-radius:9px;padding:9px 10px;margin-top:6px;cursor:pointer;font-family:inherit;font-size:13px}
 .mp-row.off{opacity:.55;cursor:default}
 .mp-name{font-weight:600;flex-shrink:0}
 .mp-model{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text-2);font-size:12px}
+.mp-models{display:flex;flex-wrap:wrap;gap:4px;flex-basis:100%;margin-top:6px}
+.mp-model-opt{background:var(--bg-3);border:1px solid var(--border-2);color:var(--text-2);border-radius:20px;padding:3px 9px;font-size:11px;cursor:pointer}
+.mp-model-opt.off{cursor:default;opacity:.55}
 .mp-note{font-size:11.5px;color:var(--text-3);margin-top:8px}
 @media (max-width: 480px) {
   .pb-label { display: none; }
@@ -449,6 +452,15 @@ footer{position:relative;padding:12px 12px 16px;background:var(--bg);border-top:
 <div class="set-line" style="margin-top:6px">
 <input id="set-model-custom" class="set-input" type="text" placeholder="or type a model name" autocomplete="off" spellcheck="false">
 </div>
+<div class="set-line" style="margin-top:6px">
+<input id="set-model-search" class="set-input" type="text" placeholder="🔍 model ရှာရန် (search)" autocomplete="off" spellcheck="false" style="flex:1">
+<label class="set-check" id="set-model-free-wrap" style="display:none"><input type="checkbox" id="set-model-free"> Free ပဲ</label>
+</div>
+<div class="set-line" style="margin-top:6px">
+<span id="set-model-source" class="set-hint" style="flex:1"></span>
+<button id="set-model-refresh" type="button" class="set-btn">↻ Refresh</button>
+</div>
+<div id="set-model-warn" class="set-cost" style="display:none;color:#e5534b"></div>
 <input id="set-base-url" class="set-input" type="text" placeholder="API base URL (optional)" autocomplete="off" spellcheck="false" style="margin-top:6px;width:100%">
 <div id="set-cost" class="set-cost"></div>
 <div id="set-ctx-limit" class="set-cost"></div>
@@ -854,6 +866,79 @@ function setStatus(t){statusTextEl.textContent=t||''}
     for(var i=0;i<ks.length;i++){ if(mpKeyUsable(ks[i]))return ''; }
     return mpKeyBlockReason(ks);
   }
+  // Release 27 — each provider row also learns its real model list
+  // from /api/settings/models/<provider> (fetched lazily when the
+  // picker opens). Chat models become tappable chips under the row;
+  // a stored model the account no longer lists is marked ⚠️. Any
+  // failure is silent: the row keeps its presets-era paint.
+  function mpLoadModels(cfg,p,row,why){
+    if(!cfg||((cfg.config||{}).backend_mode)==='local')return;
+    fetch('/api/settings/models/'+encodeURIComponent(p)).then(function(r){
+      return r.json();
+    }).then(function(j){
+      if(!j||j.error||!Array.isArray(j.models)||j.provider!==p)return;
+      var inner=cfg.config||{};
+      var stored=((inner.providers||{})[p]||{}).model||'';
+      if(j.stored_model_status==='missing'){
+        var wtag=document.createElement('span'); wtag.className='fb-tag';
+        wtag.textContent='⚠️ model မရှိတော့';
+        row.appendChild(wtag);
+      }
+      var chat=[];
+      for(var i=0;i<j.models.length;i++){
+        if(j.models[i]&&j.models[i].kind==='chat')chat.push(j.models[i]);
+      }
+      if(!chat.length)return;
+      var box=document.createElement('div'); box.className='mp-models';
+      for(var k=0;k<chat.length;k++){
+        (function(m){
+          var opt=document.createElement('span');
+          opt.className='mp-model-opt'+(why?' off':'');
+          opt.textContent=m.id+(m.id===stored?' ✓':'')+
+            (m.free===true?' · free':'');
+          if(!why){
+            opt.addEventListener('click',function(e){
+              if(e&&e.stopPropagation)e.stopPropagation();
+              mpPickModel(cfg,p,m.id);
+            });
+          }
+          box.appendChild(opt);
+        })(chat[k]);
+      }
+      row.appendChild(box);
+    }).catch(function(){});
+  }
+  async function mpPickModel(cfg,p,id){
+    var inner=cfg.config||{};
+    try{
+      var payload={providers:{}};
+      payload.providers[p]={model:id};
+      var r=await fetch('/api/settings/agent',{method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body:JSON.stringify(payload)});
+      var j=await r.json();
+      if(!j||!j.ok)throw new Error('save failed');
+    }catch(e){
+      if(mpNoteEl)mpNoteEl.textContent='Model သိမ်းမရပါ — Settings မှာ စမ်းကြည့်ပါ';
+      return;
+    }
+    if(inner.backend_mode==='local'){ mpClose(); return; }
+    if(inner.auto_switch===false){
+      if(p!==(inner.pinned_provider||'')){ pickPin(cfg,p); return; }
+      mpClose();
+      if(typeof setStatus==='function')setStatus('Model: '+id);
+      return;
+    }
+    var order=cfg.fallback_order||[];
+    var next='';
+    for(var i=0;i<order.length;i++){
+      if(!mpUsable(inner,order[i])){ next=order[i]; break; }
+    }
+    if(p!==next){ pickProvider(cfg,p); return; }
+    mpClose();
+    if(typeof setStatus==='function')setStatus('Model: '+id);
+    try{updateModelInfo()}catch(_mi){}
+  }
   async function openModelPicker(){
     if(!mpEl||!mpListEl)return;
     if(!state||state.mode!=='agent')return;
@@ -905,6 +990,7 @@ function setStatus(t){statusTextEl.textContent=t||''}
           }
         }
         mpListEl.appendChild(row);
+        mpLoadModels(cfg,p,row,why);
       })(p,why);
     }
     if(mpNoteEl){
@@ -2332,6 +2418,12 @@ setTimeout(loadSessions,300);setTimeout(refreshCtx,500);setTimeout(updateCtxButt
 // arrow functions, const/let and Set, same as the rest of the page.
 var settingsModal=document.getElementById('settings-modal');
 var settingsState={data:null,provider:'openai',fallback:[]};
+// Release 27 — the live model list for the provider being edited. The
+// dropdown is first painted from the built-in presets (unchanged), then
+// repainted from GET /api/settings/models/<provider> when that answer
+// arrives; any failure leaves the preset paint untouched.
+var modelListState={provider:'',models:null,source:'',fetchedAt:'',
+                    storedStatus:'unknown',search:'',freeOnly:false};
 
 function setq(id){return document.getElementById(id)}
 
@@ -2589,28 +2681,121 @@ function fbSwap(a,b){
   renderFallback();
 }
 
+function renderModelOptions(){
+  var sel=setq('set-model'); if(!sel)return;
+  var j=settingsState.data; if(!j)return;
+  var p=settingsState.provider;
+  var pcfg=(((j.config||{}).providers)||{})[p]||{};
+  var cur=pcfg.model||'';
+  var st=modelListState;
+  var list=st.models;
+  if(!list){
+    var presets=(j.models||{})[p]||[];
+    list=[];
+    for(var pi=0;pi<presets.length;pi++){
+      list.push({id:presets[pi],name:presets[pi],context:null,
+                 kind:'chat',free:null});
+    }
+  }
+  var q=(st.search||'').toLowerCase();
+  function matches(m){
+    return !q||m.id.toLowerCase().indexOf(q)>=0||
+      String(m.name||'').toLowerCase().indexOf(q)>=0;
+  }
+  function passes(m){
+    return matches(m)&&(!st.freeOnly||m.free===true||m.id===cur);
+  }
+  var chat=[],rest=[],storedEntry=null,i,m;
+  for(i=0;i<list.length;i++){
+    m=list[i];
+    if(m.id===cur)storedEntry=m;
+    if(m.kind==='chat')chat.push(m); else rest.push(m);
+  }
+  sel.innerHTML='';
+  function addOpt(m,disabled,tag){
+    if(!passes(m))return;
+    var o=document.createElement('option');
+    o.value=m.id;
+    o.textContent=m.id+(m.context?' · ctx '+fmtTok(m.context):'')+
+      (m.free===true?' · free':'')+(tag||'');
+    if(disabled)o.disabled=true;
+    if(m.id===cur)o.selected=true;
+    sel.appendChild(o);
+  }
+  // Chat models first; the stored value is always present (marked
+  // (custom) when the list does not know it, as before); non-chat
+  // entries follow, tagged and disabled — the custom text field stays
+  // the deliberate way to force any id.
+  for(i=0;i<chat.length;i++)addOpt(chat[i],false,'');
+  if(cur&&!storedEntry&&(!q||cur.toLowerCase().indexOf(q)>=0)){
+    var oc=document.createElement('option');
+    oc.value=cur; oc.textContent=cur+' (custom)'; oc.selected=true;
+    sel.appendChild(oc);
+  }
+  for(i=0;i<rest.length;i++){
+    addOpt(rest[i],rest[i].id!==cur,' — chat မဟုတ် ('+rest[i].kind+')');
+  }
+  var anyFree=false;
+  for(i=0;i<list.length;i++){
+    if(list[i].free!==null&&list[i].free!==undefined)anyFree=true;
+  }
+  var fw=setq('set-model-free-wrap');
+  if(fw)fw.style.display=anyFree?'':'none';
+  var src=setq('set-model-source');
+  if(src){
+    if(st.source==='live')src.textContent='🌐 Live စာရင်း'+(st.fetchedAt?' · '+st.fetchedAt:'');
+    else if(st.source==='cache')src.textContent='💾 Cache စာရင်း'+(st.fetchedAt?' · '+st.fetchedAt:'');
+    else if(st.source==='fallback')src.textContent='📋 Built-in စာရင်း (live စာရင်း မရလို့)';
+    else src.textContent='';
+  }
+  var warn=setq('set-model-warn');
+  if(warn){
+    if(st.storedStatus==='missing'&&cur){
+      warn.textContent='⚠️ သတ်မှတ်ထားတဲ့ model ('+cur+') က အကောင့်ရဲ့ လက်ရှိ စာရင်းထဲမှာ မရှိတော့ပါ — provider က ဖယ်ရှားလိုက်တာ ဖြစ်နိုင်ပါတယ်။ တခြား model ရွေးပါ။';
+      warn.style.display='';
+    }else{
+      warn.textContent=''; warn.style.display='none';
+    }
+  }
+}
+
+async function loadModelList(refresh){
+  var p=settingsState.provider;
+  var src=setq('set-model-source');
+  if(src)src.textContent='စာရင်း ဆွဲနေတယ်…';
+  try{
+    var r=await fetch('/api/settings/models/'+encodeURIComponent(p)+
+                      (refresh?'?refresh=1':''));
+    var j=await r.json();
+    if(!j||j.error||!Array.isArray(j.models)||j.provider!==p){
+      throw new Error('bad model list');
+    }
+    if(settingsState.provider!==p)return;  // switched while loading
+    modelListState.models=j.models;
+    modelListState.source=j.source||'';
+    modelListState.fetchedAt=j.fetched_at||'';
+    modelListState.storedStatus=j.stored_model_status||'unknown';
+    renderModelOptions();
+  }catch(e){
+    // Silent by design: the preset paint stays, Settings never blocks.
+    if(settingsState.provider===p)renderModelOptions();
+  }
+}
+
 function renderProvider(){
   var j=settingsState.data; if(!j)return;
   var p=settingsState.provider;
   var pcfg=(((j.config||{}).providers)||{})[p]||{};
-  var models=(j.models||{})[p]||[];
   var cur=pcfg.model||'';
-  var sel=setq('set-model');
-  if(sel){
-    sel.innerHTML='';
-    var found=false;
-    for(var i=0;i<models.length;i++){
-      var o=document.createElement('option');
-      o.value=models[i]; o.textContent=models[i];
-      if(models[i]===cur){o.selected=true;found=true;}
-      sel.appendChild(o);
-    }
-    if(cur&&!found){
-      var oc=document.createElement('option');
-      oc.value=cur; oc.textContent=cur+' (custom)'; oc.selected=true;
-      sel.appendChild(oc);
-    }
+  if(modelListState.provider!==p){
+    modelListState={provider:p,models:null,source:'',fetchedAt:'',
+                    storedStatus:'unknown',search:'',freeOnly:false};
+    var si=setq('set-model-search'); if(si)si.value='';
+    var sf=setq('set-model-free'); if(sf)sf.checked=false;
   }
+  var sel=setq('set-model');
+  if(sel)renderModelOptions();
+  loadModelList(false);
   var mc=setq('set-model-custom'); if(mc)mc.value=cur;
   var en=setq('set-enabled'); if(en)en.checked=(pcfg.enabled!==false);
   var bu=setq('set-base-url'); if(bu)bu.value=pcfg.base_url||'';
@@ -3154,6 +3339,18 @@ async function resetSettings(){
   var model=setq('set-model');
   if(model)model.addEventListener('change',function(){
     var mc=setq('set-model-custom'); if(mc)mc.value=model.value;
+  });
+  var msearch=setq('set-model-search');
+  if(msearch)msearch.addEventListener('input',function(){
+    modelListState.search=msearch.value||''; renderModelOptions();
+  });
+  var mfree=setq('set-model-free');
+  if(mfree)mfree.addEventListener('change',function(){
+    modelListState.freeOnly=!!mfree.checked; renderModelOptions();
+  });
+  var mrefresh=setq('set-model-refresh');
+  if(mrefresh)mrefresh.addEventListener('click',function(){
+    loadModelList(true);
   });
   var radios=document.getElementsByName('backend-mode');
   for(var i=0;i<radios.length;i++){
