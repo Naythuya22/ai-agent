@@ -181,6 +181,15 @@ def _is_quota_exhaustion(msg: str) -> bool:
     bodies say "exceeded your current quota". Both shapes need the
     word "quota" or the RESOURCE_EXHAUSTED status plus a day/exhaustion
     marker, so "Rate limit exceeded" alone never matches."""
+    # OpenRouter's daily free cap names itself outright (Release 27.2,
+    # live-captured): "Rate limit exceeded: free-models-per-day. Add 10
+    # credits to unlock 1000 free model requests per day" — no "quota"
+    # wording and no RESOURCE_EXHAUSTED, so the checks below miss it and
+    # a locked user was told to wait ~60 seconds for a cap that resets
+    # tomorrow. The phrase is unambiguous — it cannot appear in a
+    # per-minute throttle — so it decides on its own.
+    if "free-models-per-day" in msg or "free models per day" in msg:
+        return True
     if "resource_exhausted" in msg or "resource-exhausted" in msg:
         return "quota" in msg or any(m in msg for m in _QUOTA_DAY_MARKERS)
     if "quota" not in msg:
@@ -188,6 +197,31 @@ def _is_quota_exhaustion(msg: str) -> bool:
     if "exceeded your current quota" in msg or "exceeded the current quota" in msg:
         return True
     return any(m in msg for m in _QUOTA_DAY_MARKERS)
+
+
+_MODEL_REFUSAL_MARKERS = ("only available on", "only available in",
+                          "only available through", "only available via")
+
+
+def _is_model_refusal(msg: str) -> bool:
+    """True when a provider error body blames the MODEL, not the key.
+
+    OpenRouter gates part of its catalogue to "agentic harnesses" and
+    refuses ordinary chat calls — HTTP 403 with body code 404:
+    "<model> is only available on agentic harnesses. …" Other providers
+    answer 403/404 with "no access to model X" / "model X is not
+    available". The key in these cases is healthy: Release 27.2 exists
+    because the 403 was classified key_invalid (and, via _handle_error,
+    the key was marked dead) when the model was the problem. True key
+    failures say so plainly ("invalid api key", "unauthorized") and
+    never use these phrases.
+    """
+    text = (msg or "").lower()
+    if any(m in text for m in _MODEL_REFUSAL_MARKERS):
+        return True
+    return "model" in text and any(p in text for p in (
+        "no access", "not have access", "n't have access",
+        "not available", "is unavailable", "not accessible"))
 
 
 def failure_reason(err) -> str:
@@ -209,6 +243,13 @@ def failure_reason(err) -> str:
     msg = (getattr(err, "message", "") or "").lower()
     if kind == "network":
         return "network"
+    # Release 27.2: a 403/404 whose body blames the model (gated
+    # catalogue model, "no access to model X") is a model failure —
+    # checked BEFORE the blanket 403→key rule below, which otherwise
+    # swallows it (the adapter maps every 403 to kind "auth"). True key
+    # failures arrive as 401 or say the key is invalid, never this.
+    if status in (403, 404) and _is_model_refusal(msg):
+        return "model_unavailable"
     if kind == "auth" or status in (401, 403):
         return "key_invalid"
     if status == 402:
@@ -332,17 +373,30 @@ def _http_get_json(url: str, headers: dict,
     return out
 
 
-def _provider_message_oneline(body: str, max_len: int = 200) -> str:
-    """A provider error body reduced to one plain-text line (Release 27).
+_MSG_FIELD_RE = re.compile(r'"message"\s*:\s*"((?:\\.|[^"\\])*)"')
+_MSG_FIELD_CUT_RE = re.compile(r'"message"\s*:\s*"((?:\\.|[^"\\])*)')
 
-    Locked-mode replies used to append the provider's raw body — a
-    phone screenshot showed the full ``{"error":{...}}`` JSON in the
-    error box. When the body parses as JSON with an ``error.message``,
-    that message is the detail; anything else is plain-truncated. Keys
-    are masked either way, JSON punctuation never survives, and the
-    result is capped at ``max_len`` chars.
+
+def _unescape_json_string(frag: str) -> str:
+    try:
+        return json.loads('"%s"' % frag)
+    except ValueError:
+        return (frag.replace('\\"', '"').replace("\\n", " ")
+                .replace("\\\\", "\\"))
+
+
+def _extract_provider_message(raw: str) -> str:
+    """The provider's own message out of an error body, or "".
+
+    Full JSON first (``error.message``, a string ``error``, or a
+    top-level ``message``). Bodies reach the locked reply pre-truncated
+    by the error pipeline, which can cut the JSON mid-string and make
+    it unparseable — the shape behind the phone's "error : message :"
+    colon-soup (Release 27.2) — so a field-shaped regex recovers the
+    message from truncated JSON too, complete or cut. A message that is
+    itself stringified JSON is unwrapped one level, so the user reads
+    the inner reason rather than escaped braces.
     """
-    raw = str(body or "").strip()
     msg = ""
     try:
         parsed = json.loads(raw)
@@ -356,11 +410,45 @@ def _provider_message_oneline(body: str, max_len: int = 200) -> str:
             msg = err
         elif isinstance(parsed.get("message"), str):
             msg = parsed["message"]
+    if not msg and '"message"' in raw:
+        m = _MSG_FIELD_RE.search(raw) or _MSG_FIELD_CUT_RE.search(raw)
+        if m:
+            msg = _unescape_json_string(m.group(1))
+    if msg:
+        try:
+            inner = json.loads(msg)
+        except ValueError:
+            inner = None
+        if isinstance(inner, dict):
+            sub = inner.get("error")
+            if isinstance(sub, dict) and isinstance(
+                    sub.get("message"), str):
+                msg = sub["message"]
+            elif isinstance(inner.get("message"), str):
+                msg = inner["message"]
+            elif isinstance(inner.get("detail"), str):
+                msg = inner["detail"]
+    return msg
+
+
+def _provider_message_oneline(body: str, max_len: int = 200) -> str:
+    """A provider error body reduced to one plain-text line (Release 27).
+
+    Locked-mode replies used to append the provider's raw body — a
+    phone screenshot showed the full ``{"error":{...}}`` JSON in the
+    error box. When the body carries a message (see
+    :func:`_extract_provider_message`), that message alone is the
+    detail; the flatten-with-punctuation-stripped fallback is only for
+    bodies with no message to extract. Keys are masked either way and
+    the result is capped at ``max_len`` chars.
+    """
+    raw = str(body or "").strip()
+    msg = _extract_provider_message(raw)
     if not msg:
         msg = _sanitize(raw, 1000)
         if msg.lstrip().startswith("{"):
-            # Truncated JSON that no longer parses: drop the punctuation
-            # rather than showing the user a brace salad.
+            # JSON with no message field: drop the punctuation rather
+            # than showing the user a brace salad.
             msg = re.sub(r'[{}\[\]"]', " ", msg)
     msg = " ".join(_sanitize(msg, 1000).split())
     if len(msg) > max_len:
@@ -1852,7 +1940,11 @@ class AgentBackend:
             # its attempts and failed — report the classified reason.
             exc = self._locked_exhausted(
                 pin, failure_reason(last),
-                _sanitize(last.message or "", 200) if last is not None
+                # 400, not 200 (Release 27.2): _status_error already
+                # capped the body at 400 — cutting again at 200 sliced
+                # the JSON mid-message and the one-liner could only
+                # flatten it into colon-soup.
+                _sanitize(last.message or "", 400) if last is not None
                 else "")
             exc.failures = failures
             raise exc
@@ -2119,7 +2211,7 @@ class AgentBackend:
         if pin is not None:
             raise self._locked_exhausted(
                 pin, failure_reason(last),
-                _sanitize(last.message or "", 200) if last is not None
+                _sanitize(last.message or "", 400) if last is not None
                 else "")
         # mirrors step() L1551's BackendExhausted message — logged, never
         # raised: an empty stream is what tells the caller to go local.
@@ -2135,10 +2227,15 @@ class AgentBackend:
             log.warning("%s key %s hit 429 — parked for %.0fs%s",
                         provider, mask(entry.get("key", "")), wait,
                         ("; %s" % safe[:120]) if safe else "")
-        elif err.kind == "auth":
+        elif err.kind == "auth" and not _is_model_refusal(safe):
             self.keys.mark_auth_failed(provider, entry.get("id"), safe)
             log.warning("%s key %s rejected (%s) — marked dead",
                         provider, mask(entry.get("key", "")), err.status)
+        elif err.kind == "auth":
+            # Release 27.2: the provider blamed the MODEL (e.g. a gated
+            # catalogue model), not this key — the key stays alive.
+            log.warning("%s step refused on model grounds (%s): %s",
+                        provider, err.status, safe[:200])
         else:
             log.warning("%s step failed (%s, status %s): %s",
                         provider, err.kind, err.status, safe[:200])
