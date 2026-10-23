@@ -288,6 +288,9 @@ def api_agent_stream():
             # came from — settings / env / auto.
             "prompt_tier": usage.get("tier", ""),
             "prompt_tier_source": usage.get("tier_source", ""),
+            # Release 28 — the effort axis of the same prompt.
+            "prompt_effort": usage.get("effort", ""),
+            "prompt_effort_source": usage.get("effort_source", ""),
         })
 
     def _finish(final_text):
@@ -320,7 +323,7 @@ def api_agent_stream():
         # calling handle(), so it has to open the turn too: that is what makes
         # the prompt tier resolve once and stay put if the turn falls back to
         # the on-device model half way through.
-        agent_mode.begin_turn()
+        agent_mode.begin_turn(msg)
         # Batch 4.2i-B (H2): parity with the v2 route (L708). The
         # v1 SSE route drives the turn itself, so it must also clear
         # the per-turn tool cache — otherwise Local Only, Cloud
@@ -644,7 +647,7 @@ def api_agent_stream_v2():
             try:
                 # mirrors api_agent_stream at L435 — keep in sync: open the
                 # turn so the prompt tier resolves once and stays put.
-                agent_mode.begin_turn()
+                agent_mode.begin_turn(msg)
                 agent_mode._clear_turn_cache()
                 # The same user-message shape v1's _turn() stores. We track
                 # its index so the fallback path can roll it back: otherwise

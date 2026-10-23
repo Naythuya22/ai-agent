@@ -401,6 +401,27 @@ def _execute(segs: list, timeout: float) -> tuple[str, int] | str:
     return out + err, procs[-1].returncode
 
 
+def _shell_gate_error() -> str:
+    """BLOCKED text when this install has shell commands switched off.
+
+    Release 28: fresh installs start with run_command disabled (the
+    beginner default stamped at first server boot); the user enables
+    it in Settings. Installs from before the gate have no stored
+    value and keep the historical behaviour — KeyManager resolves
+    that. Any failure to read the config degrades to enabled, the
+    pre-gate behaviour, rather than breaking the tool.
+    """
+    try:
+        from core.key_manager import KeyManager
+        if KeyManager().shell_enabled():
+            return ""
+    except Exception:
+        return ""
+    return ("Error: BLOCKED: shell commands are disabled on this "
+            "install (beginner safety default). The user can enable "
+            "them in Settings → System → Shell commands.")
+
+
 def run_command(cmd: str, timeout: float = TIMEOUT_SEC) -> str:
     """Run a safe read-only Termux shell command (no shell interpreter).
 
@@ -420,6 +441,12 @@ def run_command(cmd: str, timeout: float = TIMEOUT_SEC) -> str:
         cmd: Run မယ့် shell command။
         timeout: စောင့်မည့် စက္ကန့် (default 10)။
     """
+    # Release 28: the enable gate runs before everything — a disabled
+    # install refuses uniformly, whatever the command spells.
+    gate_on = _shell_gate_error()
+    if gate_on:
+        return gate_on
+
     err = _validate(cmd)
     if err:
         return err

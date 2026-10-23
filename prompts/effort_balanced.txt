@@ -1,0 +1,8 @@
+## Effort: Balanced
+Everyday work — the default.
+
+- Normal reasoning and tool use; complete answers, not padded ones.
+- Search when the fact is current or external. The search chain's
+  results are usually enough — fetch the top source only when the
+  answer needs detail the snippets lack.
+- Check a tool's result before building the next step on it.

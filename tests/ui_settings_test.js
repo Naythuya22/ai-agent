@@ -54,8 +54,8 @@ ok(html.includes("if(c==='settings'){openSettings();return}"),
 
 console.log('--- prompt tier markup ---');
 has('name="prompt-tier-mode"', 'prompt tier radios share name="prompt-tier-mode"');
-['set-prompt-tier', 'set-tier-auto', 'set-tier-cloud-strong', 'set-tier-cloud-fast',
- 'set-tier-local', 'prompt-tier-hint', 'prompt-tier-state',
+['set-prompt-tier', 'set-tier-auto', 'set-tier-fast', 'set-tier-balanced',
+ 'set-tier-pro', 'prompt-tier-hint', 'prompt-tier-state',
  'prompt-tier-warn'].forEach(id => has('id="' + id + '"', 'element #' + id));
 ok(block.includes('renderPromptTier'), 'the settings block renders the tier panel');
 ok(block.includes('prompt_tier_mode:tierMode'), 'save sends the chosen tier mode');
@@ -196,7 +196,7 @@ const IDS = ['settings-modal', 'settings-close', 'settings-body', 'set-modes',
   'set-fallback', 'set-model', 'set-model-custom', 'set-base-url', 'set-cost',
   'set-ctx-limit', 'set-key-list', 'set-key-input', 'set-key-label', 'set-key-add',
   'set-msg', 'set-save', 'set-cancel', 'set-prompt-tier', 'set-tier-auto',
-  'set-tier-cloud-strong', 'set-tier-cloud-fast', 'set-tier-local',
+  'set-tier-fast', 'set-tier-balanced', 'set-tier-pro',
   'prompt-tier-hint', 'prompt-tier-state', 'prompt-tier-warn'];
 IDS.forEach(id => { const e = makeEl('div'); e.id = id; registry[id] = e; });
 
@@ -208,7 +208,9 @@ const radios = ['auto', 'local', 'cloud'].map(v => {
 
 // Same shape as the backend radios: one checked at a time, and the code under
 // test only ever reads .value / .checked.
-const TIER_MODES = ['auto', 'cloud_strong', 'cloud_fast', 'local'];
+// Release 28 — the radios are the EFFORT labels now; legacy tier
+// names remain valid stored values but have no radio of their own.
+const TIER_MODES = ['auto', 'fast', 'balanced', 'pro'];
 const tierRadios = TIER_MODES.map(v => {
   const e = makeEl('input');
   e.type = 'radio'; e.value = v; e.checked = (v === 'auto');
@@ -431,22 +433,45 @@ function click(id, ev) { const e = registry[id]; if (e) e.fire(ev || 'click'); }
   eq(registry['prompt-tier-warn'].style.display, 'none',
      'no mismatch warning when Auto agrees with itself');
 
-  // a pinned tier that does not match this turn's model must say so
+  // a pinned effort is labelled as pinned and selects its radio
+  sandbox.settingsState.data.prompt_tier = {
+    mode: 'pro', resolved: 'cloud_fast', source: 'settings',
+    model: 'gpt-4o-mini', backend: 'cloud', auto: 'cloud_fast', mismatch: false,
+    effort: 'pro', effort_source: 'settings',
+  };
+  sandbox.renderSettings();
+  eq(tierRadios.map(r => r.checked), [false, false, false, true],
+     'the pinned effort is the one selected');
+  ok(texts(registry['prompt-tier-state']).includes('Effort pinned: Pro'),
+     'a pinned effort is labelled as pinned: ' +
+     texts(registry['prompt-tier-state']));
+  eq(registry['prompt-tier-warn'].style.display, 'none',
+     'an effort pin cannot mismatch a capability tier');
+
+  // a LEGACY tier pin has no radio: none is selected, the state line
+  // still names it, the mismatch badge still fires, and the stored
+  // mode survives a render (Save must not silently erase it).
   sandbox.settingsState.data.prompt_tier = {
     mode: 'cloud_strong', resolved: 'cloud_strong', source: 'settings',
     model: 'gpt-4o-mini', backend: 'cloud', auto: 'cloud_fast', mismatch: true,
+    effort: 'pro', effort_source: 'settings',
   };
   sandbox.renderSettings();
-  eq(tierRadios.map(r => r.checked), [false, true, false, false],
-     'the pinned tier is the one selected');
+  eq(tierRadios.map(r => r.checked), [false, false, false, false],
+     'a legacy pin selects no effort radio');
   ok(texts(registry['prompt-tier-state']).includes('Pinned: Cloud Strong'),
-     'a pinned tier is labelled as pinned: ' +
+     'a legacy pin is labelled as pinned: ' +
+     texts(registry['prompt-tier-state']));
+  ok(texts(registry['prompt-tier-state']).includes('Effort: Pro'),
+     'a legacy pin shows its mapped effort: ' +
      texts(registry['prompt-tier-state']));
   ok(registry['prompt-tier-warn'].style.display !== 'none',
      'a pinned tier that fights the model shows the warning badge');
   ok(texts(registry['prompt-tier-warn']).includes('Auto'),
      'the badge says what Auto would have used: ' +
      texts(registry['prompt-tier-warn']));
+  eq(sandbox.promptTierStoredMode, 'cloud_strong',
+     'the stored legacy mode is remembered for Save');
 
   // picking a tier is not saving it — say so instead of implying it applied
   tierRadios[3].checked = true;
@@ -619,15 +644,15 @@ function click(id, ev) { const e = registry[id]; if (e) e.fire(ev || 'click'); }
      'Cloud Only turns the local-fallback note off');
   registry['set-model-custom'].value = 'gpt-4o';
   registry['set-enabled'].checked = false;
-  tierRadios[2].checked = true;             // Cloud Fast
+  tierRadios[2].checked = true;             // Balanced
   tierRadios[2].fire('change');
   registry['set-save'].fire('click');
   await new Promise(r => setImmediate(r));
   const save = calls.filter(c => c.url === '/api/settings/agent' && c.method === 'POST').pop();
   ok(!!save, 'Save POSTs /api/settings/agent');
   eq(save && save.body.backend_mode, 'cloud', 'Save sends backend_mode');
-  eq(save && save.body.prompt_tier_mode, 'cloud_fast',
-     'Save sends the chosen prompt tier');
+  eq(save && save.body.prompt_tier_mode, 'balanced',
+     'Save sends the chosen prompt effort');
   eq(save && save.body.cost_ack, true, 'cloud modes acknowledge the price on save');
   eq(save && save.body.fallback,
      ['openai', 'openrouter', 'gemini', 'anthropic', 'deepseek'],
@@ -941,6 +966,46 @@ function click(id, ev) { const e = registry[id]; if (e) e.fire(ev || 'click'); }
   ok(!!clearCall, 'R9: clear-pin posts');
   eq(clearCall && clearCall.body.pinned_provider, null,
      'R9: clear-pin posts a null pin');
+
+  // ---- Release 28: shell gate toggle + steering hints ----
+  // Every field renderSettings reads is set explicitly before each
+  // render — the Save above round-tripped settingsState.data through
+  // the fetch stub, so nothing here leans on its leftover state.
+  const cfg28 = sandbox.settingsState.data.config;
+  cfg28.shell_enabled = false;
+  cfg28.auto_switch = false;
+  cfg28.pinned_provider = 'gemini';
+  cfg28.providers.gemini.model = 'gemini-2.5-flash:free';
+  sandbox.renderSettings();
+  eq(registry['set-shell-enabled'].checked, false,
+     'R28: the shell toggle reflects a stored disabled gate');
+  ok(registry['set-pin-state'].textContent.includes('⚠️'),
+     'R28: locking a free model adds the quota caution');
+  ok(registry['set-pin-state'].textContent.includes('quota'),
+     'R28: the caution names the daily quota');
+  registry['set-shell-enabled'].checked = true;
+  const callsBeforeSave28 = calls.length;
+  registry['set-save'].fire('click');
+  await new Promise(r => setImmediate(r));
+  await new Promise(r => setImmediate(r));
+  const save28 = calls.slice(callsBeforeSave28)
+    .find(c => c.url === '/api/settings/agent' && c.method === 'POST');
+  ok(!!save28, 'R28: Save posts the settings');
+  eq(save28 && save28.body.shell_enabled, true,
+     'R28: Save carries the shell toggle state');
+  const cfg28b = sandbox.settingsState.data.config;
+  cfg28b.auto_switch = true;
+  cfg28b.pinned_provider = null;
+  sandbox.settingsState.data.backend.usable = ['openai'];
+  sandbox.renderSettings();
+  ok(registry['set-pin-state'].textContent.includes('💡'),
+     'R28: a lone usable provider earns the second-key hint');
+  sandbox.settingsState.data.backend.usable = ['openai', 'gemini'];
+  sandbox.renderSettings();
+  ok(!registry['set-pin-state'].textContent.includes('💡'),
+     'R28: two usable providers — no hint');
+  cfg28b.providers.gemini.model = 'gemini-2.5-flash';
+  delete sandbox.settingsState.data.backend.usable;
 
   // ---- Release 9.1: the fold actually toggles (IIFE on a stub DOM) ----
   const iifeStart = html.indexOf("var head=document.getElementById('cmd-toggle')");

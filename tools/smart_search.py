@@ -12,6 +12,7 @@ Pipeline:
 from __future__ import annotations
 
 import json
+import re
 from typing import Optional
 
 import config
@@ -48,10 +49,17 @@ _SYNTH_PROMPT = (
 # key straddling the cut would be left half-visible.
 _MAX_ERROR_CHARS = 300
 
+# Release 28: raw HTTP status codes are scrubbed for the same reason —
+# a backend's "HTTP Error 202" reached the model verbatim in round 3
+# and was quoted straight back to the user. The failure still reads as
+# a failure; only the code is generalised away.
+_HTTP_STATUS_RE = re.compile(r"HTTP\s*(?:Error\s*)?\d{3}", re.IGNORECASE)
+
 
 def _error_text(e: BaseException) -> str:
     """One line, credential-free, short enough to sit in a tool result."""
     raw = "%s: %s" % (type(e).__name__, e)
+    raw = _HTTP_STATUS_RE.sub("HTTP error", raw)
     return redact_secrets(raw)[:_MAX_ERROR_CHARS].replace("\n", " ").strip()
 
 
@@ -182,6 +190,20 @@ def smart_search(
             cat = "general"
         except Exception as e:
             log.debug("general DDG fallback failed: %s: %s", type(e).__name__, e)
+
+    # Release 28 — still nothing: the web_search tool's multi-source
+    # chain (DDG Lite → Bing → Brave → Wikipedia) is the last resort
+    # for every category. DDG alone was a single point of failure
+    # (round-3 evaluation: a bot-block emptied the whole search).
+    if not raw:
+        try:
+            from tools.web_search import chain_results
+            raw = chain_results(search_query, n)
+            if raw:
+                cat = "general"
+        except Exception as e:
+            log.debug("search chain fallback failed: %s: %s",
+                      type(e).__name__, e)
 
     # L5 — clean
     cleaned = clean(raw, max_keep=n)

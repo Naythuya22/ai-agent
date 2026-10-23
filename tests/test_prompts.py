@@ -150,14 +150,30 @@ class LoaderTests(unittest.TestCase):
         # Burmese tokenizes dense (~1.5 chars/token), so the same rules cost
         # more tokens than the old English prompts. Caps keep ~10% headroom
         # so minor wording edits do not fail, but runaway growth still does.
-        budgets = {"cloud_strong": 1050, "cloud_fast": 1150, "local": 950}
+        #
+        # Release 28 (2026-10-23): the matrix is two-axis now — the
+        # assembled prompt is base + tier + effort overlay, so the caps
+        # moved to the assembled-at-Balanced sizes plus per-overlay
+        # caps. Base grew by exactly the two new mandated rules
+        # (search discipline, fact integrity); tier files shrank by
+        # the duplication they used to carry. Rule substance is pinned
+        # separately in test_prompt_compliance.py — a cap here is a
+        # growth alarm, never a licence to cut a rule.
+        budgets = {"cloud_strong": 1220, "cloud_fast": 1300, "local": 1110}
         for tier, cap in budgets.items():
             n = P.estimate_tokens(P.load_prompt(tier))
             self.assertLessEqual(n, cap, "%s is %d tokens (budget %d)"
                                  % (tier, n, cap))
+        overlay_caps = {"fast": 110, "balanced": 135, "pro": 175}
+        for effort, cap in overlay_caps.items():
+            n = P.estimate_tokens(
+                (P.PROMPTS_DIR / ("effort_%s.txt" % effort)).read_text(
+                    encoding="utf-8"))
+            self.assertLessEqual(n, cap, "effort_%s is %d tokens (budget %d)"
+                                 % (effort, n, cap))
         base = P.estimate_tokens(
             (P.PROMPTS_DIR / P.BASE_NAME).read_text(encoding="utf-8"))
-        self.assertLessEqual(base, 700, "_base.txt is %d tokens" % base)
+        self.assertLessEqual(base, 760, "_base.txt is %d tokens" % base)
 
 
 class ResolveTests(unittest.TestCase):

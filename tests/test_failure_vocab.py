@@ -38,9 +38,13 @@ class FailureVocabTests(unittest.TestCase):
     def test_all_prompts_still_fit_budget(self):
         # 2026-10-10: same re-tune as test_prompts.py — Burmese-native rewrite
         # made the composed prompts denser; caps track that with ~10% headroom.
+        # Release 28 (2026-10-23): caps moved with the two-axis matrix —
+        # load_prompt() now assembles base + tier + the Balanced effort
+        # overlay. Kept in step with test_prompts.py on purpose: two
+        # pins of the same budget must never disagree.
         base = self._read("_base.txt")
-        self.assertLessEqual(P.estimate_tokens(base), 700)
-        caps = {"cloud_strong": 1050, "cloud_fast": 1150, "local": 950}
+        self.assertLessEqual(P.estimate_tokens(base), 760)
+        caps = {"cloud_strong": 1220, "cloud_fast": 1300, "local": 1110}
         for tier, cap in caps.items():
             loaded = P.load_prompt(tier)
             n = P.estimate_tokens(loaded)

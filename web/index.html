@@ -419,12 +419,12 @@ footer{position:relative;padding:12px 12px 16px;background:var(--bg);border-top:
 </div>
 
 <div class="set-row">
-<span class="set-label">Prompt Tier</span>
+<span class="set-label">Prompt Effort</span>
 <div class="set-modes" id="set-prompt-tier">
 <label><input type="radio" name="prompt-tier-mode" id="set-tier-auto" value="auto"> Auto</label>
-<label><input type="radio" name="prompt-tier-mode" id="set-tier-cloud-strong" value="cloud_strong"> Cloud Strong</label>
-<label><input type="radio" name="prompt-tier-mode" id="set-tier-cloud-fast" value="cloud_fast"> Cloud Fast</label>
-<label><input type="radio" name="prompt-tier-mode" id="set-tier-local" value="local"> Local</label>
+<label><input type="radio" name="prompt-tier-mode" id="set-tier-fast" value="fast"> Fast</label>
+<label><input type="radio" name="prompt-tier-mode" id="set-tier-balanced" value="balanced"> Balanced</label>
+<label><input type="radio" name="prompt-tier-mode" id="set-tier-pro" value="pro"> Pro</label>
 </div>
 <p class="set-hint" id="prompt-tier-hint"></p>
 <div class="set-hint" id="prompt-tier-state"></div>
@@ -473,6 +473,7 @@ footer{position:relative;padding:12px 12px 16px;background:var(--bg);border-top:
 
 <div class="set-row">
 <span class="set-label">API Keys (masked &mdash; raw key is never sent back)</span>
+<div class="set-hint">API key ဆိုတာ အဲ့ဒီ AI ကုမ္ပဏီက ထုတ်ပေးတဲ့ ကိုယ်ပိုင် လျှို့ဝှက် သော့ ပါ — သူများကို မပြော၊ မမျှဝေရပါဘူး။ Key ထည့်ပြီးရင် အဆင့် မကျန်အောင် အောက်ဆုံး Save ခလုတ်ကို နှိပ်ပါ (ကုန်ကျစရိတ် အတည်ပြုချက် အဲ့ဒီထဲ ပါပါတယ်) — ပြီးရင် chat မှာ တန်း သုံးနိုင်ပါပြီ။</div>
 <ul id="set-key-list"></ul>
 <div class="set-line">
 <input id="set-key-input" class="set-input" type="password" placeholder="sk-..." autocomplete="off" spellcheck="false">
@@ -498,6 +499,11 @@ footer{position:relative;padding:12px 12px 16px;background:var(--bg);border-top:
 </div>
 <div class="set-hint">Reset က setting တွေကိုပဲ မူလ အတိုင်း ပြန်ထားတာပါ — API key တွေ မပျက်ပါဘူး။ Backup ထဲမှာ key တွေ ပါတာမို့ ဖိုင်ကို သီးသန့် သိမ်းထားပါ။</div>
 <div id="set-doctor-out" class="set-hint" style="white-space:pre-line"></div>
+</div>
+<div class="set-row">
+<span class="set-label">Shell commands</span>
+<label class="set-check"><input type="checkbox" id="set-shell-enabled"> Shell commands (run_command) — agent က terminal command run ခွင့် ပေး</label>
+<div class="set-hint">အသစ် install တွေမှာ လုံခြုံရေး အတွက် အစ ပိတ်ထားပါတယ် — ဖွင့်ထားမှ agent က shell command တွေ သုံးနိုင်ပါမယ်။</div>
 </div>
 <div class="set-row">
 <span class="set-label">Memory</span>
@@ -871,6 +877,13 @@ function setStatus(t){statusTextEl.textContent=t||''}
     for(var i=0;i<ks.length;i++){ if(mpKeyUsable(ks[i]))return ''; }
     return mpKeyBlockReason(ks);
   }
+  // Release 28 — free-model ids, for the steering hints: OpenRouter's
+  // free router and any ":free" catalogue id. Text only — the hints
+  // never change behaviour.
+  function isFreeModelId(id){
+    var s=String(id||'');
+    return s==='openrouter/free'||/:free$/.test(s);
+  }
   // Release 27 — each provider row also learns its real model list
   // from /api/settings/models/<provider> (fetched lazily when the
   // picker opens). Chat models become tappable chips under the row;
@@ -968,9 +981,11 @@ function setStatus(t){statusTextEl.textContent=t||''}
     var pin=inner.pinned_provider||'';
     var next='';
     var i,p,why;
+    var usableCount=0;
     if(!locked){ for(i=0;i<order.length;i++){ if(!mpUsable(inner,order[i])){ next=order[i]; break; } } }
     for(i=0;i<order.length;i++){
       p=order[i]; why=mpUsable(inner,p);
+      if(!why)usableCount++;
       (function(p,why){
         var row=document.createElement('button');
         row.type='button';
@@ -1007,6 +1022,18 @@ function setStatus(t){statusTextEl.textContent=t||''}
           : 'Auto switch ပိတ်ထားတယ် — နှိပ်တဲ့ provider ကို lock ချပြီး အဲဒီ တစ်ခုတည်းပဲ သုံးမယ်။';
       }else{
         mpNoteEl.textContent='နှိပ်လိုက်ရင် နောက် အလှည့်က စပြီး အဲဒီ provider ကို အရင် သုံးပါမယ်။ Model နာမည် ပြောင်းချင်ရင် Settings မှာ ပြင်ပါ';
+      }
+      // Release 28 — resilience steering (text only): one usable
+      // provider is a single point of failure, and a locked free
+      // model stops dead when its daily quota runs out. Say so
+      // where the choice is made.
+      if(inner.backend_mode!=='local'){
+        if(!locked&&usableCount===1){
+          mpNoteEl.textContent+=' 💡 သုံးလို့ရတဲ့ provider တစ်ခု တည်းပဲ ရှိသေးတယ် — free key နောက် တစ်ခု ထပ်ထည့်ထားရင် အဲ့ဒီ provider ခဏ ချို့ယွင်းရင် တောင် ဆက် သုံးလို့ ရပါတယ်။';
+        }
+        if(locked&&pin&&isFreeModelId(((inner.providers||{})[pin]||{}).model||'')){
+          mpNoteEl.textContent+=' ⚠️ Free model ကို lock ချထားတယ် — free model တွေမှာ နေ့စဉ် အသုံးပြု ကန့်သတ် (quota) ရှိတတ်လို့ ကုန်သွားရင် အလှည့်တွေ ရပ်သွားနိုင်ပါတယ်။';
+        }
       }
     }
   }
@@ -2444,17 +2471,32 @@ function modeHint(mode){
   return 'Auto — WiFi + key ရှိရင် Cloud၊ မရှိရင် (သို့) fail ရင် Local Gemma 4B ကို အလိုအလျောက်သုံးမယ်။';
 }
 
-var TIER_NAMES={auto:'Auto',cloud_strong:'Cloud Strong',cloud_fast:'Cloud Fast',local:'Local'};
+var TIER_NAMES={auto:'Auto',cloud_strong:'Cloud Strong',cloud_fast:'Cloud Fast',local:'Local',
+  fast:'Fast',balanced:'Balanced',pro:'Pro'};
+
+// Release 28 — the mode the server last reported. A legacy tier pin
+// (cloud_fast / cloud_strong / local) has no radio in the effort
+// control; without this, an unrelated Save would find no radio
+// checked, fall back to 'auto' and silently erase the pin.
+var promptTierStoredMode='auto';
 
 function tierName(t){
   return TIER_NAMES[t]||String(t||'—');
 }
 
+// Release 28 — the Settings control picks the EFFORT (how hard a turn
+// works), not the capability tier: the tier still follows the model,
+// and Free/Paid/Local stay what they are — a key and a runtime, not
+// an effort. Legacy tier pins keep working and explain themselves.
 function promptTierHint(mode){
-  if(mode==='auto')return 'Auto — model name ကနေ prompt ကို ရွေးမယ်။ မသိတဲ့ cloud model ဆို Cloud Fast။';
-  if(mode==='local')return 'Local — ဖုန်းပေါ်က Gemma 4B အတွက် အတိုင်းလျှင် ရှည်လျှင် prompt ပဲ သုံးမယ်။';
-  if(mode==='cloud_strong')return 'Cloud Strong — ရှည်သော reasoning ပေါ် prompt။ နားလည်မှုကောင်းတဲ့ model နဲ့သာ သင့်တယ်။';
-  return 'Cloud Fast — အတိုင်းလျှင် prompt။ ပိုမြန်ပြီး token သက်သာစွာ ပြောတိုင်းလိုတယ်။';
+  if(mode==='auto')return 'Auto — turn တိုင်းရဲ့ အလုပ်ပေါ် မူတည်ပြီး Fast / Balanced / Pro ကို ရွေးမယ်။ ရိုးရိုး မေးခွန်း → Fast၊ ပုံမှန် အလုပ် → Balanced၊ code / အဆင့်များ အလုပ် → Pro။';
+  if(mode==='fast')return 'Fast — ရိုးရိုး မေးခွန်းတွေ၊ ဘာသာပြန်၊ အနှစ်ချုပ် အတိုတွေ အတွက်။ တိုက်ရိုက် ဖြေ၊ tool အနည်းဆုံး၊ snippet ပဲ ကြည့်။';
+  if(mode==='balanced')return 'Balanced — နေ့စဉ် အလုပ်တွေ အတွက် မူရင်း။ ပုံမှန် စဉ်းစားပြီး tool သုံးမယ်၊ လိုရင် search လုပ်ပြီး အသေးစိတ် လိုမှ page ဖတ်မယ်။';
+  if(mode==='pro')return 'Pro — code၊ အဆင့်များ အလုပ်၊ စာရှည်၊ အရေးကြီး ကိစ္စတွေ အတွက်။ အရင် စီမံပြီး စစ်ဆေးမယ်၊ အချက်အလက် အရေးကြီးရင် အရင်းမြစ် ၂ ခု နှိုင်းစစ်မယ်။';
+  if(mode==='local')return 'Local (အရင် setting) — ဖုန်းပေါ်က Gemma prompt ကို pin ထားတာ။ Effort အနေနဲ့ Fast လို့ သတ်မှတ်တယ်။';
+  if(mode==='cloud_strong')return 'Cloud Strong (အရင် setting) — အားကောင်းတဲ့ model prompt ကို pin ထားတာ။ Effort အနေနဲ့ Pro လို့ သတ်မှတ်တယ်။';
+  if(mode==='cloud_fast')return 'Cloud Fast (အရင် setting) — မြန်တဲ့ model prompt ကို pin ထားတာ။ Effort အနေနဲ့ Fast လို့ သတ်မှတ်တယ်။';
+  return '';
 }
 
 // The prompt is picked once per turn and kept even if the turn falls back to
@@ -2463,6 +2505,7 @@ function renderPromptTier(){
   var j=settingsState.data; if(!j)return;
   var view=j.prompt_tier||{};
   var mode=view.mode||'auto';
+  promptTierStoredMode=mode;
   var radios=document.getElementsByName('prompt-tier-mode');
   for(var i=0;i<radios.length;i++){
     radios[i].checked=(radios[i].value===mode);
@@ -2474,10 +2517,15 @@ function renderPromptTier(){
     var model=view.model?(' · '+view.model):'';
     if(mode==='auto'){
       state.textContent='Resolved: '+tierName(view.resolved)+
-        ' (source: '+(view.source||'auto')+')'+model;
+        ' (source: '+(view.source||'auto')+')'+model+
+        ' · Effort: Auto (turn အလိုက်; မူရင်း '+tierName(view.effort||'balanced')+')';
+    }else if(mode==='fast'||mode==='balanced'||mode==='pro'){
+      state.textContent='Effort pinned: '+tierName(mode)+
+        ' · prompt tier: '+tierName(view.resolved)+model;
     }else{
       state.textContent='Pinned: '+tierName(mode)+' · this turn would be '+
-        (view.backend==='cloud'?'cloud':'local')+model;
+        (view.backend==='cloud'?'cloud':'local')+model+
+        ' · Effort: '+tierName(view.effort||'balanced');
     }
   }
   var warn=setq('prompt-tier-warn');
@@ -2584,6 +2632,14 @@ function localNoteText(mode){
   return 'Auto — Fail ရင် → Local Gemma 4B';
 }
 
+// Release 28 — settings-local twin of the picker's isFreeModelId
+// (the picker helper lives in the model-indicator section, outside
+// this block; sections stay self-contained). A model id counts as
+// free when it is the openrouter/free router or carries a :free tag.
+function setModelIsFree(id){
+  id=String(id||'');
+  return id==='openrouter/free'||/:free$/.test(id);
+}
 function renderSettings(){
   var j=settingsState.data; if(!j)return;
   var ver=setq('set-version'); if(ver)ver.textContent=j.version?('ai-agent v'+j.version):'';
@@ -2598,6 +2654,11 @@ function renderSettings(){
   // the clear-pin button all read from the same config the picker uses.
   var asw=setq('set-auto-switch');
   if(asw)asw.checked=cfg.auto_switch!==false;
+  // Release 28 — the shell gate toggle reads the RESOLVED value the
+  // payload carries (a pre-gate install renders ON, a fresh install
+  // OFF), never a raw stored key that may not exist.
+  var shw=setq('set-shell-enabled');
+  if(shw)shw.checked=cfg.shell_enabled!==false;
   var pin=cfg.pinned_provider||'';
   var pinState=setq('set-pin-state');
   if(pinState){
@@ -2606,8 +2667,18 @@ function renderSettings(){
       pinState.textContent=pin
         ? ('🔒 Lock: '+(plabels[pin]||pin)+' — ဒီ provider တစ်ခုတည်းပဲ သုံးမယ်။ ကျရင် အကြောင်းရင်း ပြပြီး ရပ်မယ်။')
         : 'Auto switch ပိတ်ထားတယ် — lock ချဖို့ chat မှာ model chip ကို နှိပ်ပြီး provider ရွေးပါ။';
+      // Release 28 — locking a free model deserves one caution line:
+      // its daily quota running out stops every turn behind the lock.
+      if(pin&&setModelIsFree(((cfg.providers||{})[pin]||{}).model||'')){
+        pinState.textContent+=' ⚠️ Free model ကို lock ချထားတယ် — နေ့စဉ် quota ကုန်သွားရင် အလှည့်တွေ ရပ်သွားနိုင်ပါတယ်။';
+      }
     }else{
       pinState.textContent='Auto switch ဖွင့်ထားတယ် — provider ကျရင် နောက်တစ်ခုကို အလိုအလျောက် ပြောင်းသုံးမယ်။';
+      // Release 28 — with exactly one usable provider there is
+      // nothing to switch TO; a second free key is the cheap fix.
+      if((((j.backend||{}).usable)||[]).length===1){
+        pinState.textContent+=' 💡 သုံးလို့ရတဲ့ provider တစ်ခု တည်းပဲ ရှိသေးတယ် — free key နောက် တစ်ခု ထပ်ထည့်ထားရင် ပို ခံပါတယ်။';
+      }
     }
   }
   var pinClear=setq('set-pin-clear');
@@ -3215,15 +3286,18 @@ async function saveSettings(){
   for(var i=0;i<radios.length;i++){if(radios[i].checked)mode=radios[i].value;}
   var tierMode='auto';
   var tierRadios=document.getElementsByName('prompt-tier-mode');
+  var tierPicked=false;
   for(var t=0;t<tierRadios.length;t++){
-    if(tierRadios[t].checked)tierMode=tierRadios[t].value;
+    if(tierRadios[t].checked){tierMode=tierRadios[t].value;tierPicked=true;}
   }
+  if(!tierPicked&&promptTierStoredMode)tierMode=promptTierStoredMode;
   var custom=setq('set-model-custom');
   var payload={
     backend_mode:mode,
     cost_ack:(mode!=='local'),
     prompt_tier_mode:tierMode,
     auto_switch:(setq('set-auto-switch')?setq('set-auto-switch').checked:true),
+    shell_enabled:(setq('set-shell-enabled')?setq('set-shell-enabled').checked:true),
     fallback:(settingsState.fallback||[]).slice(0),
     providers:{}
   };

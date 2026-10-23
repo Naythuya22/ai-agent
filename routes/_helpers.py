@@ -267,20 +267,34 @@ def active_key_label() -> str:
     order follows the fallback list (the provider that would be tried first).
     Empty when no key exists: the chip then shows nothing instead of a name
     nothing could use.
+
+    Release 28: the label must name a key that could actually serve —
+    an ENABLED provider with a HEALTHY key. The old walk took the first
+    provider holding any key (never checking `enabled`) and
+    `active_entry()` falls back to bucket[0], so the chip named a
+    disabled provider's dummy key "(Active)" while another provider
+    served, and could even label a dead key active (tester evaluation
+    round 3, T4). Within a provider the pick mirrors next_key(): the
+    user-pinned key while it is usable, else the first healthy one.
     """
     try:
         from core.key_manager import KeyManager, mask
         km = KeyManager()
         cfg = km.load()
+        providers = cfg.get("providers") or {}
         seen = set()
         order = list(cfg.get("fallback") or []) + list(cfg.get("keys") or {})
         for p in order:
             if p in seen:
                 continue
             seen.add(p)
-            e = km.active_entry(p)
-            if e and (e.get("key") or ""):
-                return "Key: %s (Active)" % mask(e.get("key") or "")
+            if (providers.get(p) or {}).get("enabled") is False:
+                continue
+            healthy = [e for e in km.healthy(p) if (e.get("key") or "")]
+            if not healthy:
+                continue
+            e = next((e for e in healthy if e.get("active")), healthy[0])
+            return "Key: %s (Active)" % mask(e.get("key") or "")
     except Exception as e:
         log.warning("active key label unavailable: %s: %s",
                     type(e).__name__, e)

@@ -83,7 +83,11 @@ def _prompt_tier_view(be) -> dict:
     # What the classifier would have picked on its own — the comparison the
     # "pinned tier does not match this turn" badge is built from.
     view["auto"] = classify_tier(backend, model)
-    view["mismatch"] = bool(view["mode"] != "auto"
+    # Only a legacy tier pin can mismatch: an effort pin (Release 28)
+    # names no tier at all, so it applies cleanly to whatever tier the
+    # turn resolves to.
+    from core.prompts import TIERS as _PROMPT_TIERS
+    view["mismatch"] = bool(view["mode"] in _PROMPT_TIERS
                             and view["mode"] != view["auto"])
     return view
 
@@ -190,6 +194,14 @@ def api_settings_post():
     if "auto_switch" in body:
         cfg["auto_switch"] = bool(body["auto_switch"])
         changed.append("auto_switch")
+
+    # Release 28 — the shell-command gate. Writing the explicit value
+    # is the ONLY way besides the fresh-install stamp that this key
+    # ever lands in a config: pre-gate installs keep it absent (and
+    # enabled) until the user touches the toggle themselves.
+    if "shell_enabled" in body:
+        cfg["shell_enabled"] = bool(body["shell_enabled"])
+        changed.append("shell_enabled")
 
     if "pinned_provider" in body:
         pin = body["pinned_provider"]

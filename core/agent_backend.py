@@ -271,6 +271,62 @@ def failure_reason(err) -> str:
     return "server_error"
 
 
+_AFFORD_RE = re.compile(r"can only afford\s+(\d+)")
+
+
+def _affordable_tokens(message: str) -> int | None:
+    """The token count a no-balance 402 body says the account CAN pay
+    for — or None when the body does not state one.
+
+    OpenRouter's body states it outright: "You requested up to 8192
+    tokens, but can only afford 241." Only that explicit shape counts.
+    The sibling shape — "Prompt tokens limit exceeded: 2698 > 2012" —
+    names the prompt's size against the account's total, and parsing
+    a headroom out of it would be a guess, so it yields None.
+    """
+    m = _AFFORD_RE.search((message or "").lower())
+    if not m:
+        return None
+    try:
+        return int(m.group(1))
+    except ValueError:
+        return None
+
+
+def _balance_retry_tokens(err, prompt_tokens: int,
+                          max_tokens: int) -> int | None:
+    """The reduced max_tokens for the one constrained 402 retry.
+
+    Release 28 (tester evaluation round 3, T1): a no-balance 402 that
+    states an affordable count can be rescued by asking for less —
+    but only when the affordable count covers the estimated prompt
+    plus a minimal answer (256 tokens). The probe behind the guard:
+    the agent's fixed prompt overhead is ~2,698 tokens, so an account
+    affording 2,012 (the negative-balance shape) is unrescuable and
+    must not burn a second call proving it. The reduced budget must
+    also be a real reduction — never at or above the max_tokens that
+    just failed. Returns None for every other error shape.
+    """
+    if err is None:
+        return None
+    try:
+        status = int(getattr(err, "status", 0) or 0)
+    except (TypeError, ValueError):
+        return None
+    if status != 402 or failure_reason(err) != "no_balance":
+        return None
+    affordable = _affordable_tokens(getattr(err, "message", "") or "")
+    if affordable is None:
+        return None
+    prompt_tokens = int(prompt_tokens or 0)
+    if affordable < prompt_tokens + 256:
+        return None
+    reduced = affordable - prompt_tokens
+    if reduced < 1 or reduced >= int(max_tokens or 0):
+        return None
+    return reduced
+
+
 class Step:
     """One model turn, in the shape the agent loop already understands."""
 
@@ -1817,10 +1873,11 @@ class AgentBackend:
             if base and adapter.__class__.__name__ in _BASE_URL_ADAPTERS:
                 adapter = adapter.__class__(base)
 
-            def _attempt(entry, wire_msgs):
+            def _attempt(entry, wire_msgs, mt=None):
                 url, body, headers = adapter.request(
                     key=entry.get("key", ""), model=model, system=system,
-                    messages=wire_msgs, tools=tools, max_tokens=max_tokens)
+                    messages=wire_msgs, tools=tools,
+                    max_tokens=max_tokens if mt is None else mt)
                 data = self._http(url, body, headers)
                 step = adapter.parse(data, model=model, key_id=entry.get("id"))
                 self.keys.mark_ok(provider, entry.get("id"))
@@ -1857,6 +1914,9 @@ class AgentBackend:
                 # or keys 2..n would get no resilience at all. Still bounded —
                 # seen_ids caps each key at one attempt plus one retry.
                 context_retried = False
+                # Release 28: likewise, one constrained balance retry
+                # per key (see _balance_retry_tokens for the guard).
+                balance_retried = False
                 tried.append("%s/%s" % (provider, mask(entry.get("key", ""))))
                 try:
                     return _attempt(entry, wire)
@@ -1907,6 +1967,27 @@ class AgentBackend:
                             return _attempt(entry, wire)
                         except CloudError as retry_err:
                             e = retry_err
+                    if not balance_retried:
+                        # Release 28: a no-balance 402 that states an
+                        # affordable count gets ONE retry at a reduced
+                        # max_tokens — only when the count covers the
+                        # estimated prompt plus a minimal answer (the
+                        # guard in _balance_retry_tokens; a negative-
+                        # balance account never passes it).
+                        reduced = _balance_retry_tokens(
+                            e, int(fit.get("after") or 0), max_tokens)
+                        if reduced is not None:
+                            balance_retried = True
+                            log.warning(
+                                "%s 402 states enough balance for the "
+                                "prompt (~%d tokens) — retrying once "
+                                "with max_tokens=%d",
+                                provider, int(fit.get("after") or 0),
+                                reduced)
+                            try:
+                                return _attempt(entry, wire, reduced)
+                            except CloudError as retry_err:
+                                e = retry_err
                     last = e
                     prov_last = e
                     self._handle_error(provider, entry, e, model)
@@ -2053,7 +2134,7 @@ class AgentBackend:
             if base and adapter.__class__.__name__ in _BASE_URL_ADAPTERS:
                 adapter = adapter.__class__(base)
 
-            def _pump(entry, wire_msgs):
+            def _pump(entry, wire_msgs, mt=None):
                 """Forward one attempt's frames verbatim.
 
                 A CloudError escapes only while nothing has been forwarded
@@ -2068,8 +2149,8 @@ class AgentBackend:
                     for kind, payload in adapter.request_stream(
                             key=entry.get("key", ""), model=model,
                             system=system, messages=wire_msgs, tools=tools,
-                            max_tokens=max_tokens, http=http,
-                            http_stream=http_stream):
+                            max_tokens=max_tokens if mt is None else mt,
+                            http=http, http_stream=http_stream):
                         if kind == "delta":
                             emitted = True
                         elif kind == "done":
@@ -2139,6 +2220,9 @@ class AgentBackend:
                 seen_ids.add(entry.get("id"))       # mirrors step() L1484
                 # mirrors step() L1489 — one context retry per KEY
                 context_retried = False
+                # Release 28 — one constrained balance retry per key,
+                # mirroring step()'s (see _balance_retry_tokens).
+                balance_retried = False
                 tried.append("%s/%s" % (provider, mask(entry.get("key", ""))))
                 try:
                     # mirrors step() L1491 — keep in sync on any change
@@ -2185,6 +2269,25 @@ class AgentBackend:
                             return
                         except CloudError as retry_err:
                             e = retry_err
+                    # Release 28 — the constrained 402 retry, mirroring
+                    # step(): one retry at a reduced max_tokens when
+                    # the stated affordable count covers the prompt.
+                    if not balance_retried:
+                        reduced = _balance_retry_tokens(
+                            e, int(fit.get("after") or 0), max_tokens)
+                        if reduced is not None:
+                            balance_retried = True
+                            log.warning(
+                                "%s 402 states enough balance for the "
+                                "prompt (~%d tokens) — retrying once "
+                                "with max_tokens=%d",
+                                provider, int(fit.get("after") or 0),
+                                reduced)
+                            try:
+                                yield from _pump(entry, wire, reduced)
+                                return
+                            except CloudError as retry_err:
+                                e = retry_err
                     # mirrors step() L1540 — keep in sync on any change
                     last = e
                     self._handle_error(provider, entry, e, model)

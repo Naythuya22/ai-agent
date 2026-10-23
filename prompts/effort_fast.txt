@@ -1,0 +1,7 @@
+## Effort: Fast
+Simple Q&A, translation, short summaries.
+
+- Answer directly and briefly — the answer, nothing extra.
+- Tools only when the answer needs a file, a count, or live data.
+- If you search, the first successful source's snippets are enough.
+  Do not fetch full pages.

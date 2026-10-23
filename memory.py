@@ -51,6 +51,35 @@ _TOOL_LIMITATION_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Release 28: a fragment is not a fact. Auto-extraction (reflection
+# pass / route extraction) once saved "User prefers answers to be in"
+# — half a sentence, ending on a preposition — and it then rode along
+# in every later prompt (tester evaluation round 3, T6a residual). A
+# fact whose LAST word is a dangling function word (preposition,
+# article, conjunction, auxiliary) is incomplete by construction.
+# Narrow like the filters above: a complete fact that merely contains
+# these words is untouched; only the ending decides. English only —
+# Burmese facts close on verb forms, and a Burmese fragment rule
+# would need evidence this gate does not have.
+_DANGLING_ENDINGS = frozenset({
+    "in", "on", "at", "to", "of", "for", "with", "by", "from",
+    "the", "a", "an", "and", "or", "but", "nor",
+    "is", "are", "was", "were", "be", "been", "being",
+    "as", "than", "so", "if", "when", "while", "into", "onto",
+    "about", "over", "under", "per",
+})
+
+_FRAGMENT_TRIM = "\"'“”‘’»)]}>"
+
+
+def _is_fragment_fact(text: str) -> bool:
+    """True when the fact trails off mid-sentence (dangling ending)."""
+    s = " ".join(str(text or "").split()).strip(_FRAGMENT_TRIM)
+    if not s:
+        return False
+    last = s.rsplit(" ", 1)[-1].strip(_FRAGMENT_TRIM + ".,;:!?…")
+    return last.lower() in _DANGLING_ENDINGS
+
 
 def _has_negative_self(text: str) -> bool:
     """True when the text describes the agent's own limits."""
@@ -214,7 +243,8 @@ class Memory:
 
         ``reason`` is "" on success; otherwise one of: ``empty``,
         ``too long``, ``negative self``, ``rule reference``,
-        ``tool limitation``, ``exact duplicate``, ``near-duplicate``.
+        ``tool limitation``, ``fragment``, ``exact duplicate``,
+        ``near-duplicate``.
         Callers that only need success/failure use the bool half.
         """
         self.refresh()
@@ -232,6 +262,9 @@ class Memory:
         if _is_tool_limitation(text):
             log.debug("fact rejected (tool limitation): %s", text[:60])
             return False, "tool limitation"
+        if _is_fragment_fact(text):
+            log.debug("fact rejected (fragment): %s", text[:60])
+            return False, "fragment"
         norm = _normalize_for_dup(text)
         for f in self.data["facts"]:
             if f.get("text") == text:

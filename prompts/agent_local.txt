@@ -2,9 +2,6 @@
 
 RULES
 - Tool needed? One call. Wait. Use output only.
-- Tool error: say it. Do not retry the same call.
-- Cannot finish? BLOCKED: <reason>.
-- Never invent answers.
 
 TOOL SYNTAX
 read_file(path="...")

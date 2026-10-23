@@ -15,7 +15,7 @@ from core.log import get_logger
 # this". Bumped once per release; surfaced in Settings → System (via
 # GET /api/settings/agent) so a tester can report exactly what they run.
 # (Data-file versions are separate: Config.DATA_VERSION et al.)
-VERSION = "1.25.2"
+VERSION = "1.26.0"
 
 # Paths
 PROJECT_ROOT = Path(__file__).resolve().parent
@@ -401,14 +401,37 @@ AGENT_REFLECT_MAX_TOKENS = _env_int(
 # useful when a provider's model name says nothing useful about its size, or
 # when a local phone answers better with the short on-device prompt.
 #
+# Release 28 added a SECOND, orthogonal axis: effort (fast / balanced /
+# pro) — how hard the agent works a turn, chosen per turn from the task
+# in Auto, or pinned in Settings. Effort is NOT payment and NOT runtime:
+# a free model can serve Fast or Balanced, Pro can run on the strongest
+# available target, paid or free or local. The Settings control now
+# offers the effort labels (auto / fast / balanced / pro); the legacy
+# tier names stay accepted forever and map as:
+#
+#     cloud_fast   -> capability tier cloud_fast, effort fast
+#     cloud_strong -> capability tier cloud_strong, effort pro
+#     local        -> capability tier local, effort fast (conservative:
+#                     the on-device window is small)
+#
 # Two places can set the mode and they are not equal: the Settings store wins,
 # and AI_AGENT_PROMPT_TIER is the fallback for a shell that has not been given
 # a Settings page yet. The tier is resolved once per turn — see
 # core.prompts.resolve_tier.
 
 PROMPT_TIER_MODE_DEFAULT = "auto"
-PROMPT_TIER_MODES = ("auto", "cloud_strong", "cloud_fast", "local")
+PROMPT_TIER_MODES = ("auto", "cloud_strong", "cloud_fast", "local",
+                     "fast", "balanced", "pro")
 PROMPT_TIER_ENV = "AI_AGENT_PROMPT_TIER"
+
+# Legacy capability-tier mode -> the effort it implies (Release 28).
+# Modes not listed here ("auto", the effort labels themselves) carry
+# no legacy mapping.
+PROMPT_TIER_LEGACY_EFFORT = {
+    "cloud_fast": "fast",
+    "cloud_strong": "pro",
+    "local": "fast",
+}
 
 
 def stored_prompt_tier_mode() -> str:

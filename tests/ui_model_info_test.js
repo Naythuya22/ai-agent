@@ -330,6 +330,45 @@ vm.runInContext(block, sandbox, { filename: 'indicator-block.js' });
   ok(threw === null, 'an error settings answer does not escape the banner check');
   eq(nkBanner.className, '', 'an error settings answer keeps the banner hidden');
 
+  // ── Release 28: picker steering hints (text only) ──
+  // Locked on a FREE model, the note must carry the quota caution —
+  // a locked free model stops every turn when its day runs out.
+  settingsReply = {
+    ok: true,
+    config: {
+      backend_mode: 'cloud',
+      auto_switch: false,
+      pinned_provider: 'gemini',
+      providers: {
+        openai: { model: 'gpt-4o-mini', enabled: true },
+        gemini: { model: 'gemini-2.5-flash:free', enabled: true },
+        deepseek: { model: 'deepseek-chat', enabled: true },
+      },
+      keys: {
+        openai: [{ id: 'k1', status: 'ok' }],
+        gemini: [{ id: 'k2', status: 'ok' }],
+        deepseek: [],
+      },
+    },
+    providers: ['openai', 'gemini', 'deepseek'],
+    provider_labels: { openai: 'OpenAI', gemini: 'Gemini', deepseek: 'DeepSeek' },
+    fallback_order: ['openai', 'gemini', 'deepseek'],
+  };
+  await sandbox.openModelPicker();
+  ok(regEl('mp-note').textContent.includes('⚠️'),
+     'R28: locking a free model adds the quota caution to the picker note');
+  // Auto with exactly one usable provider → the second-key hint.
+  settingsReply.config.auto_switch = true;
+  settingsReply.config.pinned_provider = null;
+  settingsReply.config.keys.gemini = [{ id: 'k2', status: 'dead' }];
+  await sandbox.openModelPicker();
+  ok(regEl('mp-note').textContent.includes('💡'),
+     'R28: a lone usable provider earns the second-key hint in the picker');
+  settingsReply.config.keys.gemini = [{ id: 'k2', status: 'ok' }];
+  await sandbox.openModelPicker();
+  ok(!regEl('mp-note').textContent.includes('💡'),
+     'R28: two usable providers — no hint');
+
   console.log(failures ? `\n${failures} FAILURES` : '\nALL PASS');
   process.exit(failures ? 1 : 0);
 })().catch(e => { console.error('FAIL exception: ' + (e && e.stack || e)); process.exit(1); });

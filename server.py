@@ -145,6 +145,20 @@ def main() -> None:
     print("  POST /v1/chat/completions", flush=True)
     print("\nPress Ctrl+C to stop.\n", flush=True)
 
+    # Release 28: a brand-new install (no agent_config.json yet) gets
+    # the beginner defaults — today that is shell commands OFF until
+    # the user enables them in Settings. An existing config file is
+    # never touched here. Lives in main() only, so library/test use
+    # of KeyManager never stamps anything.
+    try:
+        from core.key_manager import KeyManager
+        if KeyManager().apply_fresh_install_defaults():
+            print("  Fresh install: beginner defaults applied "
+                  "(shell commands off — enable in Settings)",
+                  flush=True)
+    except Exception as exc:  # startup must survive this too
+        log.warning("fresh-install defaults failed: %s", exc)
+
     # Data outlives code: when the newest backup in ~ is over a week
     # old, take a fresh one before serving. A failed backup must never
     # stop the server — warn and continue. Opt out with

@@ -103,7 +103,8 @@ DEFAULT_CONFIG: dict = {
     # quietly switching models behind the user's back.
     "auto_switch": True,
     "pinned_provider": None,
-    # prompt_tier_mode (auto | cloud_strong | cloud_fast | local) is deliberately
+    # prompt_tier_mode (auto | fast | balanced | pro, plus the legacy
+    # cloud_strong | cloud_fast | local — see config.py) is deliberately
     # NOT in the defaults: an absent key has to stay absent, or the "auto"
     # default would look like a Settings choice and the
     # AI_AGENT_PROMPT_TIER environment fallback could never be reached. See
@@ -336,6 +337,49 @@ class KeyManager:
         m = cfg.get("backend_mode")
         return m if m in MODES else DEFAULT_MODE
 
+    # ---------- Release 28: beginner shell default ----------
+    #
+    # run_command is the most powerful tool the agent has. For a
+    # brand-new install it now starts DISABLED, until the user turns
+    # it on in Settings — the round-3 public-user review's ask.
+    # The stored key is deliberately ABSENT from DEFAULT_CONFIG:
+    # absence means "an install that predates the gate", and those
+    # resolve to the historical behaviour (enabled) without their
+    # files ever being rewritten. Only apply_fresh_install_defaults()
+    # — called once from the server entry point when no config file
+    # exists yet — writes the explicit False a fresh install starts
+    # with, and only a Settings save writes an explicit True/False
+    # after that.
+
+    def shell_enabled(self) -> bool:
+        """Whether run_command may execute on this install.
+
+        The explicit stored value wins; an absent key is a pre-gate
+        install and keeps the behaviour it has always had (enabled).
+        """
+        cfg = self.load()
+        if "shell_enabled" in cfg:
+            return bool(cfg["shell_enabled"])
+        return True
+
+    def apply_fresh_install_defaults(self) -> bool:
+        """Stamp the beginner defaults onto a brand-new install.
+
+        True when this call created the config file with the fresh
+        defaults (today: shell commands off). A config file that
+        already exists — every existing user — is left completely
+        untouched, byte for byte.
+        """
+        if self.path.exists():
+            return False
+        cfg = self.load()
+        cfg["shell_enabled"] = False
+        self.save()
+        log.info("fresh install: beginner defaults written to %s "
+                 "(shell commands off until enabled in Settings)",
+                 self.path)
+        return True
+
     def save(self) -> None:
         cfg = self.load()
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -370,6 +414,11 @@ class KeyManager:
         keys = cfg.get("keys") or {}
         fresh = json.loads(json.dumps(DEFAULT_CONFIG))
         fresh["keys"] = {p: list(keys.get(p) or []) for p in PROVIDERS}
+        # Release 28: an explicit shell gate survives a reset, like
+        # the keys do — Reset restores settings, it must not silently
+        # flip a safety switch the install (or its user) settled.
+        if "shell_enabled" in cfg:
+            fresh["shell_enabled"] = bool(cfg["shell_enabled"])
         self._cfg = fresh
         self.save()
         return self.public()
@@ -552,6 +601,9 @@ class KeyManager:
             "fallback": list(cfg.get("fallback") or []),
             "cost_ack": bool(cfg.get("cost_ack", False)),
             "auto_switch": bool(cfg.get("auto_switch", True)),
+            # Resolved, not raw (Release 28): a pre-gate install has
+            # no stored key and must still render its toggle ON.
+            "shell_enabled": self.shell_enabled(),
             "pinned_provider": cfg.get("pinned_provider") or None,
             # Report the stored value only. The environment fallback belongs to
             # config.prompt_tier_mode(), which routes/settings_api.py calls to

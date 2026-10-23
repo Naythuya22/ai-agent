@@ -51,10 +51,16 @@ KINDS = ("chat", "embed", "audio", "image", "other")
 
 # Conservative id heuristics, applied only when provider metadata says
 # nothing. Each family is a thing that cannot hold a chat conversation.
+# Release 28: the round-3 evaluation found a dozen media models in the
+# live OpenRouter list wearing chat rows (Lyria music, the *-image
+# generation families, Voxtral transcription) — the hint lists grew to
+# name those families. Still conservative: a hint only ever fires on a
+# family that is media by construction, and an unknown id stays chat.
 _EMBED_HINTS = ("embed",)
-_AUDIO_HINTS = ("whisper", "tts", "transcribe")
-_IMAGE_HINTS = ("dall-e", "gpt-image", "imagen")
-_OTHER_HINTS = ("moderation", "rerank", "guard")
+_AUDIO_HINTS = ("whisper", "tts", "transcribe", "lyria", "voxtral",
+                "suno", "music")
+_IMAGE_HINTS = ("dall-e", "gpt-image", "imagen", "-image", "flux")
+_OTHER_HINTS = ("moderation", "rerank", "guard", "veo")
 
 
 def kind_from_id(model_id: str) -> str:
@@ -69,6 +75,34 @@ def kind_from_id(model_id: str) -> str:
     if any(h in mid for h in _OTHER_HINTS):
         return "other"
     return "chat"
+
+
+def _kind_from_modality(modality: str) -> str | None:
+    """Kind from OpenRouter's ``architecture.modality``, or None.
+
+    The string is ``<inputs>-><outputs>`` ("text+image->text",
+    "text->audio"). Only the OUTPUT side decides what a model can be
+    used for: a model whose outputs contain no text cannot hold a chat
+    conversation, whatever its id looks like — that is decisive, and
+    overrides the id heuristics. A text output says nothing the id
+    heuristics don't (an audio->text transcription model still isn't a
+    chat model), so it returns None and the heuristics keep their say.
+    Video has no kind of its own in KINDS; it lands in "other".
+    """
+    if "->" not in modality:
+        return None
+    outputs = [t.strip() for t in modality.rsplit("->", 1)[1].split("+")]
+    if "embedding" in outputs:
+        return "embed"
+    if "text" in outputs or not outputs:
+        return None
+    if "audio" in outputs:
+        return "audio"
+    if "image" in outputs:
+        return "image"
+    if "video" in outputs:
+        return "other"
+    return None
 
 
 def _entry(mid, name=None, context=None, kind="chat", free=None):
@@ -105,8 +139,9 @@ def _normalise_list_entry(provider: str, entry) -> dict | None:
     arch = entry.get("architecture")
     if isinstance(arch, dict):
         modality = str(arch.get("modality") or "").lower()
-        if "embedding" in modality:
-            kind = "embed"
+        by_modality = _kind_from_modality(modality)
+        if by_modality is not None:
+            kind = by_modality
     if provider == "openrouter":
         free = _openrouter_free(entry)
     return _entry(mid, name=entry.get("name"), context=context,

@@ -36,7 +36,8 @@ except ImportError:
 # them, so a cloud step that is retried on another provider cannot erase which
 # prompt the turn was given.
 _USAGE = {"backend": "", "model": "", "provider": "", "mode": "",
-          "tier": "", "tier_source": "", "label": "", "at": 0.0}
+          "tier": "", "tier_source": "", "effort": "", "effort_source": "",
+          "label": "", "at": 0.0}
 
 
 def usage_label(backend: str, model: str, mode: str) -> str:
@@ -103,6 +104,17 @@ def record_tier(tier: str, source: str) -> dict:
     """
     _USAGE["tier"] = (tier or "").strip()
     _USAGE["tier_source"] = (source or "").strip()
+    return dict(_USAGE)
+
+
+def record_effort(effort: str, source: str) -> dict:
+    """Remember the effort this turn was routed to (Release 28).
+
+    The effort twin of record_tier(): written once when the turn's
+    prompt is resolved, never overwritten by per-step usage updates.
+    """
+    _USAGE["effort"] = (effort or "").strip()
+    _USAGE["effort_source"] = (source or "").strip()
     return dict(_USAGE)
 
 
@@ -376,6 +388,8 @@ class AgentMode:
         # The prompt tier resolved for the turn in flight — None between turns.
         # See _system_prompt().
         self._turn_prompt: tuple | None = None
+        # This turn's user message, for the effort router. See begin_turn().
+        self._turn_user_text: str = ""
         # Tool-loop iterations spent this turn — the "iter" half of the budget
         # hint. Reset alongside the prompt tier in begin_turn().
         self._turn_iter = 0
@@ -409,14 +423,20 @@ class AgentMode:
     # different instructions were given for one question. The next turn
     # re-resolves, so a Settings change takes effect on the next message.
 
-    def begin_turn(self) -> None:
+    def begin_turn(self, user_text: str = "") -> None:
         """Mark the start of a user turn.
 
         Called by handle() and by the SSE route, which drives the cloud/local
         branches itself and so never goes through handle(). Between turns this
         is None, which is what makes the first _system_prompt() of a turn
         resolve and every later one reuse.
+
+        ``user_text`` is the turn's message, kept only so the effort
+        router (Release 28) can read its task signals when the prompt
+        resolves; callers that do not have it pass nothing and the
+        router falls back to the balanced default.
         """
+        self._turn_user_text = user_text or ""
         self._turn_prompt = None
         self._turn_iter = 0
         self._turn_tools = []
@@ -449,19 +469,27 @@ class AgentMode:
             mode = config.prompt_tier_mode()
             tier, source = prompt_tiers.resolve_tier(backend, model, mode=mode)
             auto_tier = prompt_tiers.classify_tier(backend, model)
-            if mode != "auto" and mode != auto_tier:
+            if mode in prompt_tiers.TIERS and mode != auto_tier:
                 # Worth a log line and a badge in Settings: the user pinned a
                 # tier that does not match what this turn is actually running.
+                # (Effort pins — fast/balanced/pro — are not tiers and can
+                # never mismatch this way; they apply to any tier.)
                 log.warning("prompt tier %s is pinned but this turn looks like "
                             "%s (%s/%s) — using the pinned prompt", mode,
                             auto_tier, backend or "?", model or "?")
-            prompt = prompt_tiers.load_prompt(tier)
+            # Release 28 — the second axis: effort, from the same mode
+            # (an override) or from this turn's task signals (Auto).
+            effort, effort_source = prompt_tiers.resolve_effort(
+                backend, getattr(self, "_turn_user_text", ""), mode=mode)
+            prompt = prompt_tiers.load_prompt(tier, effort)
             hint = self._budget_hint()
             if hint:
                 prompt = prompt + "\n\n" + hint
             self._turn_prompt = (prompt, tier)
             record_tier(tier, source)
-            log.info("prompt tier %s (source %s) for %s/%s", tier, source,
+            record_effort(effort, effort_source)
+            log.info("prompt tier %s (source %s), effort %s (source %s) "
+                     "for %s/%s", tier, source, effort, effort_source,
                      backend or "?", model or "?")
         return self._turn_prompt
 
@@ -1438,6 +1466,40 @@ class AgentMode:
     _TARGET_KEYS = ("path", "file", "filename", "filepath", "directory",
                     "dir", "query", "command", "cmd", "url", "name")
 
+    # Release 28: the read-only tools whose result a failure summary
+    # may quote back to the user. Read-only is the whole point — a
+    # lookup turn's answer often IS the tool result (round 3, T6a2:
+    # memory_read had already found the fact when the composing step
+    # died, and the summary named the tool but never the answer).
+    # Write/shell results are never quoted: their text can carry
+    # command output the summary has no business repeating.
+    _QUOTABLE_RESULT_TOOLS = frozenset(
+        {"memory_read", "read_file", "list_files"})
+    _QUOTE_CAP = 600
+
+    @classmethod
+    def _quote_result(cls, name: str, text: str) -> str:
+        """The quotable form of one guarded read-only result.
+
+        The transcript text already passed _guard_result on the way
+        in (banner + redaction); this strips the model-facing wrapper
+        (cache tag, banner lines) for a human reader, redacts once
+        more for defence in depth, and caps the length.
+        """
+        body = str(text or "")
+        if body.startswith("[cached] "):
+            body = body[len("[cached] "):]
+        lines = [ln for ln in body.splitlines()
+                 if ln.strip() not in (safety.INJECTION_BANNER_OPEN,
+                                       safety.INJECTION_BANNER_CLOSE)]
+        body = safety.redact_secrets("\n".join(lines).strip())
+        if len(body) > cls._QUOTE_CAP:
+            body = body[:cls._QUOTE_CAP].rstrip() + "…"
+        if not body:
+            return ""
+        return ("နောက်ဆုံး ဖတ်လို့ ရခဲ့တဲ့ ရလဒ် (%s):\n%s"
+                % (name, body))
+
     @staticmethod
     def _shorten_target(target: str) -> str:
         """Fit a tool target into the summary's 48-char slot.
@@ -1466,6 +1528,7 @@ class AgentMode:
         completed a result this turn.
         """
         parts = []
+        quote = ""
         pending = None
         for m in entries:
             role = m.get("role")
@@ -1487,11 +1550,18 @@ class AgentMode:
                 label = "%s (%s)" % (name, target) if target else name
                 parts.append("%s — %s" % (label, "အောင်မြင်"
                                            if ok else "မအောင်မြင်"))
+                if ok and name in self._QUOTABLE_RESULT_TOOLS:
+                    q = self._quote_result(name, m.get("text") or "")
+                    if q:
+                        quote = q   # the LATEST read-only result wins
         if not parts:
             return ""
-        return ("ဒီနေရာအထိ ပြီးပြီးသားပါ: " + "၊ ".join(parts) + "။\n"
-                "ဒီအလုပ်တွေကို မှတ်တမ်းမှာ သိမ်းထားပါတယ် — "
-                "အစက ပြန်လုပ်စရာ မလိုပါဘူး။")
+        out = ("ဒီနေရာအထိ ပြီးပြီးသားပါ: " + "၊ ".join(parts) + "။\n"
+               "ဒီအလုပ်တွေကို မှတ်တမ်းမှာ သိမ်းထားပါတယ် — "
+               "အစက ပြန်လုပ်စရာ မလိုပါဘူး။")
+        if quote:
+            out += "\n" + quote
+        return out
 
     def _failure_turn_text(self, mode: str, classified: dict,
                            summary: str) -> str:
@@ -1755,11 +1825,22 @@ class AgentMode:
     # already established; when the blocker is keys, close the turn
     # with guidance instead of the exception. Same transcript contract
     # as _cloud_only_reply (append the pair, save, record no usage).
+    # Release 28: the guide no longer stops at the key. Round 3's
+    # public-user walk found two gaps for a first-time user: "API
+    # key" was never explained in plain words, and the cost-ack step
+    # waiting behind the key entry arrived as a second, unexplained
+    # wall. Both are now named here, up front, in beginner Burmese.
     NO_KEY_GUIDANCE = (
         "🔑 သုံးလို့ရတဲ့ API key မရှိသေးလို့ အခုတော့ မဖြေနိုင်သေးပါ။\n"
+        "API key ဆိုတာ အဲ့ဒီ AI ကုမ္ပဏီက ထုတ်ပေးတဲ့ ကိုယ်ပိုင် "
+        "လျှို့ဝှက် သော့ လိုပါပဲ — ကိုယ် ထုတ်ယူ၊ ကိုယ်ပဲ သုံးရပြီး "
+        "သူများကို မပြော၊ မမျှဝေရပါဘူး။\n"
         "Settings မှာ provider key တစ်ခု ထည့်လိုက်ရင် သုံးလို့ ရပါပြီ — "
         "Gemini key ကို Google AI Studio (aistudio.google.com) မှာ "
         "ကိုယ့် Google အကောင့်နဲ့ အခမဲ့ ထုတ်ယူနိုင်ပါတယ်။\n"
+        "Key ထည့်ပြီးရင် နောက်တစ်ဆင့် အနေနဲ့ Settings မှာ "
+        "ကုန်ကျစရိတ် စာကြောင်းကို ကြည့်ပြီး Save ခလုတ် နှိပ်ပေးဖို့ "
+        "လိုပါသေးတယ် — အဲဒါပြီးရင် တန်း သုံးနိုင်ပါပြီ။\n"
         "Local model ဖိုင် (.litertlm) ထည့်ထားရင်လည်း "
         "key မလိုဘဲ သုံးနိုင်ပါတယ်။")
 
@@ -2548,7 +2629,7 @@ class AgentMode:
         if not user_input or not user_input.strip():
             raise ValueError("user_input must be non-empty")
         self._clear_turn_cache()   # a new user turn starts a new cache
-        self.begin_turn()          # …and a new prompt tier
+        self.begin_turn(user_input)  # …and a new prompt tier + effort
         mode = self._mode()   # read once: Cloud Only must be decided up front
         if self._is_http() and mode != "cloud":
             from core.http_llm import _post, CHAT_TIMEOUT, HTTPLLMError
