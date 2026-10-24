@@ -4,6 +4,8 @@
 // source line, refresh), and (b) the chat picker's per-provider model
 // chips + ⚠️ mark. Both halves run the real script blocks against a
 // stub DOM + a fake fetch, like the other ui_* suites.
+// (c) Release 30.1: stylesheet pins keeping the picker sheet bounded
+// (max-height + a scrolling #mp-list) — see the section below.
 //
 //   node tests/ui_models_test.js [path/to/index.html]
 'use strict';
@@ -57,6 +59,87 @@ console.log('--- markup ---');
 ['set-model-search', 'set-model-free', 'set-model-free-wrap',
  'set-model-source', 'set-model-refresh', 'set-model-warn', 'set-model-list',
 ].forEach(id => ok(html.includes('id="' + id + '"'), 'element #' + id));
+
+// ═══ (c) Picker sheet bounds (Release 30.1) ═══
+// The .mp sheet is position:fixed at the bottom of a body that never
+// scrolls (overflow:hidden). Before 30.1 it had NO max-height and
+// #mp-list had NO overflow, so once R27's per-row model chips made the
+// content several screens tall the sheet could not be scrolled at all
+// and its top (header + close button + first rows) sat off-screen.
+// These pins read the inline stylesheet as text — the stub DOM has no
+// cascade or layout, so the hidden-state pin emulates the cascade for
+// the two competing `display` rules by specificity.
+console.log('--- picker sheet bounds (30.1) ---');
+const styleText = (html.match(/<style>([\s\S]*?)<\/style>/) || [])[1] || '';
+function ruleBody(sel) {
+  const i = styleText.indexOf(sel + '{');
+  if (i < 0) return null;
+  let depth = 0, j = i + sel.length;
+  for (; j < styleText.length; j++) {
+    if (styleText[j] === '{') depth++;
+    else if (styleText[j] === '}' && --depth === 0) break;
+  }
+  return styleText.slice(i + sel.length + 1, j).replace(/\s+/g, '');
+}
+function specificity(sel) {
+  // (ids, classes+attributes+pseudo-classes, elements) for the simple
+  // selectors used by the picker sheet rules.
+  const ids = (sel.match(/#[\w-]+/g) || []).length;
+  const cls = (sel.match(/\.[\w-]+|\[[^\]]+\]|:(?!:)[\w-]+/g) || []).length;
+  const els = (sel.replace(/#[\w-]+|\.[\w-]+|\[[^\]]+\]/g, ' ')
+    .match(/(^|\s)[a-zA-Z][\w-]*/g) || []).length;
+  return [ids, cls, els];
+}
+function specCmp(a, b) {
+  for (let k = 0; k < 3; k++) { if (a[k] !== b[k]) return a[k] - b[k]; }
+  return 0;
+}
+const mpBody = ruleBody('.mp');
+ok(mpBody !== null, '.mp rule exists');
+ok(mpBody && mpBody.includes('max-height:88vh'), '.mp caps height at 88vh');
+ok(mpBody && mpBody.includes('max-height:88dvh'), '.mp caps height at 88dvh');
+ok(mpBody && mpBody.indexOf('max-height:88vh') < mpBody.indexOf('max-height:88dvh'),
+   'dvh cap follows the vh fallback');
+ok(mpBody && mpBody.includes('display:flex'), '.mp is a flex container');
+ok(mpBody && mpBody.includes('flex-direction:column'), '.mp stacks as a column');
+const mpListBody = ruleBody('#mp-list');
+ok(mpListBody !== null, '#mp-list rule exists');
+ok(mpListBody && mpListBody.includes('overflow-y:auto'), '#mp-list scrolls vertically');
+ok(mpListBody && mpListBody.includes('min-height:0'), '#mp-list can shrink inside the flex column');
+ok(mpListBody && mpListBody.includes('-webkit-overflow-scrolling:touch'),
+   '#mp-list keeps momentum touch scrolling');
+ok(mpListBody && mpListBody.includes('overscroll-behavior:contain'),
+   '#mp-list does not chain scroll to the page');
+ok((ruleBody('.mp-head') || '').includes('flex-shrink:0'),
+   '.mp-head (title + close button) never shrinks out of view');
+ok((ruleBody('.mp-note') || '').includes('flex-shrink:0'),
+   '.mp-note never shrinks out of view');
+const mpHiddenBody = ruleBody('.mp[hidden]');
+ok(mpHiddenBody !== null && mpHiddenBody.includes('display:none'),
+   '.mp[hidden] still sets display:none');
+(function () {
+  // Emulated cascade for the picker element's `display`: not hidden ->
+  // only .mp applies (flex); hidden -> .mp and .mp[hidden] compete and
+  // the higher-specificity rule must win (none), at any source order.
+  const rules = [
+    { sel: '.mp', when: () => true },
+    { sel: '.mp[hidden]', when: h => h },
+  ];
+  function displayFor(hidden) {
+    let best = null;
+    for (const r of rules) {
+      if (!r.when(hidden)) continue;
+      const body = ruleBody(r.sel) || '';
+      const m = body.match(/display:([\w-]+)/);
+      if (!m) continue;
+      const sp = specificity(r.sel);
+      if (!best || specCmp(sp, best.sp) >= 0) best = { sp, val: m[1] };
+    }
+    return best && best.val;
+  }
+  eq(displayFor(false), 'flex', 'picker shows as flex when not hidden');
+  eq(displayFor(true), 'none', 'hidden attribute still hides the picker (specificity wins)');
+})();
 
 const S_START = '// ── Settings (hybrid backend';
 const sIdx = main.indexOf(S_START);
