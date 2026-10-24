@@ -459,6 +459,23 @@ def _wire_image(image) -> dict:
     return {"data": data, "mime": mime}
 
 
+def _wait_phrase(wait: int) -> str:
+    """The "(~…)" suffix naming a park's remaining wait in a failure
+    line.
+
+    Under an hour the wait stays in seconds, as it has always
+    rendered. A DAILY-quota park (Release 30) runs until the
+    provider's next daily reset — hours away — and printing it as a
+    raw seconds figure ("(~73800 စက္ကန့်)") is a number no user can
+    act on, so long waits read in hours.
+    """
+    if wait < 3600:
+        return "(~%d စက္ကန့်)" % wait
+    hours = wait / 3600.0
+    text = ("%d" % hours) if hours == int(hours) else ("%.1f" % hours)
+    return "(~%s နာရီ)" % text
+
+
 class AgentMode:
     """Agent mode using LiteRT native automatic tool calling."""
 
@@ -1623,7 +1640,7 @@ class AgentMode:
                 line += " — " + hint
                 if info["reason"] in ("cooling", "rate_limited") \
                         and info["wait"]:
-                    line += " (~%d စက္ကန့်)" % info["wait"]
+                    line += " " + _wait_phrase(info["wait"])
             lines.append(line)
         known = [merged[p]["wait"] for p in order if merged[p]["wait"]]
         park_only = bool(order) and all(

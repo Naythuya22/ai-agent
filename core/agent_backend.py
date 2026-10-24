@@ -2446,7 +2446,21 @@ class AgentBackend:
                       model: str) -> None:
         safe = redact(_sanitize(err.message or err.kind, 500),
                       self.keys.all_keys())
-        if err.kind == "rate_limit":
+        if err.kind == "rate_limit" and _is_quota_exhaustion(
+                (err.message or "").lower()):
+            # Release 30: a DAILY-quota 429 parks until the provider's
+            # daily reset, not for the 60s default — failure_reason()
+            # has named this case quota_exhausted to the user since
+            # Release 26, but the key itself was back in rotation a
+            # minute later and every later step/turn re-paid the same
+            # refusal. The detector gets exactly the input
+            # failure_reason() passes it.
+            wait = self.keys.mark_quota_exhausted(provider,
+                                                  entry.get("id"))
+            log.warning("%s key %s hit daily quota — parked for %.0fs%s",
+                        provider, mask(entry.get("key", "")), wait,
+                        ("; %s" % safe[:120]) if safe else "")
+        elif err.kind == "rate_limit":
             wait = self.keys.mark_rate_limited(provider, entry.get("id"),
                                                err.retry_after)
             log.warning("%s key %s hit 429 — parked for %.0fs%s",

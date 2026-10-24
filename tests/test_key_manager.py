@@ -10,6 +10,8 @@ import os
 import tempfile
 import time
 import unittest
+from datetime import datetime, timezone
+from unittest import mock
 from pathlib import Path
 
 from _harness import bootstrap
@@ -126,6 +128,98 @@ class KeyManagerTest(unittest.TestCase):
         e = self.km.add_key("openai", "sk-cool3-eeeeeeeeeeeeee")
         wait = self.km.mark_rate_limited("openai", e["id"])
         self.assertGreaterEqual(wait, KM.DEFAULT_COOLDOWN - 2)
+
+    # ---------- daily-quota parking (Release 30) ----------
+
+    @staticmethod
+    def _ts(y, m, d, hh=0, mm=0):
+        return datetime(y, m, d, hh, mm, tzinfo=timezone.utc).timestamp()
+
+    def test_quota_reset_gemini_ends_at_next_pacific_midnight_pdt(self):
+        # 2026-07-15 17:00 UTC is 10:00 PDT; the next Pacific midnight
+        # is 2026-07-16 00:00 PDT = 07:00 UTC.
+        now = self._ts(2026, 7, 15, 17)
+        self.assertEqual(KM.quota_reset_after("gemini", now),
+                         self._ts(2026, 7, 16, 7))
+
+    def test_quota_reset_gemini_ends_at_next_pacific_midnight_pst(self):
+        # 2026-01-15 20:00 UTC is 12:00 PST; the next Pacific midnight
+        # is 2026-01-16 00:00 PST = 08:00 UTC.
+        now = self._ts(2026, 1, 15, 20)
+        self.assertEqual(KM.quota_reset_after("gemini", now),
+                         self._ts(2026, 1, 16, 8))
+
+    def test_quota_reset_utc_providers_end_at_next_utc_midnight(self):
+        now = self._ts(2026, 7, 15, 17)
+        for provider in ("groq", "openrouter", "openai"):
+            self.assertEqual(KM.quota_reset_after(provider, now),
+                             self._ts(2026, 7, 16, 0), msg=provider)
+
+    def test_quota_reset_always_lands_within_25_hours(self):
+        # Includes the autumn DST day (2026-11-01, 25 hours long in
+        # Pacific): just after its midnight the park is ~24.5h.
+        for now in (self._ts(2026, 7, 15, 17), self._ts(2026, 1, 15, 20),
+                    self._ts(2026, 11, 1, 7, 30), self._ts(2026, 3, 8, 8),
+                    self._ts(2026, 10, 24, 0, 30)):
+            for provider in ("gemini", "groq", "openrouter"):
+                park = KM.quota_reset_after(provider, now) - now
+                self.assertGreater(park, 0, msg=(provider, now))
+                self.assertLessEqual(park, 25 * 3600, msg=(provider, now))
+
+    def test_pacific_midnight_computed_fallback_matches(self):
+        # The no-tzdata path must answer identically — pinned directly
+        # so a Termux without tzdata is covered on any test host.
+        self.assertEqual(KM._pacific_midnight_computed(self._ts(2026, 7, 15, 17)),
+                         self._ts(2026, 7, 16, 7))
+        self.assertEqual(KM._pacific_midnight_computed(self._ts(2026, 1, 15, 20)),
+                         self._ts(2026, 1, 16, 8))
+        self.assertEqual(KM._pacific_midnight_computed(self._ts(2026, 11, 1, 7, 30)),
+                         self._ts(2026, 11, 2, 8))
+
+    def test_pacific_offset_phases_and_switch_boundaries(self):
+        def at(y, m, d, hh, mm=0):
+            return datetime(y, m, d, hh, mm, tzinfo=timezone.utc)
+        self.assertEqual(KM._pacific_offset_hours_at(at(2026, 7, 15, 17)), -7)
+        self.assertEqual(KM._pacific_offset_hours_at(at(2026, 1, 15, 20)), -8)
+        # Spring forward 2026: PDT starts Sun Mar 8, 10:00 UTC.
+        self.assertEqual(KM._pacific_offset_hours_at(at(2026, 3, 8, 9, 59)), -8)
+        self.assertEqual(KM._pacific_offset_hours_at(at(2026, 3, 8, 10, 0)), -7)
+        # Fall back 2026: PST resumes Sun Nov 1, 09:00 UTC.
+        self.assertEqual(KM._pacific_offset_hours_at(at(2026, 11, 1, 8, 59)), -7)
+        self.assertEqual(KM._pacific_offset_hours_at(at(2026, 11, 1, 9, 0)), -8)
+
+    def test_mark_quota_exhausted_parks_until_the_reset(self):
+        fixed = self._ts(2026, 7, 15, 17)          # 10:00 PDT
+        e = self.km.add_key("gemini", "gem-quota1-aaaaaaaaaaaaaa")
+        other = self.km.add_key("gemini", "gem-quota2-bbbbbbbbbbbbbb")
+        with mock.patch.object(KM, "_now", return_value=fixed):
+            wait = self.km.mark_quota_exhausted("gemini", e["id"])
+            entry = [k for k in self.km.entries("gemini")
+                     if k["id"] == e["id"]][0]
+            self.assertEqual(entry["status"], "rate_limited")
+            self.assertEqual(entry["last_error"], "quota exhausted (daily)")
+            self.assertEqual(entry["cooldown_until"], self._ts(2026, 7, 16, 7))
+            self.assertEqual(wait, self._ts(2026, 7, 16, 7) - fixed)
+            healthy = [k["id"] for k in self.km.healthy("gemini")]
+            self.assertNotIn(e["id"], healthy)
+            self.assertIn(other["id"], healthy)
+            # a success clears the park like any other (mark_ok resets
+            # status + cooldown by design)
+            self.km.mark_ok("gemini", e["id"])
+            entry = [k for k in self.km.entries("gemini")
+                     if k["id"] == e["id"]][0]
+            self.assertEqual(entry["status"], "ok")
+            self.assertEqual(entry["cooldown_until"], 0.0)
+            self.assertIn(e["id"],
+                          [k["id"] for k in self.km.healthy("gemini")])
+
+    def test_mark_quota_exhausted_utc_provider_ends_at_utc_midnight(self):
+        fixed = self._ts(2026, 7, 15, 17)
+        e = self.km.add_key("groq", "groq-quota1-aaaaaaaaaaaa")
+        with mock.patch.object(KM, "_now", return_value=fixed):
+            self.km.mark_quota_exhausted("groq", e["id"])
+            entry = self.km.entries("groq")[0]
+            self.assertEqual(entry["cooldown_until"], self._ts(2026, 7, 16, 0))
 
     def test_auth_failure_marks_key_dead_forever(self):
         e = self.km.add_key("openai", "sk-dead-ffffffffffffffff")

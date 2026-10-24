@@ -29,6 +29,7 @@ import json
 import os
 import secrets
 import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import config
@@ -230,6 +231,99 @@ def _default_entry(key: str, label: str) -> dict:
         "last_error": None,
         "used": 0,
     }
+
+
+# ── daily-quota reset moments (Release 30) ─────────────────────────
+#
+# A 429 that spends a DAILY quota must park the key until the quota
+# actually resets: parking it for DEFAULT_COOLDOWN re-selects a key
+# the provider will keep refusing for the rest of the day. Each
+# provider's daily counter rolls over at a documented moment:
+#
+# * gemini     — midnight Pacific Time. Google's Gemini API
+#                rate-limits documentation states that the
+#                requests-per-day quotas reset at midnight Pacific.
+# * groq       — 00:00 UTC (Groq's daily limits reset at midnight UTC).
+# * openrouter — 00:00 UTC (the free-model daily counter is a UTC day).
+# * any other provider — 00:00 UTC, the stated default rule.
+
+
+def _nth_weekday_day(year: int, month: int, weekday: int, n: int) -> int:
+    """Day-of-month of the n-th `weekday` (Mon=0 … Sun=6) of a month."""
+    first = datetime(year, month, 1, tzinfo=timezone.utc).weekday()
+    return 1 + (weekday - first) % 7 + 7 * (n - 1)
+
+
+def _pacific_offset_hours_at(utc_dt: datetime) -> int:
+    """US Pacific UTC offset (whole hours) at an aware UTC instant.
+
+    PDT (UTC−7) runs from the second Sunday of March at 02:00 local —
+    10:00 UTC — to the first Sunday of November at 02:00 local —
+    09:00 UTC; PST (UTC−8) the rest of the year. The switch instants
+    are stated directly in UTC so no tz database is needed.
+    """
+    y = utc_dt.year
+    start = datetime(y, 3, _nth_weekday_day(y, 3, 6, 2), 10,
+                     tzinfo=timezone.utc)
+    end = datetime(y, 11, _nth_weekday_day(y, 11, 6, 1), 9,
+                   tzinfo=timezone.utc)
+    return -7 if start <= utc_dt < end else -8
+
+
+def _pacific_midnight_computed(now_ts: float) -> float:
+    """Next Pacific midnight after `now_ts`, from the built-in DST
+    rules above — the fallback for hosts with no tzdata (Termux).
+
+    Both DST switches happen at 02:00 local, never at midnight, so
+    the offset in force at the target midnight is the offset at the
+    first UTC guess for it; the result is exact.
+    """
+    utc_dt = datetime.fromtimestamp(now_ts, timezone.utc)
+    off = _pacific_offset_hours_at(utc_dt)
+    local = utc_dt + timedelta(hours=off)
+    nxt_local = (local + timedelta(days=1)).replace(
+        hour=0, minute=0, second=0, microsecond=0)
+    guess = nxt_local - timedelta(hours=off)
+    off2 = _pacific_offset_hours_at(guess)
+    return (nxt_local - timedelta(hours=off2)).timestamp()
+
+
+def _next_pacific_midnight(now_ts: float) -> float:
+    """Epoch seconds of the next 00:00 America/Los_Angeles after
+    `now_ts`. Prefers zoneinfo (exact, maintenance-free); falls back
+    to the built-in US Pacific computation when the host has no
+    tzdata."""
+    try:
+        from zoneinfo import ZoneInfo
+        tz = ZoneInfo("America/Los_Angeles")
+        local = datetime.fromtimestamp(now_ts, tz)
+        nxt = (local + timedelta(days=1)).replace(
+            hour=0, minute=0, second=0, microsecond=0)
+        return nxt.timestamp()
+    except Exception:
+        return _pacific_midnight_computed(now_ts)
+
+
+def _next_utc_midnight(now_ts: float) -> float:
+    """Epoch seconds of the next 00:00 UTC after `now_ts`."""
+    utc_dt = datetime.fromtimestamp(now_ts, timezone.utc)
+    nxt = (utc_dt + timedelta(days=1)).replace(
+        hour=0, minute=0, second=0, microsecond=0)
+    return nxt.timestamp()
+
+
+def quota_reset_after(provider: str, now_ts: float) -> float:
+    """Epoch seconds of `provider`'s next daily-quota reset after
+    `now_ts` — always in (now_ts, now_ts + 25h]: a Pacific day is at
+    most 25 hours long (the autumn DST day), a UTC day at most 24.
+
+    gemini resets at midnight Pacific (Gemini API rate-limit docs);
+    groq and openrouter at 00:00 UTC; every other provider takes the
+    UTC default.
+    """
+    if provider == "gemini":
+        return _next_pacific_midnight(now_ts)
+    return _next_utc_midnight(now_ts)
 
 
 class KeyManager:
@@ -557,6 +651,25 @@ class KeyManager:
         self._patch(provider, key_id, status=STATUS_LIMITED,
                     cooldown_until=until, last_error="429 rate limited")
         return until - _now()
+
+    def mark_quota_exhausted(self, provider: str, key_id: str) -> float:
+        """Park a key whose DAILY quota is spent until that quota
+        resets (Release 30).
+
+        Same STATUS_LIMITED as a short rate limit — healthy(), the
+        Settings chips and failure_overview() already speak that
+        language — but the park ends at the provider's next daily
+        reset moment (see :func:`quota_reset_after`), not after
+        DEFAULT_COOLDOWN: a 60-second park re-selects a key the
+        provider will keep refusing until its day rolls over.
+        Returns the park length in seconds, like mark_rate_limited.
+        """
+        now = _now()
+        until = quota_reset_after(provider, now)
+        self._patch(provider, key_id, status=STATUS_LIMITED,
+                    cooldown_until=until,
+                    last_error="quota exhausted (daily)")
+        return until - now
 
     def mark_auth_failed(self, provider: str, key_id: str, error: str = "") -> None:
         self._patch(provider, key_id, status=STATUS_DEAD,
