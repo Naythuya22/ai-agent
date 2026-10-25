@@ -2512,6 +2512,33 @@ class AgentMode:
                  "keeping the better of the two", score2)
         return cand if score2 > score else final_text
 
+    def _local_code_repair(self, final_text: str) -> str:
+        """Release 31: one syntax repair attempt for a local code reply.
+
+        The check itself lives in core.codecheck (deterministic, no
+        model judgement): this method only supplies the conversation.
+        The correction exchange rides the LiteRT conversation, so the
+        model's own context next turn includes its fix; the stored
+        transcript keeps just the final answer, like the tool loop's
+        intermediate steps collapse into the turn they served. A repair
+        attempt that answers with tool calls is refused — the gate
+        asked for code only, and a tool round is not a repair.
+        """
+        from core import codecheck
+        if self._conv is None:
+            return final_text
+
+        def _send(prompt: str):
+            resp = self._conv.send_message(prompt)
+            if isinstance(resp, dict) and resp.get("tool_calls"):
+                return None
+            try:
+                return resp["content"][0]["text"]
+            except (KeyError, IndexError, TypeError):
+                return None
+
+        return codecheck.repair(final_text, _send)
+
     # ── streaming cloud attempt (Batch 2b) ────────────────────────────────
     #
     # The same cloud turn _try_cloud/_handle_cloud run; only the answer is
@@ -3115,6 +3142,14 @@ class AgentMode:
                     final_text = resp["content"][0]["text"]
                 except (KeyError, IndexError, TypeError):
                     final_text = str(resp)
+
+        # Release 31: local code gate — a predominantly-code reply that
+        # does not parse gets ONE machine-checked repair attempt on this
+        # same conversation (core.codecheck). This tail is reachable only
+        # by the on-device engine: cloud turns returned through
+        # _handle_cloud above, so no cloud answer can pass through here.
+        if final_text:
+            final_text = self._local_code_repair(final_text)
 
         self._messages.append({"role": "assistant", "text": final_text})
         self._cap_history()   # F2: cap history (compact, then trim)

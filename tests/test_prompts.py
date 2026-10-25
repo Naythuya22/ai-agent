@@ -159,7 +159,12 @@ class LoaderTests(unittest.TestCase):
         # the duplication they used to carry. Rule substance is pinned
         # separately in test_prompt_compliance.py — a cap here is a
         # growth alarm, never a licence to cut a rule.
-        budgets = {"cloud_strong": 1220, "cloud_fast": 1300, "local": 1110}
+        # Release 31 (2026-10-25): the local cap moves 1110 -> 1160 for
+        # the mandated CODE ANSWERS section in agent_local.txt (a code
+        # shape example for the on-device model, ~84 tokens compressed
+        # from a 204-token first draft to earn its place). Still ~14%
+        # of the 8K window; the alarm keeps its teeth.
+        budgets = {"cloud_strong": 1220, "cloud_fast": 1300, "local": 1160}
         for tier, cap in budgets.items():
             n = P.estimate_tokens(P.load_prompt(tier))
             self.assertLessEqual(n, cap, "%s is %d tokens (budget %d)"

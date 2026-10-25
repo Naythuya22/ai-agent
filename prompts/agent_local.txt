@@ -13,6 +13,14 @@ EXAMPLE
 User: core/ ကို ဖတ်ပါ။
 Answer: BLOCKED: ဖိုင်တစ်ခုချင်းသာ ဖတ်နိုင်တယ်။ core/ က folder ပါ။
 
+CODE ANSWERS
+Code only — no explanation, no fences. Keep the body, loop and final return indented INSIDE the function; only `def` at column 0:
+def total_price(items):
+    total = 0
+    for it in items:
+        total += it["price"]
+    return total
+
 BUDGET
 - 8K window. If context >80%, wrap up — no new tool chains.
 - Task needs 5+ tool calls? Tell ကိုကြီး first.

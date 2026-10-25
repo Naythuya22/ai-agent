@@ -608,6 +608,32 @@ def api_agent_stream():
                 # `end`-text path (chunks may not equal it) and keeps corrupt
                 # sequences out of the session replay.
                 final_text = sanitize_text(final_text)
+                # Release 31: local code gate — same check as AgentMode's
+                # local tail (core.codecheck): a predominantly-code reply
+                # that does not parse gets ONE repair attempt on this
+                # conversation before the turn is saved. The client's end
+                # handler replaces the streamed bubble with this final
+                # text, so a successful repair is what the user ends up
+                # reading. Failure-preserved turns (Release 24) carry
+                # generated summaries, never model code — skip those.
+                if final_text and not failed_after_tools:
+                    def _repair_send(prompt):
+                        out = ""
+                        for kind, data in stream_conversation(conv, prompt):
+                            if kind == "text":
+                                out += data
+                            elif kind == "tool_calls":
+                                return None
+                            elif kind == "end":
+                                full = data.get("text")
+                                if full:
+                                    out = full
+                            elif kind == "error":
+                                return None
+                        return out or None
+
+                    from core import codecheck
+                    final_text = codecheck.repair(final_text, _repair_send)
                 agent_mode._messages.append({"role": "assistant", "text": final_text})
                 agent_mode.turns += 1
                 if getattr(agent_mode, "_store", None) and getattr(agent_mode, "session_id", None):

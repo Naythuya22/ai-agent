@@ -44,7 +44,9 @@ class FailureVocabTests(unittest.TestCase):
         # pins of the same budget must never disagree.
         base = self._read("_base.txt")
         self.assertLessEqual(P.estimate_tokens(base), 760)
-        caps = {"cloud_strong": 1220, "cloud_fast": 1300, "local": 1110}
+        # Release 31: local 1110 -> 1160, in step with test_prompts.py
+        # (CODE ANSWERS section in the local tier file).
+        caps = {"cloud_strong": 1220, "cloud_fast": 1300, "local": 1160}
         for tier, cap in caps.items():
             loaded = P.load_prompt(tier)
             n = P.estimate_tokens(loaded)
