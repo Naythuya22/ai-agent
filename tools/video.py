@@ -23,6 +23,13 @@ Measured on-device 2026-10-27 (KoHtet's pilot, Flow free tier):
   - Omni credits: 360p 6s=5, 8s=6, 10s=7; 720p 6s=10, 8s=12, 10s=15.
   - Veo 3.1 Lite: flat 10 credits, no dialogue.
   - Failed generations are never charged.
+
+Release 33 amendment (also found on-device 2026-10-27): the owner is
+signed in to Flow inside the installed Flow app, NOT the browser —
+so the handoff now presents both routes, and prepare_video defaults
+to the pilot-proven cheap dialogue combo (Omni 360p, 6s = 5 credits)
+with prescriptive docstring guidance, instead of leaving the calling
+model to pick pricier settings (it chose 720p/8s = 12 credits).
 """
 from __future__ import annotations
 
@@ -160,7 +167,7 @@ def _open_flow() -> bool:
 
 
 def prepare_video(idea: str, dialogue: str = "", style: str = "cartoon",
-                  model: str = "omni", duration_s: int = 8,
+                  model: str = "omni", duration_s: int = 6,
                   resolution: str = "360p") -> str:
     """Prepare a Google Flow video job and hand it to the user.
 
@@ -182,8 +189,15 @@ def prepare_video(idea: str, dialogue: str = "", style: str = "cartoon",
         style: "cartoon" (default), "cinematic", or "plain".
         model: "omni" (Omni 1.1 Flash — Burmese dialogue, cheaper) or
             "veo_lite" (Veo 3.1 Lite — silent/musical clips only).
-        duration_s: 4, 6, 8 or 10 seconds.
-        resolution: "360p" (default; fine for cartoons) or "720p".
+        duration_s: 4, 6, 8 or 10 seconds. DEFAULT 6 — the proven
+            length for one short dialogue line (the line plus one
+            simple action fits). Choose 8 or 10 ONLY when the user
+            explicitly asks for a longer clip; longer costs more
+            credits.
+        resolution: "360p" (default — right for cartoons and dialogue
+            clips, and cheapest: Omni 360p at 6s = 5 credits) or
+            "720p" (choose ONLY when the user explicitly asks for
+            higher quality; it costs 2–3x the credits).
     """
     if not _provider_enabled():
         return _disabled_msg()
@@ -241,11 +255,37 @@ def prepare_video(idea: str, dialogue: str = "", style: str = "cartoon",
         f"OK: video job {job['id']} prepared ({model_label}, "
         f"{resolution}, {dur}s, {est_txt} from the free daily 50).",
     ]
+    if est is not None and est > 5:
+        lines.append(
+            f"Cost note: this job costs ~{est} credits — more than "
+            "the cheapest default for a dialogue clip (Omni 360p, "
+            "6s = 5 credits). Tell the user the cost AND that the "
+            "cheaper default exists before they tap Generate."
+        )
     if opened:
-        lines.append("Flow is opening in the browser.")
+        lines.append(
+            "Flow is opening in a browser tab. There are TWO ways "
+            "the user can use Flow — present both, neutrally: "
+            "A) the browser tab that just opened (works when they "
+            "are signed in to Flow in the browser); "
+            "B) the Flow app on their home screen (works when that "
+            "is where they are signed in). If the browser tab asks "
+            "them to sign in or shows nothing useful, tell them to "
+            "open the Flow app instead — the prompt pastes there "
+            "too, and the download lands in the same Download "
+            "folder either way."
+        )
     else:
-        lines.append("Could not open the browser automatically — ask "
-                     "the user to open flow.google.com.")
+        lines.append(
+            "Could not open Flow automatically. Ask the user to "
+            "open it one of two ways: A) flow.google.com in the "
+            "browser (works when they are signed in to Flow there), "
+            "or B) the Flow app on their home screen (works when "
+            "that is where they are signed in). If the browser asks "
+            "them to sign in, the Flow app is the way. The prompt "
+            "pastes in either, and the download lands in the same "
+            "Download folder either way."
+        )
     if copied:
         lines.append("The prompt is on the clipboard — the user pastes "
                      "it into Flow's prompt box.")
@@ -255,7 +295,9 @@ def prepare_video(idea: str, dialogue: str = "", style: str = "cartoon",
         lines.append(prompt)
     lines.append(
         "Tell the user, in their language, step by step: "
-        f"1) paste the prompt, 2) model = {model_label}, outputs x1, "
+        "1) open Flow (the browser tab, or the Flow app if the tab "
+        "is not signed in) and paste the prompt, "
+        f"2) model = {model_label}, outputs x1, "
         f"aspect 9:16, {resolution}, {dur}s, 3) tap Generate, "
         "4) when finished tap Download. "
         "Do NOT prepare another job for this request. When the user "

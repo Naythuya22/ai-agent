@@ -139,7 +139,7 @@ class TestPrepare(VideoEnv):
         job = jobs[0]
         self.assertEqual(job["state"], "awaiting_human")
         self.assertIn("ရရင် အရင် စုပါနော်", job["prompt"])
-        self.assertEqual(job["est_credits"], 6)  # omni 360p 8s default
+        self.assertEqual(job["est_credits"], 5)  # omni 360p 6s (R33 default)
         self.assertIn(job["prompt"], out)  # no clipboard on this host
 
     def test_veo_lite_dialogue_refused(self):
