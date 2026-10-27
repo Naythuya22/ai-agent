@@ -456,6 +456,17 @@ class KeyManager:
             return bool(cfg["shell_enabled"])
         return True
 
+    def video_provider(self) -> str:
+        """Which video-generation provider is enabled (Release 32).
+
+        "flow" = Google Flow human-in-the-loop (tools/video.py);
+        anything else, including an absent key, is "off" — video is a
+        brand-new capability, so unlike the shell gate there is no
+        legacy behaviour to preserve and the safe default wins.
+        """
+        cfg = self.load()
+        return "flow" if cfg.get("video_provider") == "flow" else "off"
+
     def apply_fresh_install_defaults(self) -> bool:
         """Stamp the beginner defaults onto a brand-new install.
 
@@ -717,6 +728,7 @@ class KeyManager:
             # Resolved, not raw (Release 28): a pre-gate install has
             # no stored key and must still render its toggle ON.
             "shell_enabled": self.shell_enabled(),
+            "video_provider": self.video_provider(),
             "pinned_provider": cfg.get("pinned_provider") or None,
             # Report the stored value only. The environment fallback belongs to
             # config.prompt_tier_mode(), which routes/settings_api.py calls to

@@ -203,6 +203,15 @@ def api_settings_post():
         cfg["shell_enabled"] = bool(body["shell_enabled"])
         changed.append("shell_enabled")
 
+    # Release 32 — the video-generation gate (tools/video.py). Only
+    # the two known values are accepted; anything else is a client bug.
+    if "video_provider" in body:
+        vp = str(body["video_provider"] or "").strip()
+        if vp not in ("off", "flow"):
+            return _err("video_provider must be 'off' or 'flow'")
+        cfg["video_provider"] = vp
+        changed.append("video_provider")
+
     if "pinned_provider" in body:
         pin = body["pinned_provider"]
         if pin in ("", None):

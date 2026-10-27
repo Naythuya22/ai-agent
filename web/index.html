@@ -150,6 +150,7 @@ footer{position:relative;padding:12px 12px 16px;background:var(--bg);border-top:
 .viewer{position:fixed;inset:0;z-index:110;background:rgba(0,0,0,.9);display:flex;align-items:center;justify-content:center;padding:28px}
 .viewer[hidden]{display:none}
 .viewer-img{max-width:100%;max-height:100%;border-radius:10px;box-shadow:0 8px 40px rgba(0,0,0,.6)}
+.msg-video{display:block;width:100%;max-width:420px;border-radius:10px;margin:8px 0;background:#000}
 .viewer-img[hidden]{display:none}
 .viewer-pane{max-width:min(880px,100%);max-height:100%;display:flex;flex-direction:column;background:var(--bg-2);border:1px solid var(--border-2);border-radius:10px;overflow:hidden}
 .viewer-pane[hidden]{display:none}
@@ -507,6 +508,11 @@ footer{position:relative;padding:12px 12px 16px;background:var(--bg);border-top:
 <div class="set-hint">အသစ် install တွေမှာ လုံခြုံရေး အတွက် အစ ပိတ်ထားပါတယ် — ဖွင့်ထားမှ agent က shell command တွေ သုံးနိုင်ပါမယ်။</div>
 </div>
 <div class="set-row">
+<span class="set-label">Video generation</span>
+<label class="set-check">Video provider: <select id="set-video-provider"><option value="off">Off</option><option value="flow">Google Flow (free — manual Generate/Download steps)</option></select></label>
+<div class="set-hint">Flow ကို ရွေးရင် agent က video prompt ပြင်ပေးပြီး Flow ဖွင့်ပေးမယ် — Generate နဲ့ Download ကိုတော့ ကိုယ်တိုင် နှိပ်ရပါမယ်။ Omni model က မြန်မာ စကားပြော ရပါတယ်။</div>
+</div>
+<div class="set-row">
 <span class="set-label">Memory</span>
 <div class="set-line">
 <button id="set-mem-view" type="button" class="set-btn">View memory</button>
@@ -752,9 +758,10 @@ function scrollBottom(){chatEl.scrollTop=chatEl.scrollHeight}
 function clearWelcome(){var w=chatEl.querySelector('.welcome');if(w)w.remove()}
 function escapeHtml(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;')}
 function renderMarkdown(text){
-  var s=escapeHtml(text);var codes=[];var inls=[];
+  var s=escapeHtml(text);var codes=[];var inls=[];var vids=[];
   s=s.replace(/```[a-zA-Z0-9]*\n?([\s\S]*?)```/g,function(m,c){codes.push(c.replace(/\n$/,''));return '\u0000C'+(codes.length-1)+'\u0000'});
   s=s.replace(/`([^`\n]+)`/g,function(m,c){inls.push(c);return '\u0000I'+(inls.length-1)+'\u0000'});
+  s=s.replace(/\[video:([A-Za-z0-9_-]{1,64})\]/g,function(m,id){vids.push(id);return '\u0000V'+(vids.length-1)+'\u0000'});
   s=s.replace(/\*\*([^*\n]+)\*\*/g,'<strong>$1</strong>');
   s=s.replace(/(^|[^*])\*([^*\n]+)\*(?!\*)/g,'$1<em>$2</em>');
   var lines=s.split('\n');var out=[];var inUl=false;var m;
@@ -772,6 +779,7 @@ function renderMarkdown(text){
   s=out.join('\n');
   s=s.replace(/\u0000C(\d+)\u0000/g,function(m,i){return '<pre><code>'+codes[+i]+'</code></pre>'});
   s=s.replace(/\u0000I(\d+)\u0000/g,function(m,i){return '<code>'+inls[+i]+'</code>'});
+  s=s.replace(/\u0000V(\d+)\u0000/g,function(m,i){var tok='';try{tok=localStorage.getItem(AUTH_KEY)||''}catch(_e){}return '<video class="msg-video" controls preload="metadata" src="/api/video/'+vids[+i]+(tok?('?token='+encodeURIComponent(tok)):'')+'"></video>'});
   return s;
 }
 function appendMsg(text,kind){clearWelcome();var d=document.createElement('div');d.className='msg '+kind;if(kind==='assistant'){d.innerHTML=renderMarkdown(text)}else{d.textContent=text}chatEl.appendChild(d);scrollBottom();return d}
@@ -2660,6 +2668,8 @@ function renderSettings(){
   // OFF), never a raw stored key that may not exist.
   var shw=setq('set-shell-enabled');
   if(shw)shw.checked=cfg.shell_enabled!==false;
+  var vpw=setq('set-video-provider');
+  if(vpw)vpw.value=cfg.video_provider||'off';
   var pin=cfg.pinned_provider||'';
   var pinState=setq('set-pin-state');
   if(pinState){
@@ -3299,6 +3309,7 @@ async function saveSettings(){
     prompt_tier_mode:tierMode,
     auto_switch:(setq('set-auto-switch')?setq('set-auto-switch').checked:true),
     shell_enabled:(setq('set-shell-enabled')?setq('set-shell-enabled').checked:true),
+    video_provider:(setq('set-video-provider')?setq('set-video-provider').value:'off'),
     fallback:(settingsState.fallback||[]).slice(0),
     providers:{}
   };

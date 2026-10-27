@@ -18,6 +18,7 @@ from tools.memory import (
     memory_read, memory_write, memory_search, memory_forget,
 )
 from tools.audit import self_audit, capability_list
+from tools.video import ALL_TOOLS as VIDEO_TOOLS
 
 ALL_TOOLS = (
     list(FILE_TOOLS)
@@ -27,6 +28,7 @@ ALL_TOOLS = (
     + [smart_search]
     + [memory_read, memory_write, memory_search, memory_forget]
     + [self_audit, capability_list]
+    + list(VIDEO_TOOLS)
 )
 
 __all__ = [
