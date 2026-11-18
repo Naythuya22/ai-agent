@@ -291,9 +291,10 @@ CODE_MAX_TOKENS_DEFAULT = 16_384     # a code turn wants whole files back
 
 # Which Code-mode backend a fresh run starts on. A project can override it
 # (projects.backend), the UI can switch it (/model, POST /api/code/backend),
-# and code_backends.default_name() falls back to "opencode" if this names
-# something that is not registered — an env var must never break code mode.
-CODE_BACKEND_DEFAULT = os.environ.get("AI_AGENT_CODE_BACKEND", "opencode")
+# and code_backends.default_name() falls back to "builtin" (the in-app
+# engine, zero setup) if this names something that is not registered — an
+# env var must never break code mode.
+CODE_BACKEND_DEFAULT = os.environ.get("AI_AGENT_CODE_BACKEND", "")
 # The key-validation probe: one cheap round-trip that proves a key works.
 # Not environment-overridable on purpose — this is the one number that must
 # never be inflated by accident, and 8 tokens is enough for the "ok" it asks.

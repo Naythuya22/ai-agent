@@ -309,6 +309,16 @@ class TestCodeEndpoints(unittest.TestCase):
         self._installed = oc.is_installed
         oc.is_installed = lambda: True
         self.addCleanup(lambda: setattr(oc, "is_installed", self._installed))
+        # These tests pin the OPENCODE contract (install hints, bridge env).
+        # The stock default backend is now the built-in engine, so pin the
+        # config default here; a project that names its own backend still
+        # overrides it, exactly as in production.
+        import config as _config
+        self._prev_default = _config.CODE_BACKEND_DEFAULT
+        _config.CODE_BACKEND_DEFAULT = "opencode"
+        self.addCleanup(
+            lambda: setattr(_config, "CODE_BACKEND_DEFAULT",
+                            self._prev_default))
 
     def test_doctor_always_answers(self):
         with closing(client.get("/api/code/doctor")) as r:
@@ -953,10 +963,17 @@ def _make_repo(name):
 
 
 def _use_repo(name):
-    """Make a repo the active project for the code routes."""
+    """Make a repo the active project for the code routes.
+
+    The project is pinned to the opencode backend: the suites using this
+    helper pin opencode's stream/commit/session behaviour, and the stock
+    default backend is now the built-in engine.
+    """
     repo = _make_repo(name)
     ps.add(name, str(repo))
-    ps.set_active(ps.list_all()[-1]["id"])
+    pid = ps.list_all()[-1]["id"]
+    ps.set_active(pid)
+    ps.set_backend(pid, "opencode")
     return repo
 
 

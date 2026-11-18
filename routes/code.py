@@ -899,8 +899,8 @@ def api_code_doctor():
     """Is code mode actually runnable? Everything the UI needs to say so.
 
     `?backend=openclaude` reports that backend instead. With no query the
-    active project and AI_AGENT_CODE_BACKEND decide, which is "opencode" on a
-    stock setup — so a plain call answers exactly as it always has.
+    active project and AI_AGENT_CODE_BACKEND decide, which is "builtin" on a
+    stock setup.
     """
     b = _backend()
     info = b.doctor()

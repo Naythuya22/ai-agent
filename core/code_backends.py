@@ -1,20 +1,20 @@
 """Registry of Code-mode backends.
 
-Code mode can drive either `opencode` or `openclaude`. Rather than branching
+Code mode can run on the app's own engine (`builtin`, core/builtin.py) or
+drive an external CLI — `opencode` or `openclaude`. Rather than branching
 on a name throughout routes/code.py, every consumer resolves the name once
 (`_backend()` in the routes) and then calls the same function names on the
-module it gets back — both core/opencode.py and core/openclaude.py expose
-is_installed(), version(), env(), build_command(), doctor() and the session
-map.
+module it gets back — all three backend modules expose is_installed(),
+version(), env(), build_command(), doctor() and the session map.
 
 The registry is name-keyed and import-lazy: `names()` is the contract the UI
 and the tests rely on, and importing only the module asked for keeps a
 backend that is not in play out of the process.
 
     from core import code_backends as b
-    b.names()          # ['opencode', 'openclaude']
+    b.names()          # ['builtin', 'opencode', 'openclaude']
     b.get('openclaude')  # the core.openclaude module (None if unknown)
-    b.available()      # the subset whose binary is on PATH right now
+    b.available()      # the subset usable right now
 """
 from __future__ import annotations
 
@@ -22,9 +22,11 @@ from core.log import get_logger
 
 log = get_logger("code_backends")
 
-# Registration order is the display order: opencode stays first so every
-# existing caller that assumed "the" backend still lands on it.
-_ORDER = ("opencode", "openclaude")
+# Registration order is the display order. "builtin" (the app's own agent
+# engine — no external CLI to install) leads and is the default: it is the
+# only backend a fresh install can use with zero extra setup. The CLI
+# backends stay as power options.
+_ORDER = ("builtin", "opencode", "openclaude")
 
 
 def names() -> list[str]:
@@ -39,6 +41,9 @@ def get(name) -> object | None:
     typo must be able to tell "unknown backend" from "the default one".
     """
     key = str(name or "").strip()
+    if key == "builtin":
+        from core import builtin
+        return builtin
     if key == "opencode":
         from core import opencode
         return opencode
@@ -49,7 +54,7 @@ def get(name) -> object | None:
 
 
 def default_name() -> str:
-    """Configured default (AI_AGENT_CODE_BACKEND), or 'opencode'.
+    """Configured default (AI_AGENT_CODE_BACKEND), or 'builtin'.
 
     An env var naming an unregistered backend must not take the whole mode
     down, so it degrades to the default instead of failing later with a
@@ -58,7 +63,7 @@ def default_name() -> str:
     import config
 
     name = str(getattr(config, "CODE_BACKEND_DEFAULT", "") or "").strip()
-    return name if name in _ORDER else "opencode"
+    return name if name in _ORDER else "builtin"
 
 
 def resolve(name) -> str:

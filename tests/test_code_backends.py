@@ -9,22 +9,28 @@ from _harness import bootstrap
 
 bootstrap()
 
+from core import builtin as bi  # noqa: E402
 from core import code_backends as cb  # noqa: E402
 from core import opencode as oc  # noqa: E402
 from core import openclaude as ocl  # noqa: E402
 
 
 class TestNames(unittest.TestCase):
-    def test_registers_both_backends_in_order(self):
-        self.assertEqual(cb.names(), ["opencode", "openclaude"])
+    def test_registers_all_backends_in_order(self):
+        # builtin leads: it is the default and the only backend a fresh
+        # install can use with zero extra setup.
+        self.assertEqual(cb.names(), ["builtin", "opencode", "openclaude"])
 
     def test_names_is_a_copy(self):
         got = cb.names()
         got.append("bogus")
-        self.assertEqual(cb.names(), ["opencode", "openclaude"])
+        self.assertEqual(cb.names(), ["builtin", "opencode", "openclaude"])
 
 
 class TestGet(unittest.TestCase):
+    def test_builtin_resolves_to_the_builtin_module(self):
+        self.assertIs(cb.get("builtin"), bi)
+
     def test_opencode_resolves_to_the_opencode_module(self):
         self.assertIs(cb.get("opencode"), oc)
 
@@ -43,10 +49,12 @@ class TestGet(unittest.TestCase):
 
 
 class TestDefault(unittest.TestCase):
-    def test_the_config_default_is_opencode(self):
+    def test_the_config_default_is_builtin(self):
+        # config leaves the choice open (""); the registry fallback is the
+        # built-in engine, the only zero-setup backend.
         import config
-        self.assertEqual(config.CODE_BACKEND_DEFAULT, "opencode")
-        self.assertEqual(cb.default_name(), "opencode")
+        self.assertEqual(config.CODE_BACKEND_DEFAULT, "")
+        self.assertEqual(cb.default_name(), "builtin")
 
     def test_an_env_named_backend_is_honoured(self):
         import config
@@ -56,7 +64,7 @@ class TestDefault(unittest.TestCase):
     def test_an_unregistered_default_falls_back(self):
         import config
         with patch.object(config, "CODE_BACKEND_DEFAULT", "aider"):
-            self.assertEqual(cb.default_name(), "opencode")
+            self.assertEqual(cb.default_name(), "builtin")
 
     def test_resolve_prefers_a_registered_name(self):
         import config
@@ -68,21 +76,26 @@ class TestDefault(unittest.TestCase):
 
 
 class TestAvailable(unittest.TestCase):
+    # builtin.is_installed() is always True (the engine ships in the app),
+    # so it appears in every availability result below.
+
     def test_available_lists_only_installed_backends(self):
         with patch.object(oc, "is_installed", return_value=True):
             with patch.object(ocl, "is_installed", return_value=False):
-                self.assertEqual(cb.available(), ["opencode"])
+                self.assertEqual(cb.available(), ["builtin", "opencode"])
 
-    def test_available_is_both_when_both_are_installed(self):
+    def test_available_is_all_when_all_are_installed(self):
         with patch.object(oc, "is_installed", return_value=True):
             with patch.object(ocl, "is_installed", return_value=True):
-                self.assertEqual(cb.available(), ["opencode", "openclaude"])
+                self.assertEqual(cb.available(),
+                                 ["builtin", "opencode", "openclaude"])
 
     def test_availability_reports_each_backend(self):
         with patch.object(oc, "is_installed", return_value=True):
             with patch.object(ocl, "is_installed", return_value=False):
                 self.assertEqual(cb.availability(),
-                                 {"opencode": True, "openclaude": False})
+                                 {"builtin": True, "opencode": True,
+                                  "openclaude": False})
 
     def test_installed_is_false_for_an_unknown_backend(self):
         self.assertFalse(cb.installed("aider"))
@@ -135,11 +148,11 @@ class TestBackendEndpoints(unittest.TestCase):
 
     # -- GET /api/code/backends ------------------------------------------
 
-    def test_backends_is_a_json_list_of_both_names(self):
+    def test_backends_is_a_json_list_of_all_names(self):
         status, body = self._get("/api/code/backends")
         self.assertEqual(status, 200)
         self.assertIsInstance(body, list)
-        self.assertEqual(body, ["opencode", "openclaude"])
+        self.assertEqual(body, ["builtin", "opencode", "openclaude"])
 
     # -- POST /api/code/backend ------------------------------------------
 
@@ -154,7 +167,8 @@ class TestBackendEndpoints(unittest.TestCase):
         status, body = self._post("/api/code/backend", json={"name": "aider"})
         self.assertEqual(status, 400)
         self.assertIn("unknown backend", body["error"])
-        self.assertEqual(body["available"], ["opencode", "openclaude"])
+        self.assertEqual(body["available"],
+                         ["builtin", "opencode", "openclaude"])
         self.assertIsNone(self.ps.get_active()["backend"])
 
     def test_a_missing_name_is_rejected(self):
@@ -175,15 +189,15 @@ class TestBackendEndpoints(unittest.TestCase):
 
     # -- GET /api/code/doctor --------------------------------------------
 
-    def test_doctor_without_a_query_stays_on_opencode(self):
+    def test_doctor_without_a_query_stays_on_builtin(self):
         status, body = self._get("/api/code/doctor")
         self.assertEqual(status, 200)
         for key in ("installed", "version", "config_file", "model",
                     "bridge_base", "ok"):
             self.assertIn(key, body)
-        self.assertEqual(body["backend"], "opencode")
-        self.assertEqual(body["binary"],
-                         " ".join(oc.PROOT_CMD) + " bash -lc 'opencode'")
+        self.assertEqual(body["backend"], "builtin")
+        self.assertEqual(body["binary"], "built-in (in-app agent engine)")
+        self.assertTrue(body["installed"])
 
     def test_doctor_accepts_a_backend_query(self):
         with patch.object(ocl, "is_installed", return_value=True):
@@ -209,9 +223,10 @@ class TestBackendEndpoints(unittest.TestCase):
         status, body = self._post("/api/code/web/run", json={"message": message})
         return status, body
 
-    def test_model_lists_both_backends(self):
+    def test_model_lists_all_backends(self):
         status, body = self._chat("/model")
         self.assertEqual(status, 200, body)
+        self.assertIn("builtin", body["reply"])
         self.assertIn("opencode", body["reply"])
         self.assertIn("openclaude", body["reply"])
         self.assertIn("Code backends", body["reply"])
@@ -220,7 +235,7 @@ class TestBackendEndpoints(unittest.TestCase):
         status, body = self._chat("/model status")
         self.assertEqual(status, 200, body)
         self.assertIn("Backend", body["reply"])
-        self.assertIn("opencode", body["reply"])
+        self.assertIn("builtin", body["reply"])
         self.assertIn("Version", body["reply"])
 
     def test_model_switches_the_active_project(self):
@@ -247,15 +262,16 @@ class TestBackendEndpoints(unittest.TestCase):
 
     def test_a_model_like_word_is_not_a_command(self):
         # "/models" is not the /model command: it falls through to a normal
-        # run, which needs the binary. Pin "not installed" (the house style
-        # in this file) so the fall-through contract — an install-hint error,
-        # never a /model command reply — is identical on every machine,
-        # whether or not a binary happens to be present.
-        with patch.object(oc, "is_installed", return_value=False):
-            with patch.object(ocl, "is_installed", return_value=False):
-                status, body = self._chat("/models")
+        # run, which needs a usable backend. The default backend is now the
+        # built-in engine, so the gate is patched shut on all three to pin
+        # the fall-through contract — a backend error, never a /model
+        # command reply — identically on every machine.
+        with patch.object(bi, "is_installed", return_value=False):
+            with patch.object(oc, "is_installed", return_value=False):
+                with patch.object(ocl, "is_installed", return_value=False):
+                    status, body = self._chat("/models")
         self.assertEqual(status, 500, body)
-        self.assertIn("not installed", body["error"])
+        self.assertIn("provider key", body["error"])
         self.assertNotIn("reply", body)
 
 
