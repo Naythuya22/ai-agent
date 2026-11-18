@@ -36,7 +36,7 @@ from _harness import bootstrap
 bootstrap()
 
 import config  # noqa: E402
-from core.agent_backend import AgentBackend, CloudError  # noqa: E402
+from core.agent_backend import AgentBackend, CloudError, Step, normalize  # noqa: E402
 from core.checkpoint_store import CheckpointStore  # noqa: E402
 from core.key_manager import KeyManager  # noqa: E402
 from modes import agent as agent_mod  # noqa: E402
@@ -557,6 +557,125 @@ class StreamDeathCase(FailureReplyBase):
                          ["user", "tool_call", "tool_result", "assistant"])
         self.assertEqual(saved[-1]["text"], text)
         self.assertIsNone(self.filed(sid))
+
+
+class RepeatStreamBackend:
+    """F17 rig: rounds 1-2 issue the SAME list_files call — each with
+    its own thought signature, as Gemini 3 issues them — and round 3
+    answers with text. The duplicate must still be RECORDED as a
+    tool_call (execution skipped, call kept)."""
+
+    def __init__(self, directory):
+        self.directory = directory
+        self.rounds = 0
+
+    def refresh(self):
+        pass
+
+    def should_use_cloud(self):
+        return True
+
+    def why_not_cloud(self):
+        return ""
+
+    def step(self, system=None, messages=None, tools=None,
+             max_tokens=None, **kw):
+        return Step(text="", provider="gemini", model="stub-model")
+
+    def step_stream(self, system=None, messages=None, tools=None,
+                    max_tokens=None, **kw):
+        self.rounds += 1
+        if self.rounds in (1, 2):
+            yield "done", {
+                "text": "",
+                "tool_calls": [{"function": {
+                    "name": "list_files",
+                    "arguments": {"directory": self.directory}},
+                    "thought_signature": "SIG%d" % self.rounds}],
+                "usage": {}, "model": "stub-model", "provider": "gemini",
+                "reasoning": "",
+            }
+            return
+        yield "done", {
+            "text": "finished", "tool_calls": [],
+            "usage": {}, "model": "stub-model", "provider": "gemini",
+            "reasoning": "",
+        }
+
+
+class RepeatStepBackend:
+    """F17 rig, non-streaming twin of RepeatStreamBackend."""
+
+    def __init__(self, directory):
+        self.directory = directory
+        self.calls = 0
+
+    def refresh(self):
+        pass
+
+    def should_use_cloud(self):
+        return True
+
+    def why_not_cloud(self):
+        return ""
+
+    def step(self, system=None, messages=None, tools=None,
+             max_tokens=None, **kw):
+        self.calls += 1
+        if self.calls in (1, 2):
+            return Step(tool_calls=[{"function": {
+                "name": "list_files",
+                "arguments": {"directory": self.directory}},
+                "thought_signature": "SIG%d" % self.calls}],
+                provider="gemini", model="stub-model")
+        return Step(text="finished", provider="gemini",
+                    model="stub-model")
+
+
+class DuplicateCallSignatureCase(FailureReplyBase):
+    """F17 — a repeated identical tool call in one turn used to be
+    recorded as a BARE tool_result (the dedup guard skipped the call
+    entry). normalize() then synthesised a signature-less call for
+    it, and Gemini 3 refused the next step: 400 "Function call is
+    missing a thought_signature" — the failure that killed real
+    device turns on 2026-11-18 at 18:32 and 19:17, after F12's
+    single-call retests had passed. The call must be recorded with
+    its own signature; only its execution is skipped."""
+
+    def _assert_transcript(self, sid):
+        saved = self.saved(sid)
+        self.assertEqual(
+            self.roles(saved),
+            ["user", "tool_call", "tool_result",
+             "tool_call", "tool_result", "assistant"])
+        self.assertEqual(saved[1].get("thought_signature"), "SIG1")
+        self.assertEqual(saved[3].get("thought_signature"), "SIG2")
+        sigs = []
+        for m in normalize(saved):
+            for tc in m.get("tool_calls") or []:
+                sigs.append(tc.get("thought_signature"))
+        self.assertEqual(sigs, ["SIG1", "SIG2"])
+
+    def test_stream_duplicate_call_keeps_its_signature(self):
+        self.km.set_mode("cloud")
+        self.km.save()
+        mode = self.new_mode()
+        mode._backend = RepeatStreamBackend(str(self.dir_a))
+        mode.begin_turn()
+        mode._messages.append({"role": "user", "text": "DUP_TASK"})
+        frames = list(mode._handle_cloud_stream())
+        self.assertEqual(frames[-1][0], "end")
+        self._assert_transcript(mode.session_id)
+
+    def test_plain_duplicate_call_keeps_its_signature(self):
+        self.km.set_mode("cloud")
+        self.km.save()
+        mode = self.new_mode()
+        mode._backend = RepeatStepBackend(str(self.dir_a))
+        mode.begin_turn()
+        out = mode._handle_cloud("DUP_TASK", mode._backend)
+        self.assertIn("finished", out)
+        self._assert_transcript(mode.session_id)
 
 
 if __name__ == "__main__":

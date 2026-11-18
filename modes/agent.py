@@ -2314,6 +2314,17 @@ class AgentMode:
                     except Exception:
                         _key = (name, str(args))
                     if _key in _seen_calls:
+                        # F17: the model DID issue this call — record it
+                        # (with its thought signature) even though the
+                        # execution is skipped. A bare tool_result makes
+                        # normalize() synthesise a signature-less call,
+                        # and Gemini 3 refuses the next step with a 400
+                        # ("missing a thought_signature") — the hole
+                        # that killed real turns on 2026-11-18.
+                        self._messages.append({"role": "tool_call", "tool": name,
+                                               "args": args,
+                                               "reasoning": step.reasoning,
+                                               "thought_signature": tc.get("thought_signature") if isinstance(tc, dict) else None})
                         self._messages.append({
                             "role": "tool_result", "tool": name,
                             "text": self._cached_text(
@@ -2761,6 +2772,13 @@ class AgentMode:
                         # mirrors _handle_cloud at L716 — keep in sync on any
                         # change. Skip the repeat, but hand the model its data
                         # back instead of losing it
+                        # F17: record the call itself first (see
+                        # _handle_cloud's branch) — a bare tool_result
+                        # becomes a signature-less call on replay.
+                        self._messages.append({"role": "tool_call", "tool": name,
+                                               "args": args,
+                                               "reasoning": info.get("reasoning"),
+                                               "thought_signature": tc.get("thought_signature") if isinstance(tc, dict) else None})
                         self._messages.append({
                             "role": "tool_result", "tool": name,
                             "text": self._cached_text(
@@ -3099,6 +3117,16 @@ class AgentMode:
                         _skip = self._cached_text(
                             name, args,
                             f"(skipped: {name} already called with identical args this turn)")
+                        # F17: record the call itself first — a bare
+                        # tool_result becomes a signature-less call if
+                        # this history is ever replayed to a cloud
+                        # provider (see _handle_cloud's branch).
+                        self._messages.append({
+                            "role": "tool_call",
+                            "tool": name,
+                            "args": args,
+                            "thought_signature": tc.get("thought_signature") if isinstance(tc, dict) else None,
+                        })
                         self._messages.append({
                             "role": "tool_result",
                             "tool": name,
