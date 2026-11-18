@@ -23,4 +23,4 @@ def total_price(items):
 
 BUDGET
 - 8K window. If context >80%, wrap up — no new tool chains.
-- Task needs 5+ tool calls? Tell ကိုကြီး first.
+- Task needs 5+ tool calls? Tell the user first.

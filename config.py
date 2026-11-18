@@ -462,6 +462,81 @@ def prompt_tier_mode() -> str:
     return PROMPT_TIER_MODE_DEFAULT
 
 
+# ── Persona names (F13) ─────────────────────────────────────────────
+# The owner's own pair (ညီ / ကိုကြီး) used to be baked into the shipped
+# prompts themselves, so every fresh install greeted a stranger with
+# them. The prompts now carry a __PERSONA__ placeholder and the names
+# live here: Settings store first, environment second, empty = the
+# neutral shipped persona.
+PERSONA_AGENT_ENV = "AI_AGENT_PERSONA_AGENT"
+PERSONA_USER_ENV = "AI_AGENT_PERSONA_USER"
+PERSONA_NAME_MAX = 40
+
+
+def _clean_persona_name(value) -> str:
+    # Names land inside the system prompt's identity lines — collapse
+    # any newline so a stored name can never break the block's shape.
+    s = str(value or "").replace("\r", " ").replace("\n", " ")
+    return s.strip()[:PERSONA_NAME_MAX].strip()
+
+
+def stored_persona_names() -> tuple:
+    """(agent_name, user_name) pinned in the Settings store, '' unset."""
+    try:
+        from core.key_manager import KeyManager
+        cfg = KeyManager().load() or {}
+    except Exception as e:
+        log.warning("persona in settings unreadable: %s", type(e).__name__)
+        return ("", "")
+    return (_clean_persona_name(cfg.get("persona_agent_name")),
+            _clean_persona_name(cfg.get("persona_user_name")))
+
+
+def persona_names() -> tuple:
+    """The effective persona names: Settings store, then environment."""
+    agent, user = stored_persona_names()
+    if not agent:
+        agent = _clean_persona_name(os.environ.get(PERSONA_AGENT_ENV))
+    if not user:
+        user = _clean_persona_name(os.environ.get(PERSONA_USER_ENV))
+    return (agent, user)
+
+
+def persona_block() -> str:
+    """The identity paragraph substituted for __PERSONA__ in prompts.
+
+    Both names set reproduces the owner's original persona; both empty
+    is the neutral shipped default — no assumed name on either side.
+    """
+    agent, user = persona_names()
+    if agent and user:
+        return ('You are "%s", a personal AI assistant for "%s".\n'
+                "Your tone must be warm, respectful, and direct.\n"
+                '- Use "%s" for yourself, "%s" for the user.\n'
+                '- If acknowledgment needed: just "ဟုတ် %s".'
+                % (agent, user, agent, user, user))
+    if agent:
+        return ('You are "%s", a personal AI assistant.\n'
+                "Your tone must be warm, respectful, and direct.\n"
+                '- Use "%s" for yourself. Address the user politely, '
+                "without assuming a name or kinship term for them."
+                % (agent, agent))
+    if user:
+        return ('You are a personal AI assistant for "%s".\n'
+                "Your tone must be warm, respectful, and direct.\n"
+                '- Address the user as "%s". Do not give yourself a '
+                "name; refer to yourself plainly.\n"
+                '- If acknowledgment needed: just "ဟုတ် %s".'
+                % (user, user, user))
+    return ("You are a personal AI assistant.\n"
+            "Your tone must be warm, respectful, and direct.\n"
+            "- Do not give yourself a name and do not assume one for "
+            "the user. Address the user politely, without kinship "
+            "terms.\n"
+            '- If acknowledgment needed: a short polite "ဟုတ်ကဲ့" '
+            "is enough.")
+
+
 def agent_max_tokens(mode: str = "agent") -> int:
     """Per-request output budget for ``mode``, never above the ceiling."""
     base = (CODE_MAX_TOKENS_DEFAULT if (mode or "") == "code"

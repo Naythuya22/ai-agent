@@ -151,6 +151,9 @@ def api_settings_get():
             # Which system prompt the next Agent turn would use, and why.
             "prompt_tier": _prompt_tier_view(be),
             "prompt_tier_modes": list(config.PROMPT_TIER_MODES),
+            # Persona names as stored ('' = the neutral shipped persona).
+            "persona_agent_name": config.stored_persona_names()[0],
+            "persona_user_name": config.stored_persona_names()[1],
         })
     except Exception as e:
         return _err("%s: %s" % (type(e).__name__, e), 500)
@@ -187,6 +190,18 @@ def api_settings_post():
                         % (config.PROMPT_TIER_MODES,))
         cfg["prompt_tier_mode"] = mode
         changed.append("prompt_tier_mode")
+
+    # F13 — persona names. Free text, length-capped; empty clears back
+    # to the neutral shipped persona. No UI field yet — the API is the
+    # write path, config.persona_names() is the read path.
+    for _pkey in ("persona_agent_name", "persona_user_name"):
+        if _pkey in body:
+            _pname = str(body[_pkey] or "").strip()
+            if len(_pname) > config.PERSONA_NAME_MAX:
+                return _err("%s is too long (max %d characters)"
+                            % (_pkey, config.PERSONA_NAME_MAX))
+            cfg[_pkey] = _pname
+            changed.append(_pkey)
 
     # Release 9 — switching policy: the Settings Auto-switch toggle and
     # the picker's pin both land here. The pin is a provider name or

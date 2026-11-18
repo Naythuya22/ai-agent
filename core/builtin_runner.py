@@ -186,6 +186,26 @@ def _tool_event(session_id: str, name: str, args: dict, result: str,
     }
 
 
+def _action_label(name: str, args: dict, result: str) -> str:
+    """One short human label for a finished tool call — the material
+    the closing line is built from when the model itself says nothing."""
+    if name == "write_file":
+        label = f"wrote {args.get('path') or 'a file'}"
+    elif name == "read_file":
+        label = f"read {args.get('path') or 'a file'}"
+    elif name == "list_files":
+        label = f"listed {args.get('path') or args.get('directory') or 'the folder'}"
+    elif name == "run_command":
+        label = f"ran `{str(args.get('command') or '')[:60]}`"
+    elif name == "run_python":
+        label = "ran Python code"
+    else:
+        label = name or "tool"
+    if result.startswith("Error:"):
+        label += " (failed)"
+    return label
+
+
 def run(prompt: str, workdir: str, session_id: str | None) -> int:
     sid = session_id if session_id and _SID_RE.match(session_id) \
         else uuid.uuid4().hex
@@ -224,12 +244,15 @@ def _run_guarded(prompt: str, workdir: str, sid: str) -> int:
     messages.append({"role": "user", "text": prompt})
 
     backend = AgentBackend()
+    spoke = False
+    done_labels: list[str] = []
     try:
         for _step_no in range(MAX_STEPS):
             _emit({"type": "step_start", "sessionID": sid, "part": {}})
             step = backend.step(system=SYSTEM_PROMPT, messages=messages,
                                 tools=wrapped)
             if step.text:
+                spoke = True
                 _emit({"type": "text", "sessionID": sid,
                        "part": {"text": step.text}})
                 messages.append({"role": "assistant", "text": step.text})
@@ -237,6 +260,20 @@ def _run_guarded(prompt: str, workdir: str, sid: str) -> int:
                 _emit({"type": "step_finish", "sessionID": sid,
                        "part": {"tokens": step.usage, "cost": 0}})
             if not step.tool_calls:
+                if not spoke and done_labels:
+                    # The model did the work and finished without a
+                    # word — the UI would show "(no output)". Close
+                    # with a deterministic summary of the actions
+                    # instead; no extra model call is spent on it.
+                    shown = done_labels[:5]
+                    if len(done_labels) > 5:
+                        shown.append(
+                            f"and {len(done_labels) - 5} more actions")
+                    closing = "Done — " + "; ".join(shown) + "."
+                    _emit({"type": "text", "sessionID": sid,
+                           "part": {"text": closing}})
+                    messages.append({"role": "assistant",
+                                     "text": closing})
                 break
             for call in step.tool_calls:
                 fn_info = call.get("function", {}) \
@@ -247,10 +284,12 @@ def _run_guarded(prompt: str, workdir: str, sid: str) -> int:
                 if name == "write_file" and args.get("path"):
                     existed = Path(str(args["path"])).exists()
                 result = _execute(fn_map, name, args)
+                done_labels.append(_action_label(name, args, result))
                 _emit(_tool_event(sid, name, args, result, existed))
                 messages.append({"role": "tool_call", "tool": name,
                                  "args": args,
-                                 "reasoning": step.reasoning})
+                                 "reasoning": step.reasoning,
+                                 "thought_signature": call.get("thought_signature") if isinstance(call, dict) else None})
                 messages.append({"role": "tool_result", "tool": name,
                                  "text": result})
         else:

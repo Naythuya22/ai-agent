@@ -934,25 +934,35 @@ def normalize(messages: list) -> list:
                 "name": m.get("tool", ""),
                 "args": m.get("args") or {},
                 "reasoning": _reasoning_of(m),
+                # Gemini 3 function calling: the model's call carries a
+                # thought signature the next request must replay
+                # verbatim or the provider answers 400 (F12). It rides
+                # the transcript exactly like `reasoning` does.
+                "thought_signature": m.get("thought_signature"),
             }
         elif role == "tool_result":
             n += 1
             if pending is None:
                 pending = {"id": "call_%d" % n, "name": m.get("tool", ""),
-                           "args": {}, "reasoning": None}
+                           "args": {}, "reasoning": None,
+                           "thought_signature": None}
+            tc_entry = {"id": pending["id"], "type": "function",
+                        "function": {"name": pending["name"],
+                                     # The wire format wants the
+                                     # arguments JSON-encoded as a
+                                     # string; a dict here is what
+                                     # drew `422 invalid type: map,
+                                     # expected a string` from
+                                     # DeepSeek/OpenAI.
+                                     "arguments": json.dumps(
+                                         pending["args"],
+                                         ensure_ascii=False)}}
+            if pending.get("thought_signature"):
+                tc_entry["thought_signature"] = \
+                    pending["thought_signature"]
             assistant_msg = {
                 "role": "assistant",
-                "tool_calls": [{"id": pending["id"], "type": "function",
-                                "function": {"name": pending["name"],
-                                             # The wire format wants the
-                                             # arguments JSON-encoded as a
-                                             # string; a dict here is what
-                                             # drew `422 invalid type: map,
-                                             # expected a string` from
-                                             # DeepSeek/OpenAI.
-                                             "arguments": json.dumps(
-                                                 pending["args"],
-                                                 ensure_ascii=False)}}],
+                "tool_calls": [tc_entry],
             }
             if pending["reasoning"] is not None:
                 assistant_msg["reasoning_content"] = pending["reasoning"]
@@ -1022,6 +1032,15 @@ def _apply_reasoning_policy(messages: list, provider: str,
         for m in out:
             if isinstance(m, dict):
                 m.pop("reasoning_content", None)
+    if provider != "gemini":
+        # Thought signatures are a Gemini-only wire field; every other
+        # provider must not see the key at all (some reject unknown
+        # fields inside tool_calls). GeminiAdapter.request reads it.
+        for m in out:
+            if isinstance(m, dict):
+                for tc in m.get("tool_calls") or []:
+                    if isinstance(tc, dict):
+                        tc.pop("thought_signature", None)
     return out
 
 
@@ -1209,10 +1228,17 @@ class GeminiAdapter(Adapter):
             elif m["role"] == "assistant" and m.get("tool_calls"):
                 for tc in m["tool_calls"]:
                     fn = tc.get("function") or {}
-                    parts.append({"functionCall": {
+                    part = {"functionCall": {
                         "name": fn.get("name", ""),
                         "args": _args(fn.get("arguments")),
-                    }})
+                    }}
+                    # Gemini 3: the signature the model issued with
+                    # this call must ride the replayed part, sibling to
+                    # functionCall, or the request is refused (F12).
+                    sig = tc.get("thought_signature")
+                    if isinstance(sig, str) and sig:
+                        part["thoughtSignature"] = sig
+                    parts.append(part)
                 if m.get("content"):
                     parts.append({"text": m["content"]})
             elif m["role"] == "tool":
@@ -1254,9 +1280,16 @@ class GeminiAdapter(Adapter):
                 fc = p["functionCall"]
                 if isinstance(fc, dict):
                     raw = fc["args"] if "args" in fc else fc.get("arguments")
-                    calls.append({"function": {
+                    call = {"function": {
                         "name": fc.get("name", ""),
-                        "arguments": _args(raw)}})
+                        "arguments": _args(raw)}}
+                    # The signature sits on the PART, sibling to
+                    # functionCall — keep it with the call so the
+                    # transcript can replay it (F12).
+                    sig = p.get("thoughtSignature")
+                    if isinstance(sig, str) and sig:
+                        call["thought_signature"] = sig
+                    calls.append(call)
         u = data.get("usageMetadata") or {}
         usage = {}
         if u.get("promptTokenCount") is not None:
@@ -1521,9 +1554,13 @@ def _gemini_stream(lines, *, model, provider):
                 # arrives whole, so arrival order is the order the
                 # non-streaming parse() collects them in.
                 raw = fc["args"] if "args" in fc else fc.get("arguments")
-                calls.append({"function": {
+                call = {"function": {
                     "name": fc.get("name", ""),
-                    "arguments": _args(raw)}})
+                    "arguments": _args(raw)}}
+                sig = p.get("thoughtSignature")
+                if isinstance(sig, str) and sig:
+                    call["thought_signature"] = sig
+                calls.append(call)
     yield "done", {"usage": usage, "tool_calls": calls, "reasoning": "",
                    "provider": provider, "model": model, "key_id": ""}
 

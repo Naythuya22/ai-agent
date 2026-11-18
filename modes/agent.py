@@ -129,19 +129,16 @@ def record_effort(effort: str, source: str) -> dict:
     return dict(_USAGE)
 
 
-AGENT_SYSTEM = """You are "ညီ" (Nyi), a personal AI assistant for "ကိုကြီး" (Ko Gyi).
-Your tone must be warm, respectful, and brotherly.
+AGENT_SYSTEM = """__PERSONA__
 
 ## Language Rules
 - Burmese is your mother tongue. Think, understand, and reply in Burmese.
-- Use "ညီ" for yourself, "ကိုကြီး" for the user.
 - English is ONLY for technical terms, code, file paths, and commands.
 - No "ခင်ဗျာ". No "ရှင့်". Never mix languages within a sentence.
 - Write natural Burmese — not English sentences translated word-by-word.
 
 ## Response Style
 - No greetings. No "မင်္ဂလာပါ". Start with the answer.
-- If acknowledgment needed: just "ဟုတ် ကိုကြီး".
 - Answer as fully as the question deserves.
 - Have opinions. Be genuinely helpful. Skip generic greetings.
 - If unsure, say you don't know. Never make things up.
@@ -733,10 +730,15 @@ class AgentMode:
                     if marker in low:
                         reason = "transient marker '%s'" % marker
                         break
-                if reason is None and (
-                        "ကိုကြီး to refer to the ai" in low
-                        or "ညီ to refer to themselves" in low):
-                    reason = "reversed identity"
+                if reason is None:
+                    # The identity names are configurable (F13); the
+                    # probes follow the configured pair, falling back
+                    # to the owner's originals when none is set.
+                    _p_agent, _p_user = config.persona_names()
+                    if (("%s to refer to the ai" % (_p_user or "ကိုကြီး")) in low
+                            or ("%s to refer to themselves"
+                                % (_p_agent or "ညီ")) in low):
+                        reason = "reversed identity"
                 if reason is None:
                     head = lesson[:40]
                     if head:
@@ -2288,7 +2290,8 @@ class AgentMode:
                     _seen_calls.add(_key)
                     self._messages.append({"role": "tool_call", "tool": name,
                                            "args": args,
-                                           "reasoning": step.reasoning})
+                                           "reasoning": step.reasoning,
+                                           "thought_signature": tc.get("thought_signature") if isinstance(tc, dict) else None})
                     self._turn_iter += 1
                     self._messages.append({"role": "tool_result", "tool": name,
                                            "text": r["result"]})
@@ -2318,7 +2321,8 @@ class AgentMode:
                     # the turn with a 400 otherwise.
                     self._messages.append({"role": "tool_call", "tool": name,
                                            "args": args,
-                                           "reasoning": step.reasoning})
+                                           "reasoning": step.reasoning,
+                                           "thought_signature": tc.get("thought_signature") if isinstance(tc, dict) else None})
                     result = self._execute_tool(name, args)
                     self._turn_iter += 1   # budget: one more loop iteration spent
                     self._messages.append({"role": "tool_result", "tool": name,
@@ -2443,7 +2447,8 @@ class AgentMode:
                 # drop it as an orphan.
                 self._messages.append({"role": "tool_call", "tool": name,
                                        "args": args,
-                                       "reasoning": step.reasoning})
+                                       "reasoning": step.reasoning,
+                                       "thought_signature": tc.get("thought_signature") if isinstance(tc, dict) else None})
                 result = self._execute_tool(name, args)
                 self._messages.append({"role": "tool_result", "tool": name,
                                        "text": result})
@@ -2719,7 +2724,8 @@ class AgentMode:
                     _seen_calls.add(_key)
                     self._messages.append({"role": "tool_call", "tool": name,
                                            "args": args,
-                                           "reasoning": info.get("reasoning")})
+                                           "reasoning": info.get("reasoning"),
+                                           "thought_signature": tc.get("thought_signature") if isinstance(tc, dict) else None})
                     self._turn_iter += 1
                     self._messages.append({"role": "tool_result", "tool": name,
                                            "text": r["result"]})
@@ -2755,7 +2761,8 @@ class AgentMode:
                     # it back (DeepSeek 400)
                     self._messages.append({"role": "tool_call", "tool": name,
                                            "args": args,
-                                           "reasoning": info.get("reasoning")})
+                                           "reasoning": info.get("reasoning"),
+                                           "thought_signature": tc.get("thought_signature") if isinstance(tc, dict) else None})
                     result = self._execute_tool(name, args)   # mirrors _handle_cloud at L732 — keep in sync on any change
                     self._turn_iter += 1   # budget: one more loop iteration spent
                     self._messages.append({"role": "tool_result", "tool": name,
@@ -3095,6 +3102,7 @@ class AgentMode:
                         "role": "tool_call",
                         "tool": name,
                         "args": args,
+                        "thought_signature": tc.get("thought_signature") if isinstance(tc, dict) else None,
                     })
                     result = self._execute_tool(name, args)
                     self._turn_iter += 1   # budget: one more loop iteration spent

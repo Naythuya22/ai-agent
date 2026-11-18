@@ -834,6 +834,111 @@ class KeyProbeTests(BackendCase):
         self.assertFalse(out["ok"])
 
 
+class TestGeminiThoughtSignature(unittest.TestCase):
+    """F12: Gemini 3 refuses a replayed functionCall that lacks the
+    thoughtSignature the model issued with it (400 "Function call is
+    missing a thought_signature in functionCall parts"). The signature
+    must survive the whole loop: parse → transcript → normalize →
+    request — and must never leak to another provider's wire."""
+
+    SIG = "sig-abc-123"
+
+    def test_parse_keeps_the_signature_with_its_call(self):
+        data = {"candidates": [{"content": {"parts": [
+            {"functionCall": {"name": "memory_read", "args": {}},
+             "thoughtSignature": self.SIG}]}}],
+            "usageMetadata": {"promptTokenCount": 3,
+                              "candidatesTokenCount": 1}}
+        step = AB.GeminiAdapter().parse(data, model="gemini-3.5-flash-lite",
+                                        key_id="k")
+        self.assertEqual(step.tool_calls[0].get("thought_signature"),
+                         self.SIG)
+
+    def test_parse_without_signature_stays_unsigned(self):
+        data = {"candidates": [{"content": {"parts": [
+            {"functionCall": {"name": "memory_read", "args": {}}}]}}],
+            "usageMetadata": {}}
+        step = AB.GeminiAdapter().parse(data, model="gemini-2.5-flash",
+                                        key_id="k")
+        self.assertNotIn("thought_signature", step.tool_calls[0])
+
+    def test_stream_keeps_the_signature_with_its_call(self):
+        payload = {"candidates": [{"content": {"parts": [
+            {"functionCall": {"name": "write_file",
+                              "args": {"path": "a.txt"}},
+             "thoughtSignature": self.SIG}]}}],
+            "usageMetadata": {"promptTokenCount": 5,
+                              "candidatesTokenCount": 2}}
+        lines = ["data: " + json.dumps(payload), "", "data: [DONE]", ""]
+        done = None
+        for kind, info in AB._gemini_stream(
+                lines, model="gemini-3.5-flash-lite", provider="gemini"):
+            if kind == "done":
+                done = info
+        self.assertIsNotNone(done)
+        self.assertEqual(done["tool_calls"][0].get("thought_signature"),
+                         self.SIG)
+
+    def test_normalize_carries_the_signature(self):
+        msgs = normalize([
+            {"role": "user", "text": "hi"},
+            {"role": "tool_call", "tool": "memory_read", "args": {},
+             "thought_signature": self.SIG},
+            {"role": "tool_result", "tool": "memory_read", "text": "0"},
+        ])
+        assistant = [m for m in msgs if m.get("tool_calls")]
+        self.assertEqual(len(assistant), 1)
+        self.assertEqual(
+            assistant[0]["tool_calls"][0].get("thought_signature"),
+            self.SIG)
+
+    def test_request_replays_the_signature_on_the_part(self):
+        _, body, _ = AB.GeminiAdapter().request(
+            key=GEM, model="gemini-3.5-flash-lite", system="s",
+            messages=[{"role": "user", "content": "hi"},
+                      {"role": "assistant", "content": "",
+                       "tool_calls": [{
+                           "function": {"name": "memory_read",
+                                        "arguments": {}},
+                           "thought_signature": self.SIG}]},
+                      {"role": "tool", "name": "memory_read",
+                       "tool_call_id": "call_1", "content": "0"}],
+            tools=[], max_tokens=16)
+        part = body["contents"][1]["parts"][0]
+        self.assertEqual(part.get("thoughtSignature"), self.SIG)
+        self.assertEqual(part["functionCall"]["name"], "memory_read")
+
+    def test_request_without_signature_adds_no_key(self):
+        _, body, _ = AB.GeminiAdapter().request(
+            key=GEM, model="gemini-2.5-flash", system="s",
+            messages=[{"role": "user", "content": "hi"},
+                      {"role": "assistant", "content": "",
+                       "tool_calls": [{"function": {
+                           "name": "memory_read", "arguments": {}}}]},
+                      {"role": "tool", "name": "memory_read",
+                       "tool_call_id": "call_1", "content": "0"}],
+            tools=[], max_tokens=16)
+        part = body["contents"][1]["parts"][0]
+        self.assertNotIn("thoughtSignature", part)
+
+    def test_wire_policy_strips_signature_for_other_providers(self):
+        msgs = [{"role": "assistant", "content": "",
+                 "tool_calls": [{"function": {"name": "t",
+                                              "arguments": {}},
+                                 "thought_signature": self.SIG}]}]
+        for provider in ("groq", "openai", "deepseek"):
+            out = _apply_reasoning_policy(msgs, provider, False)
+            self.assertNotIn("thought_signature",
+                             out[0]["tool_calls"][0],
+                             provider + " must not see the Gemini field")
+        out = _apply_reasoning_policy(msgs, "gemini", False)
+        self.assertEqual(out[0]["tool_calls"][0].get("thought_signature"),
+                         self.SIG)
+        # The caller's list is never mutated.
+        self.assertEqual(msgs[0]["tool_calls"][0].get("thought_signature"),
+                         self.SIG)
+
+
 if __name__ == "__main__":
     unittest.main()
 

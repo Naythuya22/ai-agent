@@ -121,6 +121,29 @@ class _ExhaustedBackend:
         raise BackendExhausted("no route")
 
 
+class _SilentBackend:
+    """First step writes a file with no text; second step ends the run
+    with neither text nor tool calls — the model did the work and said
+    nothing, which the UI used to render as "(no output)"."""
+
+    def __init__(self):
+        self.calls = 0
+
+    def step(self, *, system, messages, tools):
+        self.calls += 1
+        if self.calls == 1:
+            return _Step(tool_calls=[{
+                "function": {
+                    "name": "write_file",
+                    "arguments": json.dumps({
+                        "path": "quiet.txt",
+                        "content": "shh\n",
+                    }),
+                },
+            }], usage={"input": 8, "output": 3})
+        return _Step(usage={"input": 9, "output": 0})
+
+
 class TestRunner(unittest.TestCase):
     def setUp(self):
         from core import projects as ps
@@ -199,6 +222,15 @@ class TestRunner(unittest.TestCase):
         self.assertEqual(events[0]["type"], "error")
         self.assertIn("kaboom-import",
                       events[0]["error"]["data"]["message"])
+
+    def test_silent_model_still_gets_a_closing_line(self):
+        rc, events = self._run(_SilentBackend, prompt="write quiet.txt")
+        self.assertEqual(rc, 0)
+        self.assertTrue((self.workdir / "quiet.txt").exists())
+        summary = code_stream.summarize(events)
+        self.assertIsNone(summary["error"])
+        self.assertNotEqual(summary["reply"], "(no output)")
+        self.assertIn("quiet.txt", summary["reply"])
 
     def test_no_cloud_route_is_one_friendly_error(self):
         rc, events = self._run(_ExhaustedBackend)

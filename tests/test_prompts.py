@@ -103,25 +103,28 @@ class LoaderTests(unittest.TestCase):
     def test_base_is_in_every_prompt(self):
         with open(P.PROMPTS_DIR / P.BASE_NAME, encoding="utf-8") as fh:
             base = fh.read().strip()
+        # The shipped base carries the __PERSONA__ placeholder; what
+        # must appear in every assembled prompt is its rendered form.
+        base = P._apply_persona(base)
         for tier in P.TIERS:
             self.assertIn(base, P.load_prompt(tier), tier)
 
     def test_unknown_tier_falls_back_to_agent_system(self):
-        self.assertEqual(P.load_prompt("cloud_medium"), AGENT_SYSTEM)
-        self.assertEqual(P.load_prompt(""), AGENT_SYSTEM)
+        self.assertEqual(P.load_prompt("cloud_medium"), P._fallback_prompt())
+        self.assertEqual(P.load_prompt(""), P._fallback_prompt())
 
     def test_traversal_is_impossible(self):
         # The whitelist is checked before the tier is ever part of a path.
         for evil in ("../../etc/passwd", "..%2f..%2fetc", "/etc/passwd",
                      "local/../../secret"):
-            self.assertEqual(P.load_prompt(evil), AGENT_SYSTEM, evil)
+            self.assertEqual(P.load_prompt(evil), P._fallback_prompt(), evil)
 
     def test_missing_file_falls_back(self):
         saved = P.PROMPTS_DIR
         try:
             P.PROMPTS_DIR = saved.parent / "no-such-prompts-dir"
             P.clear_cache()
-            self.assertEqual(P.load_prompt("local"), AGENT_SYSTEM)
+            self.assertEqual(P.load_prompt("local"), P._fallback_prompt())
         finally:
             P.PROMPTS_DIR = saved
             P.clear_cache()
@@ -137,7 +140,7 @@ class LoaderTests(unittest.TestCase):
             P.clear_cache()
             # Whitespace is not a prompt: the half-deployed folder degrades to
             # the prompt that worked before tiers existed.
-            self.assertEqual(P.load_prompt("local"), AGENT_SYSTEM)
+            self.assertEqual(P.load_prompt("local"), P._fallback_prompt())
         finally:
             P.PROMPTS_DIR = saved
             P.clear_cache()
@@ -357,6 +360,94 @@ class SettingsApiTests(unittest.TestCase):
         self.call("post", "/api/settings/agent", {"prompt_tier_mode": "auto"},
                   expect=200)
         self.assertEqual(config.prompt_tier_mode(), "auto")
+
+
+class PersonaTests(unittest.TestCase):
+    """F13: the shipped persona is neutral; the owner's names are data.
+
+    Before this fix the prompts themselves named the agent ညီ and the
+    user ကိုကြီး, so a fresh install on a stranger's phone greeted
+    them with the owner's own kinship terms. The names now live in the
+    Settings store / environment and are substituted at assembly.
+    """
+
+    def setUp(self):
+        clear_env()
+        os.environ.pop(config.PERSONA_AGENT_ENV, None)
+        os.environ.pop(config.PERSONA_USER_ENV, None)
+        fresh_store()
+        P.clear_cache()
+
+    def tearDown(self):
+        os.environ.pop(config.PERSONA_AGENT_ENV, None)
+        os.environ.pop(config.PERSONA_USER_ENV, None)
+        fresh_store()
+        P.clear_cache()
+
+    def store_persona(self, agent=None, user=None):
+        km = fresh_store()
+        cfg = km.load()
+        if agent is not None:
+            cfg["persona_agent_name"] = agent
+        if user is not None:
+            cfg["persona_user_name"] = user
+        km.save()
+
+    def test_neutral_default_has_no_owner_names(self):
+        self.assertEqual(config.persona_names(), ("", ""))
+        for tier in P.TIERS:
+            text = P.load_prompt(tier)
+            self.assertNotIn("ကိုကြီး", text, tier)
+            self.assertNotIn(P.PERSONA_TOKEN, text, tier)
+            self.assertIn("personal AI assistant", text, tier)
+
+    def test_fallback_prompt_is_neutral_too(self):
+        text = P._fallback_prompt()
+        self.assertNotIn("ကိုကြီး", text)
+        self.assertNotIn(P.PERSONA_TOKEN, text)
+
+    def test_stored_names_are_substituted(self):
+        self.store_persona("ညီ", "ကိုကြီး")
+        self.assertEqual(config.persona_names(), ("ညီ", "ကိုကြီး"))
+        text = P.load_prompt("cloud_fast")
+        self.assertIn('Use "ညီ" for yourself, "ကိုကြီး" for the user',
+                      text)
+        self.assertIn('ဟုတ် ကိုကြီး', text)
+        self.assertNotIn(P.PERSONA_TOKEN, text)
+
+    def test_env_names_are_substituted(self):
+        os.environ[config.PERSONA_AGENT_ENV] = "Bot"
+        os.environ[config.PERSONA_USER_ENV] = "Boss"
+        text = P.load_prompt("local")
+        self.assertIn('You are "Bot"', text)
+        self.assertIn('"Boss"', text)
+
+    def test_store_beats_env(self):
+        os.environ[config.PERSONA_AGENT_ENV] = "Bot"
+        self.store_persona("ညီ", "ကိုကြီး")
+        self.assertEqual(config.persona_names(), ("ညီ", "ကိုကြီး"))
+
+    def test_settings_api_round_trip(self):
+        fn = client.post
+        with closing(fn("/api/settings/agent", json={
+                "persona_agent_name": "ညီ",
+                "persona_user_name": "ကိုကြီး"})) as r:
+            self.assertEqual(r.status_code, 200)
+            j = r.get_json()
+        self.assertIn("persona_agent_name", j["changed"])
+        self.assertIn("persona_user_name", j["changed"])
+        self.assertEqual(config.stored_persona_names(),
+                         ("ညီ", "ကိုကြီး"))
+        with closing(client.get("/api/settings/agent")) as r:
+            self.assertEqual(r.status_code, 200)
+            j = r.get_json()
+        self.assertEqual(j["persona_agent_name"], "ညီ")
+        self.assertEqual(j["persona_user_name"], "ကိုကြီး")
+
+    def test_settings_api_rejects_overlong_names(self):
+        with closing(client.post("/api/settings/agent", json={
+                "persona_agent_name": "x" * (config.PERSONA_NAME_MAX + 1)})) as r:
+            self.assertEqual(r.status_code, 400)
 
 
 if __name__ == "__main__":

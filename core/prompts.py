@@ -102,6 +102,19 @@ def estimate_tokens(text: str) -> int:
     return -(-raw // 3)
 
 
+# The shipped prompt files carry this placeholder where the identity
+# paragraph belongs; the names themselves live in config (Settings /
+# environment) so a fresh install ships the neutral persona (F13).
+PERSONA_TOKEN = "__PERSONA__"
+
+
+def _apply_persona(text: str) -> str:
+    """Substitute the configured persona block for PERSONA_TOKEN."""
+    if PERSONA_TOKEN not in text:
+        return text
+    return text.replace(PERSONA_TOKEN, config.persona_block())
+
+
 def _fallback_prompt() -> str:
     """AGENT_SYSTEM — the prompt that worked before tiers existed.
 
@@ -109,7 +122,7 @@ def _fallback_prompt() -> str:
     """
     try:
         from modes.agent import AGENT_SYSTEM
-        return AGENT_SYSTEM
+        return _apply_persona(AGENT_SYSTEM)
     except Exception as e:
         log.error("AGENT_SYSTEM unreachable, using the emergency prompt: %s",
                   type(e).__name__)
@@ -295,7 +308,9 @@ def load_prompt(tier: str, effort: str = EFFORT_DEFAULT) -> str:
     effort = (effort or "").strip()
     if effort not in EFFORTS:
         effort = EFFORT_DEFAULT
-    key = (tier, effort)
+    # The persona names are part of the cache key: a Settings change
+    # must yield a differently-assembled prompt, not the cached one.
+    key = (tier, effort) + config.persona_names()
     cached = _CACHE.get(key)
     if cached is not None:
         return cached
@@ -315,6 +330,7 @@ def load_prompt(tier: str, effort: str = EFFORT_DEFAULT) -> str:
                     "prompt ships without it", effort)
     else:
         out = out + "\n\n" + overlay
+    out = _apply_persona(out)
     # Plain dict assignment: two threads racing here both read the same bytes
     # and both write the same value, which is why this needs no lock.
     _CACHE[key] = out
