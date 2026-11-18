@@ -344,6 +344,10 @@ class Step:
         # the API refuses the next turn (`400 ... must be passed back
         # to the API`) unless it is replayed with the assistant turn.
         self.reasoning = reasoning or ""
+        # F14: seconds step() spent waiting out a rate limit before this
+        # step succeeded (0.0 when it never waited). The turn loops debit
+        # their per-turn wait budget by it.
+        self.waited_s = 0.0
 
 
 # ───────────────────────────── HTTP ─────────────────────────────
@@ -1978,9 +1982,9 @@ class AgentBackend:
         return self.online() and bool(self.usable())
 
     # ---------- one step ----------
-    def step(self, *, system: str, messages: list, tools: list,
-             max_tokens: int | None = None,
-             only: list | None = None) -> Step:
+    def _step_once(self, *, system: str, messages: list, tools: list,
+                   max_tokens: int | None = None,
+                   only: list | None = None) -> Step:
         # None means "whatever this install is configured to allow". A value
         # that is given is honoured only as far as the ceiling allows, so no
         # caller can quietly ask the provider for its maximum.
@@ -2194,6 +2198,120 @@ class AgentBackend:
         exc.failures = failures
         raise exc
 
+    # ── F14: step-level wait-and-retry for transient failures ────────
+    #
+    # _step_once fails fast: when every route key is parked by a
+    # per-minute rate limit it raises BackendExhausted even if the
+    # soonest key frees in seconds, and the turn dies for the user to
+    # resume by hand. step() wraps it with the wait policy: when the
+    # route's soonest recovery is a rate-limit/cooling wait inside the
+    # caller's budget, sleep it out and walk again. Re-issuing ONE
+    # model call repeats no tool work, so this is safe mid-turn —
+    # unlike a whole-turn retry, which the Release-24 preservation
+    # rules forbid. Auth-dead keys, daily-quota exhaustion and network
+    # failures never wait: waiting cannot fix them, and their waits
+    # (hours, or forever) fall outside the cap by construction.
+
+    _WAITABLE_REASONS = ("cooling", "rate_limited")
+
+    def _route_wait(self, exc=None) -> float | None:
+        """Seconds until the soonest route provider may serve again.
+
+        None when nothing on the route recovers by waiting. Sources:
+        the exception's own failure records (retry_after) and
+        failure_overview()'s key-state waits, restricted to the live
+        route — the overview alone would also name providers this
+        step never tried, and the records alone miss a provider whose
+        keys were already parked before the walk (it appends no
+        record), which is exactly the shape this feature exists for.
+        """
+        failures = getattr(exc, "failures", None) or []
+        if any(f.get("reason") == "network" for f in failures):
+            return None
+        locked = getattr(exc, "locked_reason", None)
+        if locked is not None and locked not in self._WAITABLE_REASONS:
+            return None
+        try:
+            route = set(self.route_providers())
+        except Exception:
+            route = set()
+        waits = []
+        for f in failures:
+            if (f.get("provider") in route
+                    and f.get("reason") in self._WAITABLE_REASONS
+                    and f.get("retry_after")):
+                waits.append(float(f["retry_after"]))
+        try:
+            overview = self.failure_overview()
+        except Exception:
+            overview = []
+        for o in overview:
+            if (o.get("provider") in route
+                    and o.get("reason") in self._WAITABLE_REASONS
+                    and o.get("wait")):
+                waits.append(float(o["wait"]))
+        return min(waits) if waits else None
+
+    def _sleep_interruptible(self, seconds: float,
+                             should_stop=None) -> float:
+        """Sleep in 1 s slices; return the seconds actually slept.
+
+        A should_stop callback that fires cuts the wait short — the
+        caller then treats the step as still exhausted instead of
+        retrying into a turn the user already cancelled.
+        """
+        slept = 0.0
+        while slept < seconds:
+            if should_stop is not None and should_stop():
+                break
+            chunk = min(1.0, seconds - slept)
+            time.sleep(chunk)
+            slept += chunk
+        return slept
+
+    def step(self, *, system: str, messages: list, tools: list,
+             max_tokens: int | None = None,
+             only: list | None = None,
+             wait_budget: float | None = None,
+             should_stop=None, on_wait=None) -> Step:
+        """One cloud step, with F14 wait-and-retry around _step_once.
+
+        ``wait_budget`` is opt-in: None (every one-shot caller —
+        reflect, summarize, verify) keeps the historical fail-fast
+        behaviour. The turn loops pass their remaining per-turn budget
+        (config.step_wait_budget()) and debit it by step.waited_s.
+        ``on_wait(seconds)`` fires just before each wait sleep — the
+        hook the activity-visibility UI will hang its "waiting for the
+        rate limit" state on; unused (None) today.
+        """
+        budget = 0.0 if wait_budget is None else float(wait_budget)
+        cap = float(config.step_wait_cap())
+        waited = 0.0
+        while True:
+            try:
+                step = self._step_once(system=system, messages=messages,
+                                       tools=tools, max_tokens=max_tokens,
+                                       only=only)
+                step.waited_s = waited
+                return step
+            except BackendExhausted as e:
+                remaining = budget - waited
+                wait = self._route_wait(e) if remaining > 0 else None
+                if wait is None or wait + 1 > min(cap, remaining):
+                    e.waited_s = waited
+                    raise
+                log.warning(
+                    "step wait: route rate-limited — sleeping %.0fs "
+                    "(budget left %.0fs) before retrying the step",
+                    wait + 1, remaining)
+                if on_wait is not None:
+                    on_wait(wait + 1)
+                slept = self._sleep_interruptible(wait + 1, should_stop)
+                waited += slept
+                if slept < wait + 1:
+                    e.waited_s = waited
+                    raise
+
     def failure_overview(self) -> list:
         """Why each keyed provider cannot take a turn right now.
 
@@ -2243,9 +2361,9 @@ class AgentBackend:
         return out
 
     # ---------- one step, streamed ----------
-    def step_stream(self, *, system: str, messages: list, tools: list,
-                    max_tokens: int | None = None, http=None,
-                    http_stream=None):
+    def _stream_once(self, *, system: str, messages: list, tools: list,
+                     max_tokens: int | None = None, http=None,
+                     http_stream=None):
         """Yield ("delta", str) then one ("done", info) from the winning
         provider, or ("error", {...}) after the first delta.
         Mirrors step()'s ladder. Does NOT call the local engine.
@@ -2478,6 +2596,88 @@ class AgentBackend:
         # mirrors step() L1551's BackendExhausted message — logged, never
         # raised: an empty stream is what tells the caller to go local.
         return
+
+    def step_stream(self, *, system: str, messages: list, tools: list,
+                    max_tokens: int | None = None, http=None,
+                    http_stream=None,
+                    wait_budget: float | None = None,
+                    should_stop=None, emit_wait: bool = False):
+        """_stream_once with the F14 wait policy (see step()).
+
+        The wait may only happen pre-first-byte: when a walk yields
+        nothing at all (route exhausted) the wrapper sleeps out a
+        rate-limit wait inside the budget and walks again. Once any
+        frame has been yielded the stream is the caller's — an in-band
+        error ends it exactly as before, and a completed stream just
+        returns. The waited total rides on the done frame's info dict
+        (mutated after the yield, before return — callers read the
+        info only after the generator is spent, so they see it).
+        With ``emit_wait=True`` a ("wait", {"seconds": N}) frame is
+        yielded just before each wait sleep — the hook the
+        activity-visibility UI will render as its waiting state;
+        default False keeps today's frame vocabulary unchanged.
+        """
+        budget = 0.0 if wait_budget is None else float(wait_budget)
+        cap = float(config.step_wait_cap())
+        waited = 0.0
+        while True:
+            yielded_any = False
+            done_info = None
+            try:
+                for kind, payload in self._stream_once(
+                        system=system, messages=messages, tools=tools,
+                        max_tokens=max_tokens, http=http,
+                        http_stream=http_stream):
+                    yielded_any = True
+                    if kind == "done":
+                        done_info = payload
+                    yield kind, payload
+            except BackendExhausted as e:
+                # Locked mode raises instead of returning empty. The
+                # raise is pre-first-byte by construction (the locked
+                # check precedes the walk; post-byte failures arrive as
+                # in-band error frames) — but guard anyway: after any
+                # yielded frame a retry would duplicate output.
+                if yielded_any:
+                    e.waited_s = waited
+                    raise
+                remaining = budget - waited
+                wait = self._route_wait(e) if remaining > 0 else None
+                if wait is None or wait + 1 > min(cap, remaining):
+                    e.waited_s = waited
+                    raise
+                log.warning(
+                    "step stream wait: route rate-limited — sleeping "
+                    "%.0fs (budget left %.0fs) before retrying",
+                    wait + 1, remaining)
+                if emit_wait:
+                    yield "wait", {"seconds": wait + 1}
+                slept = self._sleep_interruptible(wait + 1, should_stop)
+                waited += slept
+                if slept < wait + 1:
+                    e.waited_s = waited
+                    raise
+                continue
+            if done_info is not None:
+                if waited:
+                    done_info["waited_s"] = waited
+                return
+            if yielded_any:
+                return          # in-band error frame already delivered
+            # Nothing yielded: the route exhausted pre-first-byte.
+            remaining = budget - waited
+            wait = self._route_wait(None) if remaining > 0 else None
+            if wait is None or wait + 1 > min(cap, remaining):
+                return
+            log.warning(
+                "step stream wait: route rate-limited — sleeping %.0fs "
+                "(budget left %.0fs) before retrying", wait + 1, remaining)
+            if emit_wait:
+                yield "wait", {"seconds": wait + 1}
+            slept = self._sleep_interruptible(wait + 1, should_stop)
+            waited += slept
+            if slept < wait + 1:
+                return
 
     def _handle_error(self, provider: str, entry: dict, err: CloudError,
                       model: str) -> None:

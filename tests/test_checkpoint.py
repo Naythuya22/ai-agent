@@ -197,7 +197,7 @@ class FakeStreamBackend:
         return ""
 
     def step_stream(self, system=None, messages=None, tools=None,
-                    max_tokens=None):
+                    max_tokens=None, **kw):
         self.rounds += 1
         n = self.rounds
         if n > len(self.dirs):

@@ -192,7 +192,7 @@ class DyingStreamBackend:
         return ""
 
     def step_stream(self, system=None, messages=None, tools=None,
-                    max_tokens=None):
+                    max_tokens=None, **kw):
         self.rounds += 1
         if self.rounds == 1:
             yield "done", {

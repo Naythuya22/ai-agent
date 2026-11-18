@@ -99,7 +99,7 @@ class _FakeBackend:
         self.calls = []
         _FakeBackend.instances.append(self)
 
-    def step(self, *, system, messages, tools):
+    def step(self, *, system, messages, tools, **kw):
         self.calls.append([dict(m) for m in messages])
         if len(self.calls) == 1:
             return _Step(tool_calls=[{
@@ -116,7 +116,7 @@ class _FakeBackend:
 
 
 class _ExhaustedBackend:
-    def step(self, *, system, messages, tools):
+    def step(self, *, system, messages, tools, **kw):
         from core.agent_backend import BackendExhausted
         raise BackendExhausted("no route")
 
@@ -129,7 +129,7 @@ class _SilentBackend:
     def __init__(self):
         self.calls = 0
 
-    def step(self, *, system, messages, tools):
+    def step(self, *, system, messages, tools, **kw):
         self.calls += 1
         if self.calls == 1:
             return _Step(tool_calls=[{

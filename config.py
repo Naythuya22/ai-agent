@@ -306,6 +306,28 @@ PROBE_MAX_TOKENS = 8
 AGENT_MAX_ITER_DEFAULT = _env_int("AI_AGENT_MAX_ITER", 30, maximum=100)
 AGENT_MAX_ITER_CODE = 50
 
+# F14 — step-level wait-and-retry for transient cloud failures. When every
+# route key is parked by a per-minute rate limit, a step may WAIT for the
+# soonest key to free and try again instead of killing the turn (the manual
+# "ဆက်လုပ်ပါ" resume, automated). The budget is per user turn (the turn
+# loops debit it by the time actually slept); the cap bounds any single
+# wait. One-shot callers pass no budget and keep the old fail-fast
+# behaviour. 0 disables waiting entirely.
+STEP_WAIT_BUDGET_DEFAULT = _env_int("AI_AGENT_STEP_WAIT_BUDGET", 150,
+                                    minimum=0, maximum=900)
+STEP_WAIT_CAP_DEFAULT = _env_int("AI_AGENT_STEP_WAIT_CAP", 120,
+                                 minimum=1, maximum=600)
+
+
+def step_wait_budget() -> int:
+    """Seconds of rate-limit waiting one user turn may spend (F14)."""
+    return STEP_WAIT_BUDGET_DEFAULT
+
+
+def step_wait_cap() -> int:
+    """Longest single rate-limit wait a step may take (F14)."""
+    return STEP_WAIT_CAP_DEFAULT
+
 
 # ── Agent Mode robustness (each one reversible from the shell) ─────────────
 #

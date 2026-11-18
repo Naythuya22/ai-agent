@@ -32,6 +32,7 @@ friendly error event instead of dying silently.
 from __future__ import annotations
 
 import argparse
+import config
 import json
 import re
 import sys
@@ -246,11 +247,18 @@ def _run_guarded(prompt: str, workdir: str, sid: str) -> int:
     backend = AgentBackend()
     spoke = False
     done_labels: list[str] = []
+    # F14: one wait budget per run, debited by step.waited_s — a Code
+    # task is exactly the long multi-step shape that died on a parked
+    # key before this existed.
+    _run_wait = [float(config.step_wait_budget())]
     try:
         for _step_no in range(MAX_STEPS):
             _emit({"type": "step_start", "sessionID": sid, "part": {}})
             step = backend.step(system=SYSTEM_PROMPT, messages=messages,
-                                tools=wrapped)
+                                tools=wrapped, wait_budget=_run_wait[0])
+            _run_wait[0] = max(
+                0.0, _run_wait[0] - (getattr(step, "waited_s", 0.0)
+                                     or 0.0))
             if step.text:
                 spoke = True
                 _emit({"type": "text", "sessionID": sid,

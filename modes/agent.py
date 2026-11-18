@@ -2247,11 +2247,19 @@ class AgentMode:
         self.turns += 1
         system = self._with_memory(system or self._system_prompt()[0])
 
+        # F14: one wait budget per user turn, debited by the seconds a
+        # step actually slept out a rate limit (step.waited_s).
+        _turn_wait = [float(config.step_wait_budget())]
+
         def _step(only=None, tools=None):
             step = be.step(system=system, messages=self._messages,
                            tools=self._tools if tools is None else tools,
                            max_tokens=config.agent_max_tokens(self.name),
-                           only=only if only is not None else turn_only)
+                           only=only if only is not None else turn_only,
+                           wait_budget=_turn_wait[0])
+            _turn_wait[0] = max(
+                0.0, _turn_wait[0] - (getattr(step, "waited_s", 0.0)
+                                      or 0.0))
             # Recorded per successful step, not once at the end: the provider
             # can change mid-turn when a key runs out, and the chip must show
             # the model that produced the answer the user is reading.
@@ -2648,6 +2656,9 @@ class AgentMode:
         # carries the budget notice instead of a model answer.
         self._stream_budget_exhausted = False
         final_text = ""
+        # F14: one wait budget per user turn (mirrors _handle_cloud's
+        # _turn_wait), debited by each round's waited_s.
+        _stream_turn_wait = [float(config.step_wait_budget())]
 
         def _pump_round():
             """One provider step: forward its deltas, then hand back
@@ -2663,7 +2674,8 @@ class AgentMode:
             info = None
             stream = be.step_stream(
                 system=system, messages=self._messages, tools=self._tools,
-                max_tokens=config.agent_max_tokens(self.name))
+                max_tokens=config.agent_max_tokens(self.name),
+                wait_budget=_stream_turn_wait[0])
             for kind, payload in stream:
                 if kind == "delta":
                     text += payload
@@ -2687,6 +2699,9 @@ class AgentMode:
                 elif kind == "error":
                     yield ("error", payload)     # forwarded verbatim
                     return None
+            if info is not None and info.get("waited_s"):
+                _stream_turn_wait[0] = max(
+                    0.0, _stream_turn_wait[0] - float(info["waited_s"]))
             return (info, text)
 
         # mirrors _handle_cloud at L700 — the first step, before the loop
