@@ -13,7 +13,16 @@ if str(_root) not in sys.path:
     sys.path.insert(0, str(_root))
 
 import config
-from litert_lm import tool_from_function
+try:
+    from litert_lm import tool_from_function
+except ImportError:
+    # Cloud-only device without the local engine library: bare functions
+    # are fine — core.agent_backend.tool_schema() builds each tool's
+    # schema from its signature, and tool calls execute by name. The
+    # native wrapper is only needed by the local engine, which is
+    # unavailable in this state anyway (LLM.load() refuses first).
+    def tool_from_function(fn):
+        return fn
 from core import prompts as prompt_tiers
 from core import safety
 from core.llm import LLM

@@ -10,22 +10,35 @@ _root = Path(__file__).resolve().parent.parent
 if str(_root) not in sys.path:
     sys.path.insert(0, str(_root))
 
-import litert_lm
+try:
+    import litert_lm
+    from litert_lm.interfaces import (
+        SamplerConfig,
+        RepetitionPenaltyConfig,
+        NoRepeatNgramConfig,
+    )
+except ImportError:
+    # The local engine library is OPTIONAL. Without it the app still runs
+    # cloud-only — Settings, the cloud Agent routes and Code mode all work;
+    # only a local turn needs the engine, and LLM.load() raises a clear
+    # LLMError there. A hard import here would brick the whole server on a
+    # fresh Termux, where pip cannot install litert-lm at all (PyPI has no
+    # Android wheel for it, so pip falls back to source builds of cmake /
+    # ninja / numpy, which fail) — proven on a clean device 2026-11-18.
+    litert_lm = None
+    SamplerConfig = RepetitionPenaltyConfig = NoRepeatNgramConfig = None
+
 from config import Config, model_missing_message
 from core.log import get_logger
-from litert_lm.interfaces import (
-    SamplerConfig,
-    RepetitionPenaltyConfig,
-    NoRepeatNgramConfig,
-)
 
 log = get_logger("llm")
 
 # Silence native LiteRT logs (only ERROR+ shown)
-try:
-    litert_lm.set_min_log_severity(litert_lm.LogSeverity.ERROR)
-except Exception as e:
-    log.debug("could not lower the LiteRT log level: %s: %s", type(e).__name__, e)
+if litert_lm is not None:
+    try:
+        litert_lm.set_min_log_severity(litert_lm.LogSeverity.ERROR)
+    except Exception as e:
+        log.debug("could not lower the LiteRT log level: %s: %s", type(e).__name__, e)
 
 
 def _repetition_kwargs():
@@ -318,6 +331,14 @@ class LLM:
         """Load engine (idempotent). Uses backend from config."""
         if self._engine is not None:
             return
+
+        if litert_lm is None:
+            raise LLMError(
+                "The local model engine (litert-lm) is not installed on "
+                "this device, so Local mode is unavailable. Add a cloud "
+                "provider key in Settings to use the agent, or install "
+                "the local engine separately."
+            )
 
         model_path = self.config.resolve_model_path()
         if not model_path or not Path(model_path).is_file():

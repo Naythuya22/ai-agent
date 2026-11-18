@@ -24,8 +24,11 @@ wcwidth==0.9.1
 #   pkg install python python-pip
 #   pkg install ripgrep git
 #
-# litert-lm is installed separately by the ai-agent setup.
-# See README.md → "Local model setup".
+# litert-lm (the local model engine) is OPTIONAL and deliberately not
+# listed here: pip cannot install it on Termux (PyPI has no Android
+# wheel, and the source build fails). The app runs cloud-only without
+# it; Local mode reports a clear error until the engine is installed
+# separately. See README.md → "Local model setup".
 
 # ── Markup safety ──────────────────────────────────────────
 MarkupSafe==3.0.3
