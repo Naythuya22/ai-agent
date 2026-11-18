@@ -190,6 +190,25 @@ def run(prompt: str, workdir: str, session_id: str | None) -> int:
     sid = session_id if session_id and _SID_RE.match(session_id) \
         else uuid.uuid4().hex
 
+    # Everything from here on is inside the guard: a child that dies before
+    # its first event is reported by the caller as "exited 1 with no
+    # output", which tells the user nothing. Whatever goes wrong —
+    # an import, the engine's construction, a bad store file — must come
+    # back as one error event carrying the real exception.
+    try:
+        return _run_guarded(prompt, workdir, sid)
+    except Exception as e:
+        import traceback
+        _emit({"type": "error", "sessionID": sid, "error": {
+            "name": type(e).__name__,
+            "data": {"message":
+                     f"{type(e).__name__}: {e}\n"
+                     + "\n".join(traceback.format_exc()
+                                 .rstrip().splitlines()[-4:])}}})
+        return 1
+
+
+def _run_guarded(prompt: str, workdir: str, sid: str) -> int:
     try:
         os_chdir = Path(workdir)
         if os_chdir.is_dir():

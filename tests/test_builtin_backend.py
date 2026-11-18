@@ -181,6 +181,25 @@ class TestRunner(unittest.TestCase):
         self.assertIn("create hello.py", texts)
         self.assertIn("and again", texts)
 
+    def test_pre_loop_crash_speaks_as_error_event(self):
+        # A child that dies before its first event is reported by the
+        # caller as "exited 1 with no output" — the runner must turn ANY
+        # early failure (import, engine construction, tool wrapping)
+        # into one error event carrying the real exception instead.
+        def boom():
+            raise RuntimeError("kaboom-import")
+
+        with patch.object(runner, "_code_tools", boom):
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                rc = runner.run("hi", str(self.workdir), None)
+        self.assertEqual(rc, 1)
+        events = [json.loads(x) for x in buf.getvalue().splitlines() if x]
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["type"], "error")
+        self.assertIn("kaboom-import",
+                      events[0]["error"]["data"]["message"])
+
     def test_no_cloud_route_is_one_friendly_error(self):
         rc, events = self._run(_ExhaustedBackend)
         self.assertEqual(rc, 1)
