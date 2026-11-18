@@ -34,6 +34,22 @@ pip install -r requirements.txt
 Model မရှိလည်း server တက်ပါတယ် — UI, Settings နဲ့ cloud အလှည့်တွေ
 အလုပ် လုပ်ပြီး local အလှည့်တွေမှာသာ “Model not found” လို့ ပြန်ပါမယ်။
 
+### ⚠️ Local mode သုံးရင် — Prompt Effort ကို Fast ထားပါ
+
+Local model နဲ့ Agent mode သုံးတဲ့အခါ **Settings → Backend → Prompt Effort ကို Fast** မှာ ထားပါ။
+Balanced / Auto နဲ့ ဆို agent prompt က ရှည်လွန်းလို့ prefill က CPU ကို အကြာကြီး အပြည့် လည်ရပြီး
+ဖုန်း OS က Termux app ကို ပိတ်ပစ်နိုင်ပါတယ် (Xiaomi/HyperOS ဖုန်းမှာ 2026-11-18 စမ်း အတည်ပြုပြီး)။
+Fast နဲ့ ဆို prompt တိုလို့ ပုံမှန် အလုပ် လုပ်ပါတယ်။
+
+နောက် မှတ်စရာ ၂ ခု —
+
+- Local model ဖိုင်က **Gemma 4 E4B `.litertlm`** ပဲ သုံးပါ။ Context သေးတဲ့ တခြား model ဖိုင်
+  (ဥပမာ state 4096 ပဲ ရှိတဲ့ ဖိုင်) ကို `Download/` မှာ ထားမိရင် app က အဲဒါကို အလိုလို
+  ကောက်ယူပြီး local turn တွေ ပျက်နိုင်ပါတယ် — မသုံးတဲ့ model ဖိုင် ကို `Download/` မှာ မထားပါနဲ့။
+- Server က idle မိနစ် ၃၀ ကြာရင် သူ့အလိုလို ပိတ်ပါတယ် (battery သက်သာရန် စည်း)။
+  Browser မှာ “offline / 503” ပြရင် server ရပ်သွားတာ ဖြစ်နိုင်ပါတယ် — Termux မှာ
+  `python server.py` ပြန် run လိုက်ပါ။
+
 ## ၃။ Run ရန်
 
 ```
