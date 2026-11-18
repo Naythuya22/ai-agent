@@ -54,8 +54,12 @@ color-scheme:light;
 *{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
 html,body{height:100%;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Noto Sans Myanmar",sans-serif;background:var(--bg);color:var(--text);font-size:15px;line-height:1.55;overscroll-behavior:none}
 body{display:flex;flex-direction:column;height:100vh;height:100dvh;overflow:hidden}
-header{display:flex;align-items:center;padding:12px 14px;background:var(--bg-2);border-bottom:1px solid var(--border);flex-shrink:0;gap:10px}
-.brand{font-weight:600;color:var(--text);font-size:15px}
+header{display:flex;align-items:center;padding:6px 14px;background:var(--bg-2);border-bottom:1px solid var(--border);flex-shrink:0;gap:10px}
+.brand{display:flex;align-items:center;gap:8px;min-width:0}
+#mascot{height:52px;width:auto;display:block;border-radius:9px;background:var(--bg-3)}
+.bubble{display:flex;flex-direction:column;min-width:0;line-height:1.25}
+#bubble-name{font-size:12px;font-weight:600;color:var(--text);white-space:nowrap}
+#bubble-text{font-size:11px;color:var(--text-2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100px}
 .modes{display:flex;gap:6px;margin-left:auto;background:var(--bg);padding:3px;border-radius:8px}
 .mode-btn{background:transparent;border:none;color:var(--text-2);padding:5px 12px;border-radius:6px;font-size:13px;cursor:pointer;transition:all .15s;font-family:inherit}
 .mode-btn.active{background:var(--accent);color:var(--accent-on);font-weight:500}
@@ -100,6 +104,7 @@ footer{position:relative;padding:12px 12px 16px;background:var(--bg);border-top:
 .activity.thinking,.activity.writing{color:var(--info)}
 .activity.reading{color:var(--accent)}
 .activity.running{color:var(--warn)}
+.activity.waiting{color:var(--info)}
 @keyframes act-spin{to{transform:rotate(360deg)}}
 /* Slash-command autocomplete */
 .ac-menu{position:absolute;left:12px;right:12px;bottom:calc(100% + 8px);background:var(--bg-2);border:1px solid var(--border-2);border-radius:12px;box-shadow:0 6px 20px rgba(0,0,0,.4);max-height:44vh;overflow-y:auto;z-index:70;padding:4px}
@@ -310,7 +315,7 @@ footer{position:relative;padding:12px 12px 16px;background:var(--bg);border-top:
   <button class="nk-btn" id="nokey-settings-btn" type="button">Settings ဖွင့်ရန်</button>
 </div>
 <header>
-<div class="brand">ai-agent</div>
+<div class="brand"><img id="mascot" src="/static/mascot-idle.webp" alt=""><span class="bubble"><span id="bubble-name">Agent</span><span id="bubble-text">ready</span></span></div>
 <div class="modes">
 <button class="mode-btn active" data-mode="agent">Agent</button>
 <button class="mode-btn" data-mode="code">Code</button>
@@ -325,10 +330,10 @@ footer{position:relative;padding:12px 12px 16px;background:var(--bg);border-top:
 <p class="hint">Type a message below to start.</p>
 </div>
 </main>
-<div id="term-hint" style="display:none;position:fixed;top:56px;left:0;right:0;z-index:6;padding:5px 14px;font-size:11px;background:var(--bg-5);border-bottom:1px solid var(--border);color:var(--text-2)">Keyboard not working? <a href="http://127.0.0.1:8081/terminal/" target="_blank" rel="noopener">Open in new tab ↗</a></div>
-<iframe id="code-frame" style="display:none;position:fixed;top:56px;left:0;right:0;bottom:96px;width:100%;height:calc(100% - 152px);border:0;background:var(--frame-bg);z-index:5"></iframe>
+<div id="term-hint" style="display:none;position:fixed;top:64px;left:0;right:0;z-index:6;padding:5px 14px;font-size:11px;background:var(--bg-5);border-bottom:1px solid var(--border);color:var(--text-2)">Keyboard not working? <a href="http://127.0.0.1:8081/terminal/" target="_blank" rel="noopener">Open in new tab ↗</a></div>
+<iframe id="code-frame" style="display:none;position:fixed;top:64px;left:0;right:0;bottom:96px;width:100%;height:calc(100% - 160px);border:0;background:var(--frame-bg);z-index:5"></iframe>
 <button id="term-x" title="Close terminal"
-  style="display:none;position:fixed;top:64px;right:8px;z-index:115;
+  style="display:none;position:fixed;top:72px;right:8px;z-index:115;
          background:rgba(0,0,0,0.78);color:#fff;border:0;
          border-radius:50%;width:38px;height:38px;font-size:18px;
          line-height:38px;padding:0;cursor:pointer;
@@ -729,8 +734,8 @@ async function openCodeFrame(){
     var tx=document.getElementById('term-x');
     if(tx)tx.style.display='block';
     // Make room for the fallback hint bar above the frame.
-    fr.style.top='84px';
-    fr.style.height='calc(100% - 180px)';
+    fr.style.top='92px';
+    fr.style.height='calc(100% - 188px)';
     var th=document.getElementById('term-hint');
     if(th)th.style.display='block';
     chatEl.style.visibility='hidden';
@@ -743,8 +748,8 @@ function closeCodeFrame(){
   var fr=document.getElementById('code-frame');
   if(fr){
     fr.style.display='none';fr.src='about:blank';
-    fr.style.top='56px';
-    fr.style.height='calc(100% - 152px)';
+    fr.style.top='64px';
+    fr.style.height='calc(100% - 160px)';
   }
   chatEl.style.visibility='visible';
   var tx=document.getElementById('term-x');
@@ -788,6 +793,10 @@ function appendToolTrace(trace){clearWelcome();trace.forEach(function(t){var d=d
 var statusTextEl=document.getElementById('status-text');
 var activityEl=document.getElementById('activity');
 var actLabelEl=document.getElementById('act-label');
+var mascotEl=document.getElementById('mascot');
+var bubbleNameEl=document.getElementById('bubble-name');
+var bubbleTextEl=document.getElementById('bubble-text');
+var mascotState='idle';
 var typingEl=null;
 var actPhase='';
 function setStatus(t){statusTextEl.textContent=t||''}
@@ -1108,12 +1117,25 @@ function setStatus(t){statusTextEl.textContent=t||''}
   // ── end model indicator ──
   if(typeof window!=='undefined')window.addEventListener('load', function(){try{updateModelInfo()}catch(_mi){}});
   if(typeof window!=='undefined')window.addEventListener('load', function(){try{checkNoKeyBanner()}catch(_nk){}});
-function clearActivity(){actPhase='';activityEl.hidden=true}
+function setMascot(state,label){
+  if(mascotEl&&mascotState!==state){mascotState=state;mascotEl.src=state==='idle'?'/static/mascot-idle.webp':'/static/mascot-working.webp'}
+  if(bubbleTextEl)bubbleTextEl.textContent=label;
+}
+function clearActivity(){actPhase='';activityEl.hidden=true;setMascot('idle','ready')}
 function setActivity(phase,label){
   if(actPhase===phase&&actLabelEl.textContent===label)return;
   actPhase=phase;activityEl.hidden=false;activityEl.className='activity '+phase;actLabelEl.textContent=label;
+  setMascot('working',label);
   if(typingEl&&typingEl.firstChild&&typingEl.firstChild.className==='typing')typingEl.firstChild.textContent=label;
 }
+async function loadBubbleName(){
+  try{
+    var r=await fetch('/api/settings/agent');
+    var j=await r.json();
+    if(j&&j.persona_agent_name&&bubbleNameEl)bubbleNameEl.textContent=j.persona_agent_name;
+  }catch(e){/* cosmetic only — the fallback label stays */}
+}
+if(typeof window!=='undefined')window.addEventListener('load', function(){try{loadBubbleName()}catch(_bn){}});
 function activityFor(tool,args){
   var a=args||{};
   var p=String(a.path||a.file||a.name||a.directory||'');
@@ -1693,6 +1715,10 @@ async function sendStream(text,mode){
             assistantEl.innerHTML=renderMarkdown(rawText);
             scrollBottom();
           }
+        }else if(evt.type==='tool_start'){
+          setActivity.apply(null,activityFor(evt.tool||evt.name,evt.args||{}));
+        }else if(evt.type==='wait'){
+          setActivity('waiting','Waiting — retrying in '+(evt.seconds||'…')+'s');
         }else if(evt.type==='tool_call'){
           setActivity.apply(null,activityFor(evt.tool,evt.args));
           var a=JSON.stringify(evt.args||{});

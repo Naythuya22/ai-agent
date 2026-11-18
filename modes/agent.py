@@ -2686,11 +2686,15 @@ class AgentMode:
             stream = be.step_stream(
                 system=system, messages=self._messages, tools=self._tools,
                 max_tokens=config.agent_max_tokens(self.name),
-                wait_budget=_stream_turn_wait[0])
+                wait_budget=_stream_turn_wait[0], emit_wait=True)
             for kind, payload in stream:
                 if kind == "delta":
                     text += payload
                     yield ("delta", payload)     # forwarded verbatim
+                elif kind == "wait":
+                    # F16: F14's in-turn wait, surfaced so the client can
+                    # show the mascot waiting instead of a frozen turn.
+                    yield ("wait", payload)
                 elif kind == "done":
                     info = payload
                     # Release 26: remember who answered — the quality
@@ -2739,6 +2743,12 @@ class AgentMode:
                 break
             # Batch 4.2b: stream parallel — when safe and no dups.
             if self._batch_parallel_ok(info["tool_calls"]):
+                # F16: announce every call before the batch runs, so the
+                # client shows what is about to happen, not only results.
+                for tc in info["tool_calls"]:
+                    _fn = tc.get("function", {}) if isinstance(tc, dict) else {}
+                    yield ("tool_start", {"name": _fn.get("name", ""),
+                                          "args": _fn.get("arguments", {}) or {}})
                 results = self._execute_tools_batch(info["tool_calls"])
                 for tc, r in zip(info["tool_calls"], results):
                     name = r["name"]
@@ -2796,6 +2806,8 @@ class AgentMode:
                                            "args": args,
                                            "reasoning": info.get("reasoning"),
                                            "thought_signature": tc.get("thought_signature") if isinstance(tc, dict) else None})
+                    # F16: announce before executing (see batch branch).
+                    yield ("tool_start", {"name": name, "args": args})
                     result = self._execute_tool(name, args)   # mirrors _handle_cloud at L732 — keep in sync on any change
                     self._turn_iter += 1   # budget: one more loop iteration spent
                     self._messages.append({"role": "tool_result", "tool": name,

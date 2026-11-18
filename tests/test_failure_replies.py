@@ -678,5 +678,80 @@ class DuplicateCallSignatureCase(FailureReplyBase):
         self._assert_transcript(mode.session_id)
 
 
+class ActivityStreamBackend:
+    """F16 rig: round 1 emits an F14 wait frame, then one list_files
+    call; round 2 answers with text. Records the emit_wait flag the
+    pump passes, so the test pins the wiring, not just the frames."""
+
+    def __init__(self, directory):
+        self.directory = directory
+        self.rounds = 0
+        self.saw_emit_wait = None
+
+    def refresh(self):
+        pass
+
+    def should_use_cloud(self):
+        return True
+
+    def why_not_cloud(self):
+        return ""
+
+    def step(self, system=None, messages=None, tools=None,
+             max_tokens=None, **kw):
+        return Step(text="", provider="gemini", model="stub-model")
+
+    def step_stream(self, system=None, messages=None, tools=None,
+                    max_tokens=None, **kw):
+        self.saw_emit_wait = kw.get("emit_wait")
+        self.rounds += 1
+        if self.rounds == 1:
+            yield "wait", {"seconds": 7}
+            yield "done", {
+                "text": "",
+                "tool_calls": [{"function": {
+                    "name": "list_files",
+                    "arguments": {"directory": self.directory}}}],
+                "usage": {}, "model": "stub-model", "provider": "gemini",
+                "reasoning": "",
+            }
+            return
+        yield "delta", "all done"
+        yield "done", {
+            "text": "all done", "tool_calls": [],
+            "usage": {}, "model": "stub-model", "provider": "gemini",
+            "reasoning": "",
+        }
+
+
+class ActivityFrameCase(FailureReplyBase):
+    """F16 — the v2 stream must announce a tool BEFORE it runs
+    (tool_start) and surface F14's in-turn waits (wait), so the
+    client's mascot and activity pill never sit frozen during
+    long work."""
+
+    def test_tool_start_precedes_tool_and_wait_is_forwarded(self):
+        self.km.set_mode("cloud")
+        self.km.save()
+        mode = self.new_mode()
+        backend = ActivityStreamBackend(str(self.dir_a))
+        mode._backend = backend
+        mode.begin_turn()
+        mode._messages.append({"role": "user", "text": "ACT_TASK"})
+        frames = list(mode._handle_cloud_stream())
+        kinds = [k for k, _ in frames]
+        self.assertIs(backend.saw_emit_wait, True,
+                      "the pump never asked the backend to emit waits")
+        self.assertIn("wait", kinds)
+        self.assertEqual(frames[kinds.index("wait")][1], {"seconds": 7})
+        self.assertIn("tool_start", kinds)
+        self.assertLess(kinds.index("wait"), kinds.index("tool_start"))
+        self.assertLess(kinds.index("tool_start"), kinds.index("tool"))
+        start = frames[kinds.index("tool_start")][1]
+        self.assertEqual(start, {"name": "list_files",
+                                 "args": {"directory": str(self.dir_a)}})
+        self.assertEqual(kinds[-1], "end")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -27,15 +27,22 @@ function el() {
 const statusTextEl = el();
 const activityEl = el();
 const actLabelEl = el();
+const mascotEl = el();
+const bubbleNameEl = el();
+const bubbleTextEl = el();
 const sendBtn = el();
 const inputEl = el();
-const documentStub = { getElementById: (id) => ({ 'status-text': statusTextEl, 'activity': activityEl, 'act-label': actLabelEl }[id] || el()) };
+const documentStub = { getElementById: (id) => ({ 'status-text': statusTextEl, 'activity': activityEl, 'act-label': actLabelEl, 'mascot': mascotEl, 'bubble-name': bubbleNameEl, 'bubble-text': bubbleTextEl }[id] || el()) };
 const state = { busy: false, abort: null };
 
 const api = new Function(
   'document', 'state', 'sendBtn', 'inputEl',
   slice + `
   return { setStatus, clearActivity, setActivity, activityFor, setBusy, killTyping,
+           setMascot,
+           getMascotState: () => mascotState,
+           getMascotSrc: () => mascotEl.src,
+           getBubbleText: () => bubbleTextEl.textContent,
            setTyping: (e) => { typingEl = e; },
            setActPhase: (p) => { actPhase = p; } };`
 )(documentStub, state, sendBtn, inputEl);
@@ -105,6 +112,22 @@ ok(!activityEl.hidden, 'setBusy(true) leaves the pill alone');
 api.setBusy(false);
 eq(activityEl.hidden, true, 'setBusy(false) clears the pill');
 eq(sendBtn.textContent, '➤', 'idle button glyph restored');
+
+// F16: the header mascot + bubble follow the same activity signal
+eq(api.getMascotState(), 'idle', 'mascot idles after clearActivity');
+eq(api.getMascotSrc(), '/static/mascot-idle.webp', 'idle mascot asset');
+eq(api.getBubbleText(), 'ready', 'bubble falls back to ready when idle');
+api.setActivity('running', 'Running run_command');
+eq(api.getMascotState(), 'working', 'mascot works during a phase');
+eq(api.getMascotSrc(), '/static/mascot-working.webp', 'working mascot asset');
+eq(api.getBubbleText(), 'Running run_command', 'bubble mirrors the label');
+api.setActivity('waiting', 'Waiting — retrying in 30s');
+eq(activityEl.className, 'activity waiting', 'waiting phase class');
+eq(api.getMascotState(), 'working', 'mascot stays working while waiting');
+eq(api.getBubbleText(), 'Waiting — retrying in 30s', 'bubble shows the wait');
+api.clearActivity();
+eq(api.getMascotSrc(), '/static/mascot-idle.webp', 'mascot idles again after clear');
+eq(api.getBubbleText(), 'ready', 'bubble back to ready after clear');
 
 console.log(failures ? `\n${failures} FAILED` : '\nALL PASS');
 process.exit(failures ? 1 : 0);

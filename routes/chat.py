@@ -745,6 +745,18 @@ def api_agent_stream_v2():
                                 "args": payload.get("args", {}),
                                 "result": payload.get("result", ""),
                             })
+                        elif kind == "tool_start":
+                            # F16: a tool is about to run — the client
+                            # updates its activity/mascot before it starts.
+                            yield _frame("tool_start", {
+                                "name": payload.get("name", ""),
+                                "args": payload.get("args", {}),
+                            })
+                        elif kind == "wait":
+                            # F16: F14 is waiting out a rate limit — say so.
+                            yield _frame("wait", {
+                                "seconds": payload.get("seconds", 0),
+                            })
                         elif kind == "error":
                             yield _frame("error", payload)
                         elif kind == "end":
