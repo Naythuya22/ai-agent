@@ -2,7 +2,10 @@
 # One-command setup for ai-agent.
 #
 #   sh install.sh              # core install (server + terminal UI)
-#   sh install.sh --with-code  # + Code mode deps (node + opencode)
+#
+# Code mode is built into the app (its own agent engine) — there are no
+# extra Code-mode dependencies to install. The old --with-code flag (node
+# + an external CLI) is accepted as a no-op so older guides keep working.
 #
 # Safe to re-run: every step is idempotent. On Termux it installs the
 # system packages itself; elsewhere it assumes python3 + pip exist and
@@ -10,10 +13,9 @@
 set -eu
 cd "$(dirname "$0")"
 
-WITH_CODE=0
 for arg in "$@"; do
     case "$arg" in
-        --with-code) WITH_CODE=1 ;;
+        --with-code) echo "note: Code mode is built in — nothing extra to install." ;;
         *) echo "unknown option: $arg" >&2; exit 2 ;;
     esac
 done
@@ -58,18 +60,6 @@ python3 -c "import flask" 2>/dev/null || {
     echo "error: Flask did not install — check the pip output above." >&2
     exit 1
 }
-
-if [ "$WITH_CODE" = 1 ]; then
-    say "Installing Code mode dependencies (node + opencode)"
-    if [ "$IN_TERMUX" = 1 ]; then
-        pkg install -y nodejs-lts
-    fi
-    if command -v npm >/dev/null 2>&1; then
-        npm install -g opencode-ai
-    else
-        echo "note: npm not found — install Node.js, then: npm install -g opencode-ai" >&2
-    fi
-fi
 
 say "Done. Next steps"
 cat <<'EOF'

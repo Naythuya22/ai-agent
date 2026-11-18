@@ -82,12 +82,11 @@ use. Keys are stored only in Termux's private storage (app data) —
 never in the project folder. Backup zips can contain your keys, so
 never give a backup file to anyone.
 
-## 5. Code mode (optional)
+## 5. Code mode
 
-```
-pkg install nodejs-lts
-npm install -g opencode-ai
-```
+Code mode is built into the app — there is nothing extra to install.
+It uses the same provider key you added in §4. Open the **Code** tab in
+the Web UI, pick a project folder, and give it a task.
 
 ## 6. Back up (important)
 

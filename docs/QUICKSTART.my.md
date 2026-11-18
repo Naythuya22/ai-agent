@@ -72,12 +72,12 @@ Key တွေကို Termux ရဲ့ private နေရာ (app data) ထဲ�
 project folder ထဲမှာ မရှိပါဘူး။ Backup zip ထဲမှာ key တွေ ပါတာမို့
 အဲဒီ ဖိုင်ကို ဘယ်သူ့ကိုမှ မပေးပါနဲ့။
 
-## ၅။ Code mode (သုံးချင်မှ)
+## ၅။ Code mode
 
-```
-pkg install nodejs-lts
-npm install -g opencode-ai
-```
+Code mode က app ထဲမှာ တပါတည်း ပါပြီးသား ဖြစ်ပါတယ် — သီးသန့်
+ထည့်စရာ ဘာမှ မလိုပါဘူး။ §၄ မှာ ထည့်ထားတဲ့ provider key ကိုပဲ
+သုံးပါတယ်။ Web UI ရဲ့ **Code** tab ကနေ project folder ရွေးပြီး
+ခိုင်းလို့ ရပါတယ်။
 
 ## ၆။ Backup လုပ်ရန် (အရေးကြီးပါတယ်)
 

@@ -26,11 +26,13 @@ offline-first setup that upgrades to the cloud once you add keys.
   `[BUDGET: ctx …% iter …/…]` line in the system prompt.
 - Agent / Code modes with native tool calling (file, shell, search,
   Android intents); memory (facts + profile); Burmese sanitizer + validator;
-  PWA (installable, dark / light); opencode integration for Code mode.
+  PWA (installable, dark / light); Code mode runs on the app's own agent
+  engine (built in — no external CLI to install).
 
-Code mode runs opencode with `--format json`, resuming each project folder's
-conversation (`--session`); `GET /api/code/doctor` reports the binary, version,
-model and config path if anything looks wrong.
+Code mode's runner child emits an opencode-dialect JSON event stream and
+resumes each project folder's conversation from its own transcript;
+`GET /api/code/doctor` reports the engine, version, model and config path
+if anything looks wrong.
 
 ## Providers
 
@@ -69,23 +71,14 @@ retried once at the corrected size before the turn may fail.
     pip install -r requirements.txt
     python settings.py     # optional: local engine KV-cache size
 
-# Or let the installer run the setup steps for you (Termux or desktop;
-# add --with-code for the Code-mode dependencies):  sh install.sh
+# Or let the installer run the setup steps for you (Termux or desktop):
+#   sh install.sh
 
 # Local model: copy a *.litertlm into models/ — auto-discovered (legacy
 # Download/gemmamodel dirs and nearby *model* folders are searched too).
 
-# Code mode needs opencode (Termux):
-pkg install nodejs-lts
-npm install -g opencode-ai
-opencode --version
-
-# Code mode looks for that binary inside the Ubuntu proot — if it says it is
-# missing: proot-distro login ubuntu && apt install nodejs npm -y && npm
-# install -g --allow-scripts=opencode-ai opencode-ai
-
-# Optional: browser terminal from the Code page (Code ▸ Terminal).
-pkg install ttyd
+# Code mode is built in — it uses the same provider keys as Agent mode
+# and needs no extra packages.
 
 ## Run
 
@@ -135,7 +128,7 @@ in `core/auth.py`, `core/log.py` and `routes/safety.py`.
 
     /help              Show help
     /agent             Switch mode
-    /code [dir]        Launch opencode in a project dir
+    /code [dir]        Open Code mode in a project dir
     /clear             Clear history
     /mode  /ctx        Mode + context / context usage detail
     /new  /sessions    Fresh conversation (archive) / list sessions
