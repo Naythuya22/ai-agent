@@ -303,6 +303,92 @@ def _run_cwd() -> str:
     return _cwd()
 
 
+# ─── Protected roots: the shell never-zone (owner decision 2026-11-19) ──
+#
+# The jail gate above sleeps when the owner turns the file jail off
+# (his personal phone runs that way), which would leave the agent's
+# own secret store — API keys, the server token, stored config —
+# readable by any allowlisted read command. These roots stay refused
+# in BOTH jail states: a path token that resolves inside one is
+# blocked, and a traversal command (find/du/tree, ls -R, grep -r)
+# whose start path CONTAINS one is blocked, because it would descend
+# into it. Listing a parent directory (names only) stays allowed.
+# The owner himself is never gated — this constrains the agent's
+# shell tool only; his own Termux is untouched.
+
+def _protected_roots() -> list:
+    home = Path.home()
+    return [
+        str(home / ".ai-agent"),
+        str(home / ".ssh"),
+        str(home / ".gnupg"),
+        str(home / ".config" / "gh"),
+        str(home / ".netrc"),
+    ]
+
+
+_TRAVERSAL_BASE = {"find", "du", "tree"}
+
+
+def _is_traversal(toks: list) -> bool:
+    """True when the segment walks a directory tree rather than
+    naming the files it touches (find/du/tree always; ls -R and
+    grep -r by flag)."""
+    if not toks:
+        return False
+    base = os.path.basename(toks[0])
+    if base in _TRAVERSAL_BASE:
+        return True
+    if base in ("ls", "grep"):
+        for t in toks[1:]:
+            if t == "--recursive":
+                return True
+            if t.startswith("-") and not t.startswith("--") \
+                    and ("r" in t[1:] or "R" in t[1:]):
+                return True
+    return False
+
+
+def _protected_gate_error(segments: list) -> str:
+    """BLOCKED error for the first protected path token, else "".
+
+    Runs in both jail states (unlike _jail_gate_error). Relative
+    tokens resolve against the directory commands execute in.
+    """
+    from tools._fs_guard import is_safe_path
+    roots = [r for r in _protected_roots() if r]
+    if not roots:
+        return ""
+    base = _run_cwd()
+    for toks in segments:
+        traversal = _is_traversal(toks)
+        for tok in toks:
+            cand = _path_candidate(tok)
+            if not cand:
+                continue
+            exp = os.path.expanduser(os.path.expandvars(cand))
+            if exp.startswith("$"):
+                low = cand.lower()
+                if any(n in low for n in
+                       (".ai-agent", ".ssh", ".gnupg", ".netrc")):
+                    return ("Error: BLOCKED: protected path: "
+                            f"{cand} (the owner's private store is "
+                            "off-limits to the shell)")
+                continue
+            p = Path(exp)
+            target = str(p if p.is_absolute() else Path(base) / p)
+            for r in roots:
+                if is_safe_path(target, r):
+                    return ("Error: BLOCKED: protected path: "
+                            f"{cand} (the owner's private store is "
+                            "off-limits to the shell)")
+                if traversal and is_safe_path(r, target):
+                    return ("Error: BLOCKED: protected path under: "
+                            f"{cand} (a search starting there would "
+                            "descend into the owner's private store)")
+    return ""
+
+
 def _child_env() -> dict:
     """Secret မပါတဲ့ minimal env — `env` command က ဒါပဲ မြင်ရမယ်။"""
     return {
@@ -433,7 +519,8 @@ def run_command(cmd: str, timeout: float = TIMEOUT_SEC) -> str:
 
     ပိတ်: python (version probe ကလွဲ), node, awk, sed, rm, mv, chmod,
           sudo, curl, wget, ; && || newline, redirect, substitution,
-          jail root အပြင်က absolute path (ဥပမာ /etc/...)
+          jail root အပြင်က absolute path (ဥပမာ /etc/...),
+          protected path (~/.ai-agent, ~/.ssh စသည် — jail off လည်း ပိတ်)
 
     Python script run ချင်ရင် tools.python_runner.run_python သုံးပါ။
 
@@ -468,6 +555,13 @@ def run_command(cmd: str, timeout: float = TIMEOUT_SEC) -> str:
     gate = _jail_gate_error(segs)
     if gate:
         return gate
+
+    # Protected roots (2026-11-19): the never-zone gate runs in BOTH
+    # jail states, so the secret store stays refused even on installs
+    # where the owner runs with the file jail off.
+    prot = _protected_gate_error(segs)
+    if prot:
+        return prot
 
     result = _execute(segs, timeout)
     if isinstance(result, str):

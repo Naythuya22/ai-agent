@@ -210,5 +210,64 @@ class ShellJailCase(unittest.TestCase):
         self.assertNotIn("BLOCKED", out)
 
 
+class ShellProtectedCase(unittest.TestCase):
+    """Protected roots stay refused with the file jail OFF — the
+    owner's phone state (2026-11-19 never-zone gate). _protected_roots
+    is patched at a throwaway store; the real one names ~/.ai-agent
+    and friends."""
+
+    def setUp(self):
+        import shutil
+        self.base = Path(tempfile.mkdtemp(prefix="shell-prot-"))
+        self.addCleanup(shutil.rmtree, self.base, True)
+        self.secrets = self.base / "secrets"
+        self.secrets.mkdir()
+        (self.secrets / "key.txt").write_text(SECRET, encoding="utf-8")
+        self.open_dir = self.base / "open"
+        self.open_dir.mkdir()
+        (self.open_dir / "note.txt").write_text("open note",
+                                               encoding="utf-8")
+        self._saved_roots = shell._protected_roots
+        shell._protected_roots = lambda: [str(self.secrets)]
+        self.addCleanup(setattr, shell, "_protected_roots",
+                        self._saved_roots)
+        self._saved_jail = config.FILE_JAIL_ENABLED
+        config.FILE_JAIL_ENABLED = False
+        self.addCleanup(setattr, config, "FILE_JAIL_ENABLED",
+                        self._saved_jail)
+
+    def test_cat_protected_file_is_blocked(self):
+        out = shell.run_command(f"cat {self.secrets}/key.txt")
+        self.assertIn("BLOCKED", out)
+        self.assertNotIn(SECRET, out)
+
+    def test_du_protected_dir_is_blocked(self):
+        out = shell.run_command(f"du -sh {self.secrets}")
+        self.assertIn("BLOCKED", out)
+
+    def test_find_from_parent_is_blocked(self):
+        out = shell.run_command(f"find {self.base} -name key.txt")
+        self.assertIn("BLOCKED", out)
+        self.assertNotIn(SECRET, out)
+
+    def test_grep_recursive_from_parent_is_blocked(self):
+        out = shell.run_command(f"grep -r TOPSECRET {self.base}")
+        self.assertIn("BLOCKED", out)
+        self.assertNotIn(SECRET, out)
+
+    def test_ls_parent_names_only_is_allowed(self):
+        out = shell.run_command(f"ls {self.base}")
+        self.assertNotIn("BLOCKED", out)
+        self.assertIn("secrets", out)
+
+    def test_du_open_dir_works(self):
+        out = shell.run_command(f"du -sh {self.open_dir}")
+        self.assertNotIn("BLOCKED", out)
+
+    def test_cat_open_file_works(self):
+        out = shell.run_command(f"cat {self.open_dir}/note.txt")
+        self.assertEqual(out, "open note")
+
+
 if __name__ == "__main__":
     unittest.main()
