@@ -200,7 +200,16 @@ AGENT_SYSTEM = """__PERSONA__
 
 ## Task Handling
 - Simple task: Just do it.
-- Complex task: Break down and confirm plan first."""
+- Complex task: Break down and confirm plan first.
+
+## Memory (Phase 2)
+- After finishing a multi-step task, propose 0-3 durable facts
+  with propose_memory — only facts that will still matter next
+  week, each with a verbatim evidence quote from a tool result
+  or the user's own words. Never cite your own reply as evidence.
+- Your own conclusions must be proposed as source_kind
+  "inference"; they stay unverified until real evidence confirms
+  them. Do not present a quarantined memory as fact."""
 
 
 # ── verbatim tool-error surfacing ─────────────────────────────────────────
@@ -598,6 +607,15 @@ class AgentMode:
         router falls back to the balanced default.
         """
         self._turn_user_text = user_text or ""
+        # Phase 2 memory gate — the owner's own words are evidence.
+        # Recorded here because every turn path (handle(), both SSE
+        # routes) funnels through begin_turn with the text.
+        if user_text and user_text.strip():
+            try:
+                from core import memorygate as _memorygate
+                _memorygate.record_evidence("owner", user_text)
+            except Exception:
+                pass
         self._turn_prompt = None
         self._turn_iter = 0
         self._turn_tools = []
@@ -657,6 +675,16 @@ class AgentMode:
                 _skills_block = ""
             if _skills_block:
                 prompt = prompt + "\n\n" + _skills_block
+            # Phase 2 memory gate — the verified long-term memory
+            # block rides along the same way. Best-effort: a memory
+            # error must never break a turn.
+            try:
+                from core import memorygate as _memorygate
+                _memory_block = _memorygate.agent_memory_block()
+            except Exception:
+                _memory_block = ""
+            if _memory_block:
+                prompt = prompt + "\n\n" + _memory_block
             self._turn_prompt = (prompt, tier)
             record_tier(tier, source)
             record_effort(effort, effort_source)
@@ -954,7 +982,17 @@ class AgentMode:
                             tool_name, ", ".join(markers))
                 text = (safety.INJECTION_BANNER_OPEN + "\n"
                         + text + "\n" + safety.INJECTION_BANNER_CLOSE)
-        return self._redact_known_keys(safety.redact_secrets(text))
+        guarded = self._redact_known_keys(safety.redact_secrets(text))
+        # Phase 2 memory gate — every tool result is potential
+        # evidence, recorded AFTER redaction so no secret can enter
+        # the evidence log, and identical to the text the agent
+        # itself sees (so its quotes can match).
+        try:
+            from core import memorygate as _memorygate
+            _memorygate.record_evidence("tool", guarded)
+        except Exception:
+            pass
+        return guarded
 
     def _redact_known_keys(self, text: str) -> str:
         """Mask every registered provider key still present in ``text``.

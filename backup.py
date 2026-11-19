@@ -118,6 +118,9 @@ def do_export(out_path: Path | None = None, *, include_secrets: bool = True,
         "self_learned_skills": any(
             "skills/" in e["entry"] or "skills-inbox/" in e["entry"]
             for e in entries),
+        "self_learned_memory": any(
+            "memory/" in e["entry"] or "memory-evidence" in e["entry"]
+            for e in entries),
         "files": entries,
     }
     tmp = out_path.with_suffix(out_path.suffix + ".tmp")

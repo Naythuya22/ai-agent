@@ -25,6 +25,11 @@ from tools.skills_agent import (
     skill_outcome,
     use_skill,
 )
+from tools.memory_agent import (
+    ALL_TOOLS as MEMORY_TOOLS,
+    list_memory,
+    propose_memory,
+)
 
 ALL_TOOLS = (
     list(FILE_TOOLS)
@@ -36,6 +41,7 @@ ALL_TOOLS = (
     + [self_audit, capability_list]
     + list(VIDEO_TOOLS)
     + list(SKILL_TOOLS)
+    + list(MEMORY_TOOLS)
 )
 
 __all__ = [

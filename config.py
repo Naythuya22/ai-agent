@@ -373,6 +373,7 @@ FILE_JAIL_ENABLED = _env_bool("AI_AGENT_FILE_JAIL", True)
 # This flag is the kill switch for the proposal path only — the owner
 # CLI and already-live skills are unaffected.
 SKILL_PROPOSALS_ENABLED = _env_bool("AI_AGENT_SKILL_PROPOSALS", True)
+MEMORY_PROPOSALS_ENABLED = _env_bool("AI_AGENT_MEMORY_PROPOSALS", True)
 
 # ── auto-compaction (Release 18) ─────────────────────────────
 # When an agent transcript grows past the history cap, the entries the
