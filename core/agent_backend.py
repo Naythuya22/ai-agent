@@ -2213,6 +2213,7 @@ class AgentBackend:
     # (hours, or forever) fall outside the cap by construction.
 
     _WAITABLE_REASONS = ("cooling", "rate_limited")
+    _SERVER_BUSY_WAIT = 20.0    # F14b: fixed wait for a route 503
 
     def _route_wait(self, exc=None) -> float | None:
         """Seconds until the soonest route provider may serve again.
@@ -2250,7 +2251,25 @@ class AgentBackend:
                     and o.get("reason") in self._WAITABLE_REASONS
                     and o.get("wait")):
                 waits.append(float(o["wait"]))
-        return min(waits) if waits else None
+        if waits:
+            return min(waits)
+        # F14b (v1, 2026-11-19): a route 503 (UNAVAILABLE — the
+        # provider's own "high demand, try again later") is transient
+        # but carries no retry_after and parks no key, so neither
+        # source above can see it. Device evidence: a gemini 503 on
+        # 2026-11-19 recovered in ~9 s, yet the turn stopped and the
+        # user had to resume by hand. One fixed short wait, still
+        # bounded by the caller's budget and the per-wait cap.
+        for f in failures:
+            if f.get("provider") not in route:
+                continue
+            try:
+                status = int(f.get("status") or 0)
+            except (TypeError, ValueError):
+                status = 0
+            if f.get("reason") == "server_error" and status == 503:
+                return self._SERVER_BUSY_WAIT
+        return None
 
     def _sleep_interruptible(self, seconds: float,
                              should_stop=None) -> float:
@@ -2392,6 +2411,8 @@ class AgentBackend:
         tools = _tool_schemas(tools)
         last: CloudError | None = None
         tried = []
+        failures = []   # F14b: per-provider records, mirroring step()
+        self._last_stream_failures = []
 
         pin = self.locked_pin()
         providers = self.route_providers()
@@ -2485,6 +2506,7 @@ class AgentBackend:
             wire = _apply_reasoning_policy(
                 trimmed_msgs, provider, _is_thinking_model(provider, model))
             seen_ids = set()                        # mirrors step() L1474
+            prov_last: CloudError | None = None     # F14b: mirrors step()
             while True:                             # mirrors step() L1475
                 entry = self.keys.next_key(provider)
                 if entry is None:
@@ -2567,6 +2589,7 @@ class AgentBackend:
                                 e = retry_err
                     # mirrors step() L1540 — keep in sync on any change
                     last = e
+                    prov_last = e
                     self._handle_error(provider, entry, e, model)
                     if e.kind in ("network",):
                         # mirrors step() L1542, minus the raise: no other
@@ -2578,7 +2601,18 @@ class AgentBackend:
                             raise self._locked_exhausted(
                                 pin, "network",
                                 _sanitize(e.message or "", 200))
+                        self._last_stream_failures = failures + [{
+                            "provider": provider, "reason": "network",
+                            "status": e.status, "kind": e.kind,
+                            "retry_after": e.retry_after}]
                         return
+            if prov_last is not None:
+                failures.append({
+                    "provider": provider,
+                    "reason": failure_reason(prov_last),
+                    "status": prov_last.status,
+                    "kind": prov_last.kind,
+                    "retry_after": prov_last.retry_after})
         # mirrors step() L1546 — every provider ran out of attempts
         detail = ""
         if last is not None:
@@ -2595,6 +2629,7 @@ class AgentBackend:
                 else "")
         # mirrors step() L1551's BackendExhausted message — logged, never
         # raised: an empty stream is what tells the caller to go local.
+        self._last_stream_failures = failures
         return
 
     def step_stream(self, *, system: str, messages: list, tools: list,
@@ -2664,9 +2699,15 @@ class AgentBackend:
                 return
             if yielded_any:
                 return          # in-band error frame already delivered
-            # Nothing yielded: the route exhausted pre-first-byte.
+            # Nothing yielded: the route exhausted pre-first-byte. The
+            # silent walk stashed its failure records (F14b) — hand them
+            # to the wait policy on a shim so a 503 is seen exactly as
+            # step() sees it, not only key-state waits.
             remaining = budget - waited
-            wait = self._route_wait(None) if remaining > 0 else None
+            shim = BackendExhausted("providers exhausted")
+            shim.failures = getattr(self, "_last_stream_failures",
+                                    None) or []
+            wait = self._route_wait(shim) if remaining > 0 else None
             if wait is None or wait + 1 > min(cap, remaining):
                 return
             log.warning(

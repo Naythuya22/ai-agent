@@ -41,8 +41,14 @@ class _FakeBackend(AgentBackend):
 
     def _stream_once(self, **kw):
         self.stream_calls += 1
-        frames = self._stream_script.pop(0)
-        yield from frames
+        item = self._stream_script.pop(0)
+        if isinstance(item, Exception):
+            # Mirror the real walk's silent exhaustion (F14b): nothing
+            # is yielded and the failure records are stashed.
+            self._last_stream_failures = getattr(item, "failures",
+                                                 []) or []
+            return
+        yield from item
 
     def failure_overview(self):
         return list(self._overview)
@@ -66,6 +72,8 @@ class _SleepRecorder:
 COOLING = [{"provider": "gemini", "reason": "cooling", "wait": 30}]
 RL_FAIL = [{"provider": "gemini", "reason": "rate_limited",
             "status": 429, "kind": "rate_limit", "retry_after": 30}]
+SERVER_503 = [{"provider": "gemini", "reason": "server_error",
+               "status": 503, "kind": "server", "retry_after": None}]
 
 
 class TestStepWait(unittest.TestCase):
@@ -168,6 +176,39 @@ class TestStepWait(unittest.TestCase):
         self.assertEqual(cm.exception.failures, failures)
         self.assertEqual(self.sleep.total, 0)
 
+    def test_waits_out_503_then_succeeds(self):
+        # F14b: a 503 carries no retry_after and parks no key — the
+        # fixed server-busy wait (20s + the wrapper's 1s) applies.
+        be = _FakeBackend([_exc(SERVER_503), Step(text="ok")], overview=[])
+        step = be.step(system="", messages=[], tools=[], wait_budget=150)
+        self.assertEqual(step.text, "ok")
+        self.assertEqual(be.once_calls, 2)
+        self.assertAlmostEqual(step.waited_s, 21.0)
+        self.assertAlmostEqual(self.sleep.total, 21.0)
+
+    def test_503_wait_over_budget_fails_fast(self):
+        be = _FakeBackend([_exc(SERVER_503)], overview=[])
+        with self.assertRaises(BackendExhausted):
+            be.step(system="", messages=[], tools=[], wait_budget=10)
+        self.assertEqual(self.sleep.total, 0)
+        self.assertEqual(be.once_calls, 1)
+
+    def test_500_never_waits(self):
+        failures = [{"provider": "gemini", "reason": "server_error",
+                     "status": 500, "kind": "server", "retry_after": None}]
+        be = _FakeBackend([_exc(failures)], overview=[])
+        with self.assertRaises(BackendExhausted):
+            be.step(system="", messages=[], tools=[], wait_budget=150)
+        self.assertEqual(self.sleep.total, 0)
+
+    def test_503_off_route_never_waits(self):
+        failures = [{"provider": "openai", "reason": "server_error",
+                     "status": 503, "kind": "server", "retry_after": None}]
+        be = _FakeBackend([_exc(failures)], overview=[])
+        with self.assertRaises(BackendExhausted):
+            be.step(system="", messages=[], tools=[], wait_budget=150)
+        self.assertEqual(self.sleep.total, 0)
+
 
 class TestStreamWait(unittest.TestCase):
     def setUp(self):
@@ -216,6 +257,30 @@ class TestStreamWait(unittest.TestCase):
         frames = list(be.step_stream(system="", messages=[], tools=[]))
         self.assertEqual(frames, [])
         self.assertEqual(self.sleep.total, 0)
+
+    def test_stream_waits_out_503_then_yields_done(self):
+        # F14b: the silent walk stashes its failure records, so the
+        # wrapper sees the 503 exactly as step() does.
+        be = _FakeBackend([], overview=[], stream_script=[
+            _exc(SERVER_503),   # first walk: exhausted on a 503, silent
+            [("done", {"provider": "gemini"})],
+        ])
+        frames = list(be.step_stream(system="", messages=[], tools=[],
+                                     wait_budget=150))
+        self.assertEqual(frames[0][0], "done")
+        self.assertAlmostEqual(frames[0][1]["waited_s"], 21.0)
+        self.assertEqual(be.stream_calls, 2)
+        self.assertAlmostEqual(self.sleep.total, 21.0)
+
+    def test_stream_503_over_budget_returns_empty(self):
+        be = _FakeBackend([], overview=[], stream_script=[
+            _exc(SERVER_503),
+        ])
+        frames = list(be.step_stream(system="", messages=[], tools=[],
+                                     wait_budget=10))
+        self.assertEqual(frames, [])
+        self.assertEqual(self.sleep.total, 0)
+        self.assertEqual(be.stream_calls, 1)
 
 
 if __name__ == "__main__":
