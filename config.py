@@ -366,6 +366,14 @@ AGENT_INJECTION_GUARD = _env_bool("AI_AGENT_INJECTION", True)
 # Revert with AI_AGENT_FILE_JAIL=0 (power users / recovery only).
 FILE_JAIL_ENABLED = _env_bool("AI_AGENT_FILE_JAIL", True)
 
+# ── agent skill proposals (Phase 1 skill gate) ───────────────────
+# The agent may draft new skills into ~/.ai-agent/skills-inbox/ via the
+# propose_skill tool; nothing reaches the live skills/ dir until the
+# owner applies it by hand (python3 -m core.skillgate approve <name>).
+# This flag is the kill switch for the proposal path only — the owner
+# CLI and already-live skills are unaffected.
+SKILL_PROPOSALS_ENABLED = _env_bool("AI_AGENT_SKILL_PROPOSALS", True)
+
 # ── auto-compaction (Release 18) ─────────────────────────────
 # When an agent transcript grows past the history cap, the entries the
 # trim would have dropped are summarized into one rolling summary pair

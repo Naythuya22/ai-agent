@@ -607,6 +607,17 @@ class AgentMode:
             hint = self._budget_hint()
             if hint:
                 prompt = prompt + "\n\n" + hint
+            # Phase 1 skill gate — the learned-skills index rides along
+            # with the prompt for the same reason as the budget hint:
+            # one consistent list for the whole turn. Best-effort by
+            # design — a skills error must never break a turn.
+            try:
+                from core import skillgate as _skillgate
+                _skills_block = _skillgate.agent_index_block()
+            except Exception:
+                _skills_block = ""
+            if _skills_block:
+                prompt = prompt + "\n\n" + _skills_block
             self._turn_prompt = (prompt, tier)
             record_tier(tier, source)
             record_effort(effort, effort_source)

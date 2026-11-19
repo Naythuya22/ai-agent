@@ -17,6 +17,13 @@ whatever is currently in place before it overwrites anything.
 treated like the keys themselves. Model weights (``*.litertlm``) are never
 included — they are large and re-downloadable; the manifest notes the
 configured model path instead.
+
+Self-learned skills (``skills/`` and ``skills-inbox/`` under
+``~/.ai-agent``) are one device's own learning. They ride along in the
+backup so the owner does not lose them, and the manifest flags their
+presence (``self_learned_skills``): a backup meant for a *different*
+install — a test phone, the buyer kit — should be restored without
+them, so one agent's learned behaviour never leaks into another.
 """
 from __future__ import annotations
 
@@ -108,6 +115,9 @@ def do_export(out_path: Path | None = None, *, include_secrets: bool = True,
         "created_at": datetime.now().isoformat(timespec="seconds"),
         "includes_secrets": include_secrets and any(
             Path(e["entry"]).name in SECRET_NAMES for e in entries),
+        "self_learned_skills": any(
+            "skills/" in e["entry"] or "skills-inbox/" in e["entry"]
+            for e in entries),
         "files": entries,
     }
     tmp = out_path.with_suffix(out_path.suffix + ".tmp")
