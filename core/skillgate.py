@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from datetime import datetime
 from pathlib import Path
 
@@ -161,6 +162,47 @@ def propose(name: str, description: str, body: str, source: str = "experience",
     return {"name": safe, "gate": report}
 
 
+# ── capability availability (advisory) ───────────────────────────
+# A skill whose procedure leans on a capability this install has
+# turned off will fail mid-task — the 2026-11-19 lesson, where the
+# first learned skill drove shell commands on an install whose
+# shell was disabled. The gate WARNS (never blocks: the owner may
+# enable the capability before the skill is used). To cover a new
+# gated capability, add ONE row to _CAPABILITY_ROWS — (tool name as
+# it appears in a skill body, label, availability probe). Probes
+# fail OPEN (treated as available) when the state cannot be read:
+# advice must never cry wolf on a guess.
+
+def _shell_enabled() -> bool:
+    try:
+        from core.key_manager import KeyManager
+        return bool(KeyManager().shell_enabled())
+    except Exception:
+        return True
+
+
+_CAPABILITY_ROWS = (
+    ("run_command", "shell commands", _shell_enabled),
+)
+
+
+def _capability_warnings(body: str) -> list:
+    out = []
+    for tool, label, probe in _CAPABILITY_ROWS:
+        if not re.search(r"\b" + re.escape(tool) + r"\b", body or ""):
+            continue
+        try:
+            available = bool(probe())
+        except Exception:
+            available = True
+        if not available:
+            out.append(
+                f"capability: body uses {tool} but {label} are "
+                "currently disabled on this install — the skill "
+                "will fail at that step until they are enabled")
+    return out
+
+
 # ── gate ─────────────────────────────────────────────────────────
 
 def check(name: str) -> dict:
@@ -201,6 +243,8 @@ def check(name: str) -> dict:
     markers = scan_injection(description + "\n" + body)
     if markers:
         warnings.append("injection markers: " + ", ".join(markers))
+
+    warnings.extend(_capability_warnings(body))
 
     update = _skills.load_skill(safe) is not None
 

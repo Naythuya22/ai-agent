@@ -397,7 +397,42 @@ class KeyManager:
         cfg = _merge(DEFAULT_CONFIG, raw if isinstance(raw, dict) else {})
         self._cfg = cfg
         self._ensure_mode()
+        if self._backfill_key_ids(cfg):
+            # Persist once so the repair survives the process; save()
+            # re-enters load(), which returns the cache set above.
+            try:
+                self.save()
+            except Exception as e:
+                log.warning("key id backfill persist failed: %s: %s",
+                            type(e).__name__, e)
         return cfg
+
+    def _backfill_key_ids(self, cfg: dict) -> bool:
+        """Give every stored key entry a stable id (F15).
+
+        Legacy entries written before ids existed carry id=None.
+        The Settings UI builds its DELETE URL from the id, so those
+        entries could never be removed: it sent the literal string
+        "null", remove_key matched nothing, and the route 404'd.
+        Fill ONLY missing or blank ids — an existing id is never
+        rewritten — so the repair is idempotent and safe to run on
+        every load. Returns True when anything changed.
+        """
+        changed = False
+        keys = cfg.get("keys")
+        if not isinstance(keys, dict):
+            return False
+        for bucket in keys.values():
+            if not isinstance(bucket, list):
+                continue
+            for entry in bucket:
+                if not isinstance(entry, dict):
+                    continue
+                cur = entry.get("id")
+                if not (isinstance(cur, str) and cur.strip()):
+                    entry["id"] = "k_" + secrets.token_hex(4)
+                    changed = True
+        return changed
 
     def invalidate(self) -> None:
         """Drop the cached config so the next read comes from disk.

@@ -237,3 +237,49 @@ class BackupManifestCase(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CapabilityWarningCase(SkillGateCase):
+    """The du lesson (2026-11-19): a skill that leans on a disabled
+    capability must draw a gate WARNING — advisory only, never a
+    hard failure, and silent when the capability is available or
+    unused."""
+
+    SHELL_BODY = (
+        "List the folder with run_command, sort the result, and "
+        "report it.\n\nInput:\n\n{{args}}\n"
+    )
+
+    def _rows(self, available):
+        saved = skillgate._CAPABILITY_ROWS
+        skillgate._CAPABILITY_ROWS = (
+            ("run_command", "shell commands", lambda: available),)
+        self.addCleanup(setattr, skillgate, "_CAPABILITY_ROWS", saved)
+
+    def _capability_warnings(self, out):
+        return [w for w in out["gate"]["warnings"]
+                if w.startswith("capability:")]
+
+    def test_warns_when_capability_disabled(self):
+        self._rows(False)
+        out = skillgate.propose("shell-list", "List via shell",
+                                self.SHELL_BODY, source="experience",
+                                evidence="ran it once")
+        self.assertTrue(out["gate"]["ok"], out["gate"])
+        warns = self._capability_warnings(out)
+        self.assertEqual(len(warns), 1)
+        self.assertIn("run_command", warns[0])
+
+    def test_no_warning_when_available(self):
+        self._rows(True)
+        out = skillgate.propose("shell-list", "List via shell",
+                                self.SHELL_BODY, source="experience",
+                                evidence="ran it once")
+        self.assertEqual(self._capability_warnings(out), [])
+
+    def test_no_warning_without_the_tool(self):
+        self._rows(False)
+        out = skillgate.propose("plain-sort", "Sort things",
+                                GOOD_BODY, source="experience",
+                                evidence="sorted by hand")
+        self.assertEqual(self._capability_warnings(out), [])
