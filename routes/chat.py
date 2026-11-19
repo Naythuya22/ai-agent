@@ -745,6 +745,14 @@ def api_agent_stream_v2():
                                 "args": payload.get("args", {}),
                                 "result": payload.get("result", ""),
                             })
+                        elif kind == "tool_error":
+                            # Verbatim tool-error surfacing: the client
+                            # renders the tool's exact error text as its
+                            # own block, whatever the model goes on to say.
+                            yield _frame("tool_error", {
+                                "name": payload.get("name", ""),
+                                "text": payload.get("text", ""),
+                            })
                         elif kind == "tool_start":
                             # F16: a tool is about to run — the client
                             # updates its activity/mascot before it starts.

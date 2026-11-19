@@ -188,6 +188,10 @@ AGENT_SYSTEM = """__PERSONA__
 - If a tool call returns "Error:" or a failure message, you MUST NOT
   describe what its result "would have been". A failed read is a
   failed read — do not fill the gap from memory or training.
+- When you report a tool failure, quote the error message EXACTLY
+  as the tool printed it — never paraphrase, shorten, translate or
+  reword an error or BLOCKED message. Your own explanation may
+  follow, after the exact quote.
 - Allowed responses to a failed tool:
     * say the file/content is unavailable,
     * ask the user for a correct path or target,
@@ -197,6 +201,41 @@ AGENT_SYSTEM = """__PERSONA__
 ## Task Handling
 - Simple task: Just do it.
 - Complex task: Break down and confirm plan first."""
+
+
+# ── verbatim tool-error surfacing ─────────────────────────────────────────
+#
+# The owner reads the model's prose, and the model paraphrases tool
+# results — on 2026-11-19 it twice displayed a gate message that
+# exists in no version of the code, leaving the owner unable to tell
+# what the tool actually said. So an error result is ALSO surfaced
+# verbatim by the harness: the v2 stream emits a tool_error frame
+# carrying the tool's exact text, and the client renders it as its
+# own block. Records over reports, enforced by code, not by the
+# model's discipline.
+_TOOL_ERROR_CAP = 2000
+
+
+def _tool_error_text(result):
+    """The verbatim text to surface for an error tool result, else None.
+
+    A result qualifies when its first non-blank line starts with
+    "Error:" or "BLOCKED" — the shape every tool in this codebase
+    uses for failures (the shell gates included). Capped so a huge
+    error dump cannot flood the chat; the cap is marked, never
+    silently cut.
+    """
+    if not isinstance(result, str):
+        return None
+    text = result.strip()
+    if not text:
+        return None
+    first = text.split("\n", 1)[0].strip()
+    if not (first.startswith("Error:") or first.startswith("BLOCKED")):
+        return None
+    if len(text) > _TOOL_ERROR_CAP:
+        text = text[:_TOOL_ERROR_CAP] + "\n…(truncated)"
+    return text
 
 
 # ── answer verification (cloud only) ───────────────────────────────────────
@@ -2779,6 +2818,9 @@ class AgentMode:
                     self._save_checkpoint()   # Release 19: before the yield
                     yield ("tool", {"name": name, "args": args,
                                     "result": r["result"]})
+                    _err = _tool_error_text(r["result"])
+                    if _err is not None:
+                        yield ("tool_error", {"name": name, "text": _err})
             else:
                 for tc in info["tool_calls"]:
                     # mirrors _handle_cloud at L708 — keep in sync on any change
@@ -2826,6 +2868,9 @@ class AgentMode:
                     self._save_checkpoint()   # Release 19: before the yield
                     yield ("tool", {"name": name, "args": args,
                                     "result": result})
+                    _err = _tool_error_text(result)
+                    if _err is not None:
+                        yield ("tool_error", {"name": name, "text": _err})
             # mirrors _handle_cloud at L736 — step = _step() for the next round
             info, round_text = (yield from _pump_round()) or (None, "")
         if not ended:
