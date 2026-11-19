@@ -19,17 +19,6 @@ from tools.memory import (
 )
 from tools.audit import self_audit, capability_list
 from tools.video import ALL_TOOLS as VIDEO_TOOLS
-from tools.skills_agent import (
-    ALL_TOOLS as SKILL_TOOLS,
-    propose_skill,
-    skill_outcome,
-    use_skill,
-)
-from tools.memory_agent import (
-    ALL_TOOLS as MEMORY_TOOLS,
-    list_memory,
-    propose_memory,
-)
 
 ALL_TOOLS = (
     list(FILE_TOOLS)
@@ -40,8 +29,6 @@ ALL_TOOLS = (
     + [memory_read, memory_write, memory_search, memory_forget]
     + [self_audit, capability_list]
     + list(VIDEO_TOOLS)
-    + list(SKILL_TOOLS)
-    + list(MEMORY_TOOLS)
 )
 
 __all__ = [
@@ -49,5 +36,4 @@ __all__ = [
     "smart_search",
     "memory_read", "memory_write", "memory_search", "memory_forget",
     "self_audit", "capability_list",
-    "propose_skill", "use_skill", "skill_outcome",
 ]

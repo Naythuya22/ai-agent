@@ -99,14 +99,6 @@ def api_skills_run(name):
     except Exception as e:
         return jsonify({"error": f"{type(e).__name__}: {e}"}), 500
 
-    # Phase 1 skill gate — an owner-run skill counts as a use, so the
-    # outcome loop and `skillgate status` see real traffic. Best-effort.
-    try:
-        from core import skillgate as _skillgate
-        _skillgate.record_load(sk["name"])
-    except Exception:
-        pass
-
     return jsonify({
         "skill": sk["name"],
         "mode": mode,

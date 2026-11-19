@@ -188,10 +188,6 @@ AGENT_SYSTEM = """__PERSONA__
 - If a tool call returns "Error:" or a failure message, you MUST NOT
   describe what its result "would have been". A failed read is a
   failed read — do not fill the gap from memory or training.
-- When you report a tool failure, quote the error message EXACTLY
-  as the tool printed it — never paraphrase, shorten, translate or
-  reword an error or BLOCKED message. Your own explanation may
-  follow, after the exact quote.
 - Allowed responses to a failed tool:
     * say the file/content is unavailable,
     * ask the user for a correct path or target,
@@ -200,51 +196,7 @@ AGENT_SYSTEM = """__PERSONA__
 
 ## Task Handling
 - Simple task: Just do it.
-- Complex task: Break down and confirm plan first.
-
-## Memory (Phase 2)
-- After finishing a multi-step task, propose 0-3 durable facts
-  with propose_memory — only facts that will still matter next
-  week, each with a verbatim evidence quote from a tool result
-  or the user's own words. Never cite your own reply as evidence.
-- Your own conclusions must be proposed as source_kind
-  "inference"; they stay unverified until real evidence confirms
-  them. Do not present a quarantined memory as fact."""
-
-
-# ── verbatim tool-error surfacing ─────────────────────────────────────────
-#
-# The owner reads the model's prose, and the model paraphrases tool
-# results — on 2026-11-19 it twice displayed a gate message that
-# exists in no version of the code, leaving the owner unable to tell
-# what the tool actually said. So an error result is ALSO surfaced
-# verbatim by the harness: the v2 stream emits a tool_error frame
-# carrying the tool's exact text, and the client renders it as its
-# own block. Records over reports, enforced by code, not by the
-# model's discipline.
-_TOOL_ERROR_CAP = 2000
-
-
-def _tool_error_text(result):
-    """The verbatim text to surface for an error tool result, else None.
-
-    A result qualifies when its first non-blank line starts with
-    "Error:" or "BLOCKED" — the shape every tool in this codebase
-    uses for failures (the shell gates included). Capped so a huge
-    error dump cannot flood the chat; the cap is marked, never
-    silently cut.
-    """
-    if not isinstance(result, str):
-        return None
-    text = result.strip()
-    if not text:
-        return None
-    first = text.split("\n", 1)[0].strip()
-    if not (first.startswith("Error:") or first.startswith("BLOCKED")):
-        return None
-    if len(text) > _TOOL_ERROR_CAP:
-        text = text[:_TOOL_ERROR_CAP] + "\n…(truncated)"
-    return text
+- Complex task: Break down and confirm plan first."""
 
 
 # ── answer verification (cloud only) ───────────────────────────────────────
@@ -607,15 +559,6 @@ class AgentMode:
         router falls back to the balanced default.
         """
         self._turn_user_text = user_text or ""
-        # Phase 2 memory gate — the owner's own words are evidence.
-        # Recorded here because every turn path (handle(), both SSE
-        # routes) funnels through begin_turn with the text.
-        if user_text and user_text.strip():
-            try:
-                from core import memorygate as _memorygate
-                _memorygate.record_evidence("owner", user_text)
-            except Exception:
-                pass
         self._turn_prompt = None
         self._turn_iter = 0
         self._turn_tools = []
@@ -664,27 +607,6 @@ class AgentMode:
             hint = self._budget_hint()
             if hint:
                 prompt = prompt + "\n\n" + hint
-            # Phase 1 skill gate — the learned-skills index rides along
-            # with the prompt for the same reason as the budget hint:
-            # one consistent list for the whole turn. Best-effort by
-            # design — a skills error must never break a turn.
-            try:
-                from core import skillgate as _skillgate
-                _skills_block = _skillgate.agent_index_block()
-            except Exception:
-                _skills_block = ""
-            if _skills_block:
-                prompt = prompt + "\n\n" + _skills_block
-            # Phase 2 memory gate — the verified long-term memory
-            # block rides along the same way. Best-effort: a memory
-            # error must never break a turn.
-            try:
-                from core import memorygate as _memorygate
-                _memory_block = _memorygate.agent_memory_block()
-            except Exception:
-                _memory_block = ""
-            if _memory_block:
-                prompt = prompt + "\n\n" + _memory_block
             self._turn_prompt = (prompt, tier)
             record_tier(tier, source)
             record_effort(effort, effort_source)
@@ -982,17 +904,7 @@ class AgentMode:
                             tool_name, ", ".join(markers))
                 text = (safety.INJECTION_BANNER_OPEN + "\n"
                         + text + "\n" + safety.INJECTION_BANNER_CLOSE)
-        guarded = self._redact_known_keys(safety.redact_secrets(text))
-        # Phase 2 memory gate — every tool result is potential
-        # evidence, recorded AFTER redaction so no secret can enter
-        # the evidence log, and identical to the text the agent
-        # itself sees (so its quotes can match).
-        try:
-            from core import memorygate as _memorygate
-            _memorygate.record_evidence("tool", guarded)
-        except Exception:
-            pass
-        return guarded
+        return self._redact_known_keys(safety.redact_secrets(text))
 
     def _redact_known_keys(self, text: str) -> str:
         """Mask every registered provider key still present in ``text``.
@@ -2856,9 +2768,6 @@ class AgentMode:
                     self._save_checkpoint()   # Release 19: before the yield
                     yield ("tool", {"name": name, "args": args,
                                     "result": r["result"]})
-                    _err = _tool_error_text(r["result"])
-                    if _err is not None:
-                        yield ("tool_error", {"name": name, "text": _err})
             else:
                 for tc in info["tool_calls"]:
                     # mirrors _handle_cloud at L708 — keep in sync on any change
@@ -2906,9 +2815,6 @@ class AgentMode:
                     self._save_checkpoint()   # Release 19: before the yield
                     yield ("tool", {"name": name, "args": args,
                                     "result": result})
-                    _err = _tool_error_text(result)
-                    if _err is not None:
-                        yield ("tool_error", {"name": name, "text": _err})
             # mirrors _handle_cloud at L736 — step = _step() for the next round
             info, round_text = (yield from _pump_round()) or (None, "")
         if not ended:
