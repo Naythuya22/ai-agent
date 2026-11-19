@@ -183,6 +183,26 @@ class SkillGateCase(unittest.TestCase):
         self.assertEqual(st["uses"]["apk-sort"]["worked"], 1)
         self.assertEqual(st["uses"]["apk-sort"]["failed"], 0)
 
+    def test_outcome_string_false_records_failure(self):
+        # Regression (2026-11-19, found by the first real exercise):
+        # the tool layer passed worked as the STRING "False" and
+        # bool("False") is True — a failed use was recorded as worked.
+        skills_agent.skill_outcome("apk-sort", "False", "shell blocked")
+        st = skillgate.status()
+        self.assertEqual(st["uses"]["apk-sort"]["worked"], 0)
+        self.assertEqual(st["uses"]["apk-sort"]["failed"], 1)
+
+    def test_outcome_string_true_records_worked(self):
+        skills_agent.skill_outcome("apk-sort", "true", "")
+        st = skillgate.status()
+        self.assertEqual(st["uses"]["apk-sort"]["worked"], 1)
+
+    def test_outcome_garbage_records_nothing(self):
+        msg = skills_agent.skill_outcome("apk-sort", "maybe", "")
+        self.assertIn("Not recorded", msg)
+        st = skillgate.status()
+        self.assertNotIn("apk-sort", st["uses"])
+
     def test_use_missing_skill_is_a_message_not_a_crash(self):
         text = skills_agent.use_skill("ghost", "x")
         self.assertIn("No live skill", text)

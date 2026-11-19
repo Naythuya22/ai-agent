@@ -70,6 +70,28 @@ def use_skill(name: str, args: str = "") -> str:
             + _skills.render(sk, args))
 
 
+def _parse_worked(value) -> bool | None:
+    """Parse the worked flag robustly.
+
+    Tool-call arguments sometimes arrive as strings ("False"), and
+    bool("False") is True in Python — trusting the type silently
+    recorded a failed skill use as a success on 2026-11-19. Accept
+    real booleans, numbers, and the common string spellings; anything
+    else returns None so the caller can refuse to record.
+    """
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        v = value.strip().lower()
+        if v in ("true", "yes", "1", "ok", "worked"):
+            return True
+        if v in ("false", "no", "0", "fail", "failed"):
+            return False
+    return None
+
+
 def skill_outcome(name: str, worked: bool, note: str = "") -> str:
     """Report whether a skill you used actually worked.
 
@@ -82,7 +104,12 @@ def skill_outcome(name: str, worked: bool, note: str = "") -> str:
         worked: True if following the skill led to a good result.
         note: one short line about what happened.
     """
-    skillgate.record_outcome(name, bool(worked), note)
+    parsed = _parse_worked(worked)
+    if parsed is None:
+        return ("Not recorded: 'worked' must be true or false "
+                f"(got {worked!r}). Call skill_outcome again with a "
+                "clear true/false.")
+    skillgate.record_outcome(name, parsed, note)
     return (f"Recorded: skill '{name}' "
             f"{'worked' if worked else 'did not work'}.")
 
